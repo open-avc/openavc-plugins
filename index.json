@@ -1,0 +1,23 @@
+{
+    "schema_version": "1.0.0",
+    "updated": "2026-03-23",
+    "plugins": [
+        {
+            "id": "streamdeck",
+            "name": "Elgato Stream Deck",
+            "file": "control_surfaces/streamdeck/streamdeck_plugin.py",
+            "format": "python",
+            "category": "control_surface",
+            "manufacturer": "Elgato",
+            "version": "1.0.0",
+            "author": "OpenAVC",
+            "license": "MIT",
+            "platforms": ["win_x64", "linux_x64", "linux_arm64"],
+            "min_openavc_version": "1.0.0",
+            "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe", "macro_execute", "device_command", "usb_access"],
+            "has_native_dependencies": true,
+            "verified": true,
+            "description": "Use Elgato Stream Deck hardware as a physical control surface."
+        }
+    ]
+}

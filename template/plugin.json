@@ -1,0 +1,13 @@
+{
+    "id": "my_plugin",
+    "name": "My Plugin",
+    "version": "0.1.0",
+    "author": "Your Name",
+    "description": "One-line description of what this plugin does.",
+    "category": "utility",
+    "license": "MIT",
+    "platforms": ["all"],
+    "capabilities": ["state_read", "state_write", "event_emit"],
+    "dependencies": [],
+    "min_openavc_version": "1.0.0"
+}
