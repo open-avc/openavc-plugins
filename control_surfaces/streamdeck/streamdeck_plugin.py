@@ -8,6 +8,7 @@ Supported models: Neo, Mini, MK.2/Original V2, XL, Plus, Pedal.
 """
 
 import asyncio
+import json
 import os
 import platform as platform_mod
 from pathlib import Path
@@ -207,6 +208,17 @@ class StreamDeckPlugin:
         "max_pages": 10,
     }
 
+    AI_GUIDE = (
+        "The default SURFACE_LAYOUT is for the Neo (2x4). The actual layout is "
+        "detected from hardware at runtime. Button indices go left-to-right, "
+        "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
+        "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
+        "Common AV icons: power, volume-2, volume-x, play, pause, square (stop), "
+        "skip-back, skip-forward, mic, mic-off, monitor, tv, sun, moon, "
+        "thermometer, fan, camera, video, airplay, cast. "
+        "Always set a label OR icon (or both) so the button isn't blank."
+    )
+
     EXTENSIONS = {
         "status_cards": [
             {
@@ -265,6 +277,9 @@ class StreamDeckPlugin:
         self._model_info = None
         self._hold_tasks = {}    # key_index -> periodic task ID for hold-repeat
         self._press_times = {}   # key_index -> timestamp for tap/hold mode
+        self._icon_font = None   # Loaded Lucide TTF font for icon rendering
+        self._icon_map = {}      # icon-name -> unicode code point
+        self._icon_cache = {}    # (icon_name, size, color_hex) -> PIL Image
 
     async def start(self, api):
         """Initialize and connect to the Stream Deck."""
@@ -283,6 +298,9 @@ class StreamDeckPlugin:
             if "hidapi" in str(e).lower() or "hid" in str(e).lower():
                 self._log_hidapi_help()
             raise
+
+        # Load Lucide icon font for button icon rendering
+        self._load_icon_font()
 
         # Set initial state
         await self.api.state_set("connected", False)
@@ -544,14 +562,20 @@ class StreamDeckPlugin:
 
         assignment = self._get_button_assignment(self.current_page, key_index)
 
-        default_bg = self.api.config.get("button_color", "#1a1a2e")
-        default_text = self.api.config.get("text_color", "#e0e0e0")
+        global_bg = self.api.config.get("button_color", "#1a1a2e")
+        global_text = self.api.config.get("text_color", "#e0e0e0")
         label = ""
-        bg_color = default_bg
-        text_color = default_text
+        icon = None
+        bg_color = global_bg
+        text_color = global_text
 
         if assignment:
             label = assignment.get("label", "")
+            icon = assignment.get("icon") or None
+
+            # Per-button default colors (override global defaults)
+            bg_color = assignment.get("bg_color") or global_bg
+            text_color = assignment.get("text_color") or global_text
 
             # Toggle mode: on_label/off_label override static label
             bindings = assignment.get("bindings", {})
@@ -589,26 +613,41 @@ class StreamDeckPlugin:
 
                 if fk:
                     value = await self.api.state_get(fk)
-                    expected = condition.get("equals") if isinstance(condition, dict) else None
-                    # Loose comparison (same as web UI panel)
-                    is_active = (str(value).lower() == str(expected).lower()) if expected is not None else bool(value)
 
-                    if is_active and isinstance(style_active, dict):
-                        bg_color = style_active.get("bg_color", bg_color)
-                        text_color = style_active.get("text_color", text_color)
-                        # Conditional label (overrides static label)
-                        active_label = feedback.get("label_active", "")
-                        if active_label:
-                            label = active_label
-                    elif not is_active and isinstance(style_inactive, dict):
-                        bg_color = style_inactive.get("bg_color", bg_color) or default_bg
-                        text_color = style_inactive.get("text_color", text_color) or default_text
-                        inactive_label = feedback.get("label_inactive", "")
-                        if inactive_label:
-                            label = inactive_label
+                    # Multi-state feedback
+                    states = feedback.get("states")
+                    if states and isinstance(states, dict):
+                        state_str = str(value) if value is not None else ""
+                        appearance = states.get(state_str) or states.get(feedback.get("default_state", ""))
+                        if appearance and isinstance(appearance, dict):
+                            bg_color = appearance.get("bg_color", bg_color) or bg_color
+                            text_color = appearance.get("text_color", text_color) or text_color
+                            if appearance.get("label"):
+                                label = appearance["label"]
+                            if appearance.get("icon"):
+                                icon = appearance["icon"]
+                    else:
+                        # Simple active/inactive feedback
+                        expected = condition.get("equals") if isinstance(condition, dict) else None
+                        is_active = (str(value).lower() == str(expected).lower()) if expected is not None else bool(value)
+
+                        if is_active and isinstance(style_active, dict):
+                            bg_color = style_active.get("bg_color", bg_color) or bg_color
+                            text_color = style_active.get("text_color", text_color) or text_color
+                            if feedback.get("label_active"):
+                                label = feedback["label_active"]
+                            if style_active.get("icon"):
+                                icon = style_active["icon"]
+                        elif not is_active and isinstance(style_inactive, dict):
+                            bg_color = style_inactive.get("bg_color", bg_color) or bg_color
+                            text_color = style_inactive.get("text_color", text_color) or text_color
+                            if feedback.get("label_inactive"):
+                                label = feedback["label_inactive"]
+                            if style_inactive.get("icon"):
+                                icon = style_inactive["icon"]
 
         # Generate the button image
-        image = self._create_button_image(label, bg_color, text_color)
+        image = self._create_button_image(label, bg_color, text_color, icon)
 
         # Set it on the deck (thread-safe via context manager)
         try:
@@ -618,25 +657,51 @@ class StreamDeckPlugin:
         except Exception as e:
             self.api.log(f"Error setting key {key_index} image: {e}", level="debug")
 
-    def _create_button_image(self, label, bg_color, text_color):
-        """Create a PIL image for a button."""
-        # Get the image size the deck expects
+    def _create_button_image(self, label, bg_color, text_color, icon_name=None):
+        """Create a PIL image for a button with optional icon and label."""
         image_format = self.deck.key_image_format()
         width = image_format["size"][0]
         height = image_format["size"][1]
 
-        # Create image with background color
         img = Image.new("RGB", (width, height), bg_color)
+        draw = ImageDraw.Draw(img)
 
-        if label:
-            draw = ImageDraw.Draw(img)
-            # Use a simple built-in font, scaled to fit
+        # Load icon image if specified
+        icon_img = self._render_icon(icon_name, text_color, width) if icon_name else None
+
+        if icon_img and label:
+            # Icon above label
+            icon_size = min(width, height) // 2
+            icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
+            icon_x = (width - icon_size) // 2
+            icon_y = max(4, (height // 2) - icon_size + 4)
+            img.paste(icon_img, (icon_x, icon_y), icon_img)
+
+            # Label below icon
+            try:
+                font = ImageFont.truetype("arial.ttf", 12)
+            except (IOError, OSError):
+                font = ImageFont.load_default()
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_x = (width - text_w) // 2
+            text_y = icon_y + icon_size + 2
+            draw.text((text_x, text_y), label, fill=text_color, font=font)
+
+        elif icon_img:
+            # Icon only, centered
+            icon_size = int(min(width, height) * 0.6)
+            icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
+            icon_x = (width - icon_size) // 2
+            icon_y = (height - icon_size) // 2
+            img.paste(icon_img, (icon_x, icon_y), icon_img)
+
+        elif label:
+            # Label only, centered
             try:
                 font = ImageFont.truetype("arial.ttf", 14)
             except (IOError, OSError):
                 font = ImageFont.load_default()
-
-            # Center the text
             bbox = draw.textbbox((0, 0), label, font=font)
             text_w = bbox[2] - bbox[0]
             text_h = bbox[3] - bbox[1]
@@ -646,22 +711,124 @@ class StreamDeckPlugin:
 
         return img
 
+    # ──── Icon Rendering ────
+
+    def _load_icon_font(self):
+        """Load the bundled Lucide icon font and code point map."""
+        fonts_dir = Path(__file__).parent / "fonts"
+        ttf_path = fonts_dir / "lucide.ttf"
+        info_path = fonts_dir / "lucide-info.json"
+
+        if not ttf_path.exists():
+            self.api.log("Lucide icon font not found, icons will not render", level="warning")
+            return
+
+        try:
+            with open(info_path, "r", encoding="utf-8") as f:
+                info = json.load(f)
+            # Build name -> unicode char map
+            # encodedCode values are like "\e589" — a backslash followed by
+            # the full hex code point. Skip only the leading backslash.
+            for name, data in info.items():
+                encoded = data.get("encodedCode", "")
+                if encoded.startswith("\\"):
+                    code_point = int(encoded[1:], 16)
+                    self._icon_map[name] = chr(code_point)
+            self.api.log(f"Loaded {len(self._icon_map)} icon glyphs", level="debug")
+        except Exception as e:
+            self.api.log(f"Failed to load icon map: {e}", level="warning")
+
+        self._icon_font_path = str(ttf_path)
+
+    def _render_icon(self, icon_name, color, button_size):
+        """Render an icon as an RGBA PIL Image.
+
+        Supports:
+          - Lucide icon names (rendered from the bundled TTF font)
+          - asset:// references (loaded from project assets directory)
+          - File paths to PNG/JPG images
+        """
+        if not icon_name:
+            return None
+
+        # Asset reference — load image file
+        if icon_name.startswith("asset://"):
+            return self._load_asset_icon(icon_name[8:], button_size)
+
+        # Lucide icon — render from font
+        return self._render_lucide_icon(icon_name, color, button_size)
+
+    def _render_lucide_icon(self, icon_name, color, button_size):
+        """Render a Lucide icon glyph to an RGBA image."""
+        if not self._icon_map or not hasattr(self, "_icon_font_path"):
+            return None
+
+        char = self._icon_map.get(icon_name)
+        if not char:
+            return None
+
+        # Check cache
+        icon_size = int(button_size * 0.6)
+        cache_key = (icon_name, icon_size, color)
+        cached = self._icon_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        try:
+            font = ImageFont.truetype(self._icon_font_path, icon_size)
+            # Render glyph onto transparent image
+            img = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            # Measure and center the glyph
+            bbox = draw.textbbox((0, 0), char, font=font)
+            glyph_w = bbox[2] - bbox[0]
+            glyph_h = bbox[3] - bbox[1]
+            x = (icon_size - glyph_w) // 2 - bbox[0]
+            y = (icon_size - glyph_h) // 2 - bbox[1]
+            draw.text((x, y), char, fill=color, font=font)
+
+            self._icon_cache[cache_key] = img.copy()
+            return img
+        except Exception as e:
+            self.api.log(f"Failed to render icon '{icon_name}': {e}", level="debug")
+            return None
+
+    def _load_asset_icon(self, filename, button_size):
+        """Load a custom icon from the project assets directory."""
+        try:
+            # Assets are stored relative to the project directory
+            # The plugin API provides the project path via config
+            assets_dir = Path(self.api.config.get("_project_dir", "")) / "assets"
+            icon_path = assets_dir / filename
+            if not icon_path.exists():
+                return None
+            icon = Image.open(icon_path).convert("RGBA")
+            return icon
+        except Exception as e:
+            self.api.log(f"Failed to load asset icon '{filename}': {e}", level="debug")
+            return None
+
     # ──── State Feedback ────
 
     async def _setup_feedback_subscriptions(self):
-        """Subscribe to state keys referenced by button feedback bindings."""
+        """Subscribe to state keys referenced by button feedback and toggle bindings."""
         buttons = self.api.config.get("buttons", [])
         feedback_keys = set()
 
         for btn in buttons:
             if not isinstance(btn, dict):
                 continue
-            # New format: bindings.feedback.key
             bindings = btn.get("bindings", {})
             if isinstance(bindings, dict):
+                # Feedback key
                 feedback = bindings.get("feedback", {})
                 if isinstance(feedback, dict) and feedback.get("key"):
                     feedback_keys.add(feedback["key"])
+                # Toggle key (for label/icon updates on toggle state change)
+                press = bindings.get("press", {})
+                if isinstance(press, dict) and press.get("toggle_key"):
+                    feedback_keys.add(press["toggle_key"])
             # Legacy format
             fk = btn.get("feedback_key")
             if fk:
@@ -685,16 +852,19 @@ class StreamDeckPlugin:
 
             # Check new bindings format
             bindings = btn.get("bindings", {})
-            fk = None
+            matched = False
             if isinstance(bindings, dict):
                 feedback = bindings.get("feedback", {})
-                if isinstance(feedback, dict):
-                    fk = feedback.get("key")
+                if isinstance(feedback, dict) and feedback.get("key") == key:
+                    matched = True
+                press = bindings.get("press", {})
+                if isinstance(press, dict) and press.get("toggle_key") == key:
+                    matched = True
             # Legacy
-            if not fk:
-                fk = btn.get("feedback_key")
+            if not matched and btn.get("feedback_key") == key:
+                matched = True
 
-            if fk == key:
+            if matched:
                 key_index = btn.get("index")
                 if key_index is not None:
                     await self._render_button(key_index)
