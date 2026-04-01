@@ -5,8 +5,8 @@
         {
             "id": "streamdeck",
             "name": "Elgato Stream Deck",
-            "file": "control_surfaces/streamdeck/streamdeck_plugin.py",
-            "format": "python",
+            "file": "control_surfaces/streamdeck",
+            "format": "directory",
             "category": "control_surface",
             "manufacturer": "Elgato",
             "version": "1.0.0",
