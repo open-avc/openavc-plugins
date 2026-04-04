@@ -9,7 +9,6 @@ Requires: httpx (MIT license, async HTTP client)
 """
 
 import asyncio
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -94,22 +93,45 @@ CONFIG_SCHEMA = {
         },
     },
     "presets": {
-        "type": "string",
+        "type": "mapping_list",
         "label": "Routing presets",
         "description": (
-            "Define named routing snapshots. JSON format:\n"
-            '{"Meeting": [{"tx_device": "MIC-01", "tx_channel": "01", '
-            '"rx_device": "AMP-01", "rx_channel_index": 1}], '
-            '"Clear All": []}\n\n'
-            "Recalling a preset applies exactly the routes listed and clears "
-            "all others. An empty array clears all subscriptions.\n"
-            "tx_device / tx_channel: device and channel names as shown in "
-            "Dante Controller.\n"
-            "rx_device: receiver device name. "
-            "rx_channel_index: receiver channel number (1, 2, 3...)."
+            "Define named routing snapshots. Rows with the same preset name "
+            "are grouped into one preset. Recalling a preset applies exactly "
+            "the listed routes and clears all others."
         ),
-        "default": "",
-        "placeholder": '{"Preset 1": [{"tx_device": "...", "tx_channel": "...", "rx_device": "...", "rx_channel_index": 1}]}',
+        "item_schema": {
+            "preset_name": {
+                "type": "string",
+                "label": "Preset",
+                "required": True,
+                "placeholder": "Meeting",
+            },
+            "tx_device": {
+                "type": "string",
+                "label": "Tx Device",
+                "required": True,
+                "placeholder": "MIC-01",
+            },
+            "tx_channel": {
+                "type": "string",
+                "label": "Tx Channel",
+                "required": True,
+                "placeholder": "01",
+            },
+            "rx_device": {
+                "type": "string",
+                "label": "Rx Device",
+                "required": True,
+                "placeholder": "AMP-01",
+            },
+            "rx_channel_index": {
+                "type": "integer",
+                "label": "Rx Ch #",
+                "required": True,
+                "min": 1,
+            },
+        },
     },
 }
 
@@ -158,6 +180,13 @@ EXTENSIONS = {
             "context": "global",
             "event": "action.recall_preset",
         },
+        {
+            "id": "clear_all",
+            "label": "Clear All Subscriptions",
+            "icon": "x-circle",
+            "context": "global",
+            "event": "action.clear_all",
+        },
     ],
 }
 
@@ -205,20 +234,13 @@ Professional instance to provide audio network routing control.
 
 ## Routing Presets
 
-Define presets in the plugin config as JSON. Each preset is a named list of
-subscriptions. Use "Recall Routing Preset" context action to apply one.
+Add presets in the Routing Presets table. Each row has a preset name and a route
+(Tx device + channel -> Rx device + channel). Rows with the same preset name are
+grouped into one preset.
 
-Recalling a preset applies exactly the listed routes and clears all others.
-An empty preset clears all subscriptions.
-
-Example config:
-{
-  "Meeting": [
-    {"tx_device": "MIC-01", "tx_channel": "01", "rx_device": "AMP-01", "rx_channel_index": 1},
-    {"tx_device": "MIC-01", "tx_channel": "02", "rx_device": "AMP-01", "rx_channel_index": 2}
-  ],
-  "Clear All": []
-}
+Use "Recall Routing Preset" to apply a preset. This clears all existing routes
+first, then applies the preset's routes. Use "Clear All Subscriptions" to remove
+all routes without applying a preset.
 
 ## Macros / Triggers
 
@@ -793,19 +815,20 @@ class DanteDDMPlugin:
     # ──── Preset Recall ────
 
     def _parse_presets(self) -> dict[str, list[dict]]:
-        """Parse routing presets from config."""
-        raw = self.api.config.get("presets", "").strip()
-        if not raw:
+        """Parse routing presets from config. Groups rows by preset_name."""
+        raw = self.api.config.get("presets", [])
+        if not isinstance(raw, list):
             return {}
-        try:
-            presets = json.loads(raw)
-            if not isinstance(presets, dict):
-                self.api.log("Presets config must be a JSON object", level="error")
-                return {}
-            return presets
-        except json.JSONDecodeError as e:
-            self.api.log(f"Failed to parse presets: {e}", level="error")
-            return {}
+        presets: dict[str, list[dict]] = {}
+        for row in raw:
+            name = row.get("preset_name", "").strip()
+            if not name:
+                continue
+            if name not in presets:
+                presets[name] = []
+            if row.get("rx_device") and row.get("tx_device"):
+                presets[name].append(row)
+        return presets
 
     async def recall_preset(self, preset_name: str) -> bool:
         """Apply a named routing preset.
@@ -856,8 +879,9 @@ class DanteDDMPlugin:
 
             subs = []
             for r in device_routes:
+                rx_idx = r.get("rx_channel_index", 0)
                 subs.append({
-                    "rxChannelIndex": int(r.get("rx_channel_index", r.get("rx_channel", 0))),
+                    "rxChannelIndex": int(rx_idx) if rx_idx else 0,
                     "subscribedDevice": r.get("tx_device", ""),
                     "subscribedChannel": r.get("tx_channel", ""),
                 })
@@ -930,6 +954,8 @@ class DanteDDMPlugin:
                     self.api.log("No presets configured", level="warning")
                 return
             await self.recall_preset(preset_name)
+        elif action == "clear_all":
+            await self._clear_all_subscriptions()
         elif action == "route":
             await self._handle_route_action(payload or {})
         elif action == "unroute":

@@ -102,19 +102,32 @@ CONFIG_SCHEMA = {
         "default": True,
     },
     "mappings": {
-        "type": "string",
+        "type": "mapping_list",
         "label": "State mappings",
-        "description": (
-            "One mapping per line: state_key:direction\n"
-            "Directions: in (MQTT->OpenAVC), out (OpenAVC->MQTT), both.\n"
-            "Example:\n"
-            "  device.projector.power:both\n"
-            "  var.room_mode:out\n"
-            "  device.switcher.input:in\n"
-            "Leave blank to bridge nothing (you can add mappings later)."
-        ),
-        "default": "",
-        "placeholder": "device.projector.power:both\nvar.room_mode:out",
+        "description": "Map OpenAVC state keys to MQTT topics.",
+        "item_schema": {
+            "state_key": {
+                "type": "state_key",
+                "label": "State Key",
+                "required": True,
+                "placeholder": "device.projector.power",
+            },
+            "direction": {
+                "type": "select",
+                "label": "Direction",
+                "options": [
+                    {"value": "in", "label": "MQTT \u2192 OpenAVC"},
+                    {"value": "out", "label": "OpenAVC \u2192 MQTT"},
+                    {"value": "both", "label": "Bidirectional"},
+                ],
+                "default": "both",
+            },
+            "topic": {
+                "type": "string",
+                "label": "Topic Override",
+                "placeholder": "auto from state key",
+            },
+        },
     },
 }
 
@@ -155,58 +168,27 @@ in the plugin config. The topic_prefix is prepended to all MQTT topics.
 
 ## State Mappings
 
-Mappings are configured in the "mappings" config field, one per line:
-  state_key:direction
+Add mappings in the State Mappings table. Each row has:
+- State Key: the OpenAVC state key to bridge (e.g. device.projector.power)
+- Direction: "in" (MQTT to OpenAVC), "out" (OpenAVC to MQTT), or "both"
+- Topic Override: optional custom MQTT topic (leave blank to auto-generate)
 
-Directions:
-- "in"   — Subscribe to MQTT topic, write value to OpenAVC state
-- "out"  — Watch OpenAVC state, publish changes to MQTT
-- "both" — Bidirectional sync
+By default, the MQTT topic is derived from the state key by replacing dots with
+slashes and prepending the topic prefix. For example, with prefix "openavc":
+  device.projector.power -> openavc/device/projector/power
 
-The MQTT topic is derived from the state key by replacing dots with slashes
-and prepending the topic prefix. For example, with prefix "openavc":
-  device.projector.power → openavc/device/projector/power
-
-## Examples
-
-To bridge projector power and room mode:
-  device.projector.power:both
-  var.room_mode:out
-
-To subscribe to external sensor data:
-  plugin.mqtt.temperature:in
+Set a Topic Override to use a custom topic instead of the auto-generated one.
 
 ## MQTT Topics
 
 Inbound messages are parsed as follows:
-- "true"/"false"/"on"/"off" → boolean
-- Numeric strings → int or float
-- JSON strings → parsed, but only the top-level value is used (must be a primitive)
-- Everything else → string
+- "true"/"false"/"on"/"off" -> boolean
+- Numeric strings -> int or float
+- JSON strings -> parsed, but only the top-level value is used (must be a primitive)
+- Everything else -> string
 
 Outbound messages publish the state value as a string.
 """
-
-
-def _parse_mappings(raw: str) -> list[dict]:
-    """Parse the mappings config string into a list of mapping dicts."""
-    mappings = []
-    for line in raw.strip().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(":")
-        if len(parts) < 2:
-            continue
-        # Rejoin in case state key has colons (unlikely but safe)
-        direction = parts[-1].strip().lower()
-        state_key = ":".join(parts[:-1]).strip()
-        if direction not in ("in", "out", "both"):
-            continue
-        if not state_key:
-            continue
-        mappings.append({"state_key": state_key, "direction": direction})
-    return mappings
 
 
 def _state_key_to_topic(prefix: str, state_key: str) -> str:
@@ -274,15 +256,18 @@ class MQTTBridgePlugin:
         self.api = api
         cfg = api.config
 
-        # Parse mappings
-        raw_mappings = cfg.get("mappings", "")
-        self._mappings = _parse_mappings(raw_mappings)
+        # Parse mappings (structured list from mapping_list config field)
+        self._mappings = [
+            m for m in cfg.get("mappings", [])
+            if m.get("state_key") and m.get("direction") in ("in", "out", "both")
+        ]
         prefix = cfg.get("topic_prefix", "openavc")
 
         # Build lookup tables
         for m in self._mappings:
             key = m["state_key"]
-            topic = _state_key_to_topic(prefix, key)
+            override = (m.get("topic") or "").strip()
+            topic = override if override else _state_key_to_topic(prefix, key)
             direction = m["direction"]
 
             self._topic_to_key[topic] = key

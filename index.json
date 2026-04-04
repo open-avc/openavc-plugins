@@ -32,7 +32,7 @@
             "min_openavc_version": "0.3.0",
             "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe"],
             "has_native_dependencies": false,
-            "verified": true,
+            "verified": false,
             "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration."
         },
         {
@@ -48,7 +48,7 @@
             "min_openavc_version": "0.3.0",
             "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe"],
             "has_native_dependencies": false,
-            "verified": true,
+            "verified": false,
             "description": "Audio routing via Dante Domain Manager or Dante Director Professional."
         }
     ]

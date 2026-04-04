@@ -11,7 +11,6 @@ Run from the openavc-plugins root: pytest tests/ -v
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -102,23 +101,22 @@ SAMPLE_CONFIG = {
     "verify_tls": False,
     "domain_id": "domain-1",
     "poll_interval": 60,  # Long interval so polling doesn't interfere with tests
-    "presets": json.dumps({
-        "Meeting": [
-            {
-                "tx_device": "MIC-01",
-                "tx_channel": "01",
-                "rx_device": "AMP-01",
-                "rx_channel_index": 1,
-            },
-            {
-                "tx_device": "MIC-01",
-                "tx_channel": "02",
-                "rx_device": "AMP-01",
-                "rx_channel_index": 2,
-            },
-        ],
-        "Clear All": [],
-    }),
+    "presets": [
+        {
+            "preset_name": "Meeting",
+            "tx_device": "MIC-01",
+            "tx_channel": "01",
+            "rx_device": "AMP-01",
+            "rx_channel_index": 1,
+        },
+        {
+            "preset_name": "Meeting",
+            "tx_device": "MIC-01",
+            "tx_channel": "02",
+            "rx_device": "AMP-01",
+            "rx_channel_index": 2,
+        },
+    ],
 }
 
 
@@ -417,7 +415,7 @@ async def test_preset_not_found():
 
 @pytest.mark.asyncio
 async def test_clear_all_subscriptions():
-    """Empty preset clears all active subscriptions."""
+    """clear_all action clears all active subscriptions."""
     harness = PluginTestHarness()
     plugin = DanteDDMPlugin()
     plugin.api = (await harness.start_plugin(plugin, config=SAMPLE_CONFIG))
@@ -447,7 +445,7 @@ async def test_clear_all_subscriptions():
 
     plugin._set_subscriptions_batch = AsyncMock(return_value=True)
 
-    result = await plugin.recall_preset("Clear All")
+    result = await plugin._clear_all_subscriptions()
     assert result is True
 
     # Only channel 1 had an active subscription, so batch should have 1 unsub
@@ -599,16 +597,15 @@ async def test_stop_cleanup():
 
 @pytest.mark.asyncio
 async def test_parse_presets_valid():
-    """_parse_presets returns parsed dict from valid JSON."""
+    """_parse_presets groups structured rows by preset_name."""
     harness = PluginTestHarness()
     plugin = DanteDDMPlugin()
     plugin.api = (await harness.start_plugin(plugin, config=SAMPLE_CONFIG))
 
     presets = plugin._parse_presets()
     assert "Meeting" in presets
-    assert "Clear All" in presets
     assert len(presets["Meeting"]) == 2
-    assert presets["Clear All"] == []
+    assert presets["Meeting"][0]["tx_device"] == "MIC-01"
 
     await harness.stop_plugin(plugin)
 
@@ -621,31 +618,12 @@ async def test_parse_presets_empty():
     plugin.api = (await harness.start_plugin(plugin, config={
         "ddm_url": "",
         "api_key": "",
-        "presets": "",
+        "presets": [],
         "poll_interval": 9999,
     }))
 
     presets = plugin._parse_presets()
     assert presets == {}
-
-    await harness.stop_plugin(plugin)
-
-
-@pytest.mark.asyncio
-async def test_parse_presets_invalid_json():
-    """_parse_presets returns empty dict and logs error on bad JSON."""
-    harness = PluginTestHarness()
-    plugin = DanteDDMPlugin()
-    plugin.api = (await harness.start_plugin(plugin, config={
-        "ddm_url": "",
-        "api_key": "",
-        "presets": "not valid json{",
-        "poll_interval": 9999,
-    }))
-
-    presets = plugin._parse_presets()
-    assert presets == {}
-    assert harness.log_contains("Failed to parse presets")
 
     await harness.stop_plugin(plugin)
 
