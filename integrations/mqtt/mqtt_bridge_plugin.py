@@ -254,6 +254,11 @@ def _parse_mqtt_value(payload: str):
 
 
 class MQTTBridgePlugin:
+    PLUGIN_INFO = PLUGIN_INFO
+    CONFIG_SCHEMA = CONFIG_SCHEMA
+    EXTENSIONS = EXTENSIONS
+    AI_GUIDE = AI_GUIDE
+
     def __init__(self):
         self.api = None
         self._client = None
