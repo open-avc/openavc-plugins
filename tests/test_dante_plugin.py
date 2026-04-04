@@ -3,7 +3,8 @@ Tests for the Dante DDM plugin.
 
 Covers: connection lifecycle, device discovery / state mapping, routing
 mutations, preset recall, reconnection scheduling, event handling,
-health check, and matrix cell click resolution.
+health check, matrix cell click resolution, stale key cleanup,
+and poll failure tolerance.
 
 Requires the openavc repo as a sibling directory (for PluginTestHarness).
 Run from the openavc-plugins root: pytest tests/ -v
@@ -96,7 +97,7 @@ SAMPLE_DOMAINS_RESPONSE = {
 }
 
 SAMPLE_CONFIG = {
-    "ddm_url": "https://ddm.local:8089/graphql",
+    "ddm_url": "https://ddm.local/graphql",
     "api_key": "test-api-key",
     "verify_tls": False,
     "domain_id": "domain-1",
@@ -348,7 +349,7 @@ async def test_unroute_success():
 
 @pytest.mark.asyncio
 async def test_preset_recall():
-    """recall_preset groups routes by Rx device and calls batch mutation."""
+    """recall_preset clears existing routes then applies preset routes."""
     harness = PluginTestHarness()
     plugin = DanteDDMPlugin()
     plugin.api = (await harness.start_plugin(plugin, config=SAMPLE_CONFIG))
@@ -358,13 +359,25 @@ async def test_preset_recall():
             "id": "dev-002",
             "name": "AMP-01",
             "rxChannels": [
-                {"id": "rx-1", "index": 1, "name": "01"},
-                {"id": "rx-2", "index": 2, "name": "02"},
+                {
+                    "id": "rx-1",
+                    "index": 1,
+                    "name": "01",
+                    "subscribedDevice": "OLD-SRC",
+                    "subscribedChannel": "01",
+                },
+                {"id": "rx-2", "index": 2, "name": "02",
+                 "subscribedDevice": "", "subscribedChannel": ""},
             ],
         }
     }
 
-    plugin._set_subscriptions_batch = AsyncMock(return_value=True)
+    batch_calls = []
+    async def mock_batch(device_id, subs):
+        batch_calls.append((device_id, subs))
+        return True
+
+    plugin._set_subscriptions_batch = mock_batch
 
     events = []
     await plugin.api.event_subscribe("plugin.dante.preset.*", lambda e, p: events.append((e, p)))
@@ -372,11 +385,16 @@ async def test_preset_recall():
     result = await plugin.recall_preset("Meeting")
     assert result is True
 
-    # Should have called batch once for AMP-01 with 2 subscriptions
-    plugin._set_subscriptions_batch.assert_called_once()
-    call_args = plugin._set_subscriptions_batch.call_args
-    assert call_args[0][0] == "dev-002"  # device ID
-    assert len(call_args[0][1]) == 2  # 2 subscriptions
+    # First call should be the clear (OLD-SRC on ch1)
+    assert len(batch_calls) >= 2
+    clear_call = batch_calls[0]
+    assert clear_call[0] == "dev-002"
+    assert clear_call[1][0]["subscribedDevice"] == ""
+
+    # Second call should be the preset routes
+    preset_call = batch_calls[1]
+    assert preset_call[0] == "dev-002"
+    assert len(preset_call[1]) == 2
 
     await asyncio.sleep(0.05)
     assert any("preset.recalled" in e for e, _ in events)
@@ -474,7 +492,7 @@ async def test_graphql_error_handling():
 
 @pytest.mark.asyncio
 async def test_graphql_network_error():
-    """_graphql returns None on network exceptions."""
+    """_graphql raises on network exceptions (not swallowed)."""
     harness = PluginTestHarness()
     plugin = DanteDDMPlugin()
     plugin.api = (await harness.start_plugin(plugin, config={
@@ -487,8 +505,8 @@ async def test_graphql_network_error():
     mock_client.post = AsyncMock(side_effect=ConnectionError("timeout"))
     plugin._client = mock_client
 
-    result = await plugin._graphql("query { domains { id } }")
-    assert result is None
+    with pytest.raises(ConnectionError):
+        await plugin._graphql("query { domains { id } }")
 
     await harness.stop_plugin(plugin)
 
@@ -565,6 +583,7 @@ async def test_stop_cleanup():
     plugin._domain_id = "domain-1"
     plugin._domain_name = "Test"
     plugin._devices = {"dev-1": {"name": "X"}}
+    plugin._state_keys = {"tx.x.1", "rx.y.1"}
     plugin._client = AsyncMock()
     plugin.api = MagicMock()
     plugin.api.log = MagicMock()
@@ -574,6 +593,7 @@ async def test_stop_cleanup():
     assert plugin._connected is False
     assert plugin._domain_id is None
     assert plugin._devices == {}
+    assert plugin._state_keys == set()
     assert plugin._client is None
 
 
@@ -661,8 +681,8 @@ async def test_devices_updated_event():
 
 
 @pytest.mark.asyncio
-async def test_refresh_state_connection_error():
-    """_refresh_state raises when GraphQL returns None."""
+async def test_graphql_error_no_disconnect():
+    """GraphQL errors during refresh don't count as connection failures."""
     harness = PluginTestHarness()
     plugin = DanteDDMPlugin()
     plugin.api = (await harness.start_plugin(plugin, config={
@@ -671,9 +691,235 @@ async def test_refresh_state_connection_error():
         "poll_interval": 9999,
     }))
     plugin._domain_id = "domain-1"
+    plugin._connected = True
+
+    # _graphql returns None (GraphQL error, not network error)
     plugin._graphql = AsyncMock(return_value=None)
 
-    with pytest.raises(ConnectionError):
-        await plugin._refresh_state()
+    # Should return silently, not raise
+    await plugin._refresh_state()
+
+    # Connection should still be intact
+    assert plugin._connected is True
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_stale_keys_cleaned_up():
+    """State keys from disappeared devices are set to None."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "",
+        "api_key": "",
+        "poll_interval": 9999,
+    }))
+    plugin._domain_id = "domain-1"
+
+    # First refresh with 2 devices
+    domain_data = SAMPLE_DOMAIN_RESPONSE["data"]["domain"]
+    plugin._graphql = AsyncMock(return_value={"domain": domain_data})
+    await plugin._refresh_state()
+
+    # Verify MIC-01 tx keys exist
+    assert await harness.state_get("plugin.dante.tx.mic_01.1") == "MIC-01 / 01"
+
+    # Second refresh with MIC-01 removed
+    reduced_domain = {
+        "id": "domain-1",
+        "name": "Main AV",
+        "devices": [
+            {
+                "id": "dev-002",
+                "name": "AMP-01",
+                "txChannels": [],
+                "rxChannels": [
+                    {
+                        "id": "rx-1",
+                        "index": 1,
+                        "name": "01",
+                        "subscribedDevice": "",
+                        "subscribedChannel": "",
+                        "status": "NONE",
+                        "summary": "NONE",
+                    },
+                    {
+                        "id": "rx-2",
+                        "index": 2,
+                        "name": "02",
+                        "subscribedDevice": "",
+                        "subscribedChannel": "",
+                        "status": "NONE",
+                        "summary": "NONE",
+                    },
+                ],
+            },
+        ],
+    }
+    plugin._graphql = AsyncMock(return_value={"domain": reduced_domain})
+    await plugin._refresh_state()
+
+    # MIC-01 tx keys should now be None (stale)
+    assert await harness.state_get("plugin.dante.tx.mic_01.1") is None
+    assert await harness.state_get("plugin.dante.tx.mic_01.2") is None
+
+    # AMP-01 keys should still be alive
+    assert await harness.state_get("plugin.dante.rx.amp_01.1") == "AMP-01 / 01"
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_poll_failure_tolerance():
+    """Poll loop tolerates transient failures before disconnecting."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "",
+        "api_key": "",
+        "poll_interval": 9999,
+    }))
+    plugin._connected = True
+    plugin._domain_id = "domain-1"
+
+    call_count = 0
+
+    async def mock_graphql(query, variables=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise ConnectionError("transient error")
+        # Third call succeeds
+        return {"domain": SAMPLE_DOMAIN_RESPONSE["data"]["domain"]}
+
+    plugin._graphql = mock_graphql
+
+    # Run 3 poll cycles manually
+    for _ in range(3):
+        try:
+            await plugin._refresh_state()
+        except Exception:
+            pass  # Poll loop would catch this
+
+    # After 2 failures + 1 success, should still be connected
+    assert plugin._connected is True
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_matrix_click_route():
+    """Matrix cell click routes via _handle_route_action with row/col payload."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "",
+        "api_key": "",
+        "poll_interval": 9999,
+    }))
+
+    plugin._devices = {
+        "dev-001": {
+            "id": "dev-001",
+            "name": "MIC-01",
+            "txChannels": [{"id": "tx-1", "index": 1, "name": "01"}],
+            "rxChannels": [],
+        },
+        "dev-002": {
+            "id": "dev-002",
+            "name": "AMP-01",
+            "txChannels": [],
+            "rxChannels": [{"id": "rx-1", "index": 1, "name": "01"}],
+        },
+    }
+
+    plugin._set_subscription = AsyncMock(return_value=True)
+
+    # Simulate matrix cell click: row=rx device.channel, col=tx device.channel
+    await plugin._handle_route_action({"row": "amp_01.1", "col": "mic_01.1"})
+
+    plugin._set_subscription.assert_called_once_with("dev-002", 1, "MIC-01", "01")
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_matrix_click_unroute():
+    """Matrix cell click unroutes via _handle_unroute_action with row payload."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "",
+        "api_key": "",
+        "poll_interval": 9999,
+    }))
+
+    plugin._devices = {
+        "dev-002": {
+            "id": "dev-002",
+            "name": "AMP-01",
+            "rxChannels": [{"id": "rx-1", "index": 1, "name": "01"}],
+        },
+    }
+
+    plugin._set_subscription = AsyncMock(return_value=True)
+
+    await plugin._handle_unroute_action({"row": "amp_01.1"})
+
+    plugin._set_subscription.assert_called_once_with("dev-002", 1, "", "")
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_task_cleared_after_success():
+    """_reconnect_task is set to None after reconnect completes."""
+    plugin = DanteDDMPlugin()
+    plugin.api = MagicMock()
+    plugin.api.log = MagicMock()
+    plugin.api.config = SAMPLE_CONFIG
+
+    # Make create_task run the coroutine as a real asyncio task
+    plugin.api.create_task = lambda coro, name=None: asyncio.create_task(coro)
+
+    # Mock _connect to succeed
+    plugin._connect = AsyncMock(return_value=True)
+    plugin._connected = False
+
+    plugin._schedule_reconnect(SAMPLE_CONFIG)
+    assert plugin._reconnect_task is not None
+
+    # Wait for the reconnect task to complete
+    await asyncio.sleep(6)  # 5s delay + margin
+
+    # Task should have cleared itself
+    assert plugin._reconnect_task is None
+
+    # Verify we can schedule a new reconnect
+    plugin._connected = False
+    plugin._connect = AsyncMock(return_value=True)
+    plugin._schedule_reconnect(SAMPLE_CONFIG)
+    assert plugin._reconnect_task is not None
+
+    # Clean up
+    plugin._shutting_down = True
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_connect_returns_bool():
+    """_connect returns True on success, False on failure."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "",
+        "api_key": "",
+        "poll_interval": 9999,
+    }))
+
+    # Missing URL/key should return False
+    result = await plugin._connect({"ddm_url": "", "api_key": ""})
+    assert result is False
 
     await harness.stop_plugin(plugin)

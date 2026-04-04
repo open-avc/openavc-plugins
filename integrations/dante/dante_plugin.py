@@ -44,7 +44,7 @@ CONFIG_SCHEMA = {
                 "description": (
                     "GraphQL API endpoint. For Dante Director (cloud): "
                     "https://api.director.dante.cloud/graphql  "
-                    "For on-premise DDM: https://<your-ddm-host>:8089/graphql"
+                    "For on-premise DDM: https://<your-ddm-host>/graphql"
                 ),
                 "required": True,
                 "placeholder": "https://api.director.dante.cloud/graphql",
@@ -83,9 +83,12 @@ CONFIG_SCHEMA = {
             "poll_interval": {
                 "type": "integer",
                 "label": "Poll interval (seconds)",
-                "description": "How often to query DDM for device and routing state.",
-                "default": 3,
-                "min": 1,
+                "description": (
+                    "How often to query DDM for device and routing state. "
+                    "The Dante Managed API rate-limits to 60 requests per minute."
+                ),
+                "default": 5,
+                "min": 3,
                 "max": 30,
             },
         },
@@ -96,13 +99,17 @@ CONFIG_SCHEMA = {
         "description": (
             "Define named routing snapshots. JSON format:\n"
             '{"Meeting": [{"tx_device": "MIC-01", "tx_channel": "01", '
-            '"rx_device": "AMP-01", "rx_channel": "01"}], '
+            '"rx_device": "AMP-01", "rx_channel_index": 1}], '
             '"Clear All": []}\n\n'
-            "An empty array clears all subscriptions on the domain.\n"
-            "Use exact device and channel names as shown in Dante Controller."
+            "Recalling a preset applies exactly the routes listed and clears "
+            "all others. An empty array clears all subscriptions.\n"
+            "tx_device / tx_channel: device and channel names as shown in "
+            "Dante Controller.\n"
+            "rx_device: receiver device name. "
+            "rx_channel_index: receiver channel number (1, 2, 3...)."
         ),
         "default": "",
-        "placeholder": '{"Preset 1": [{"tx_device": "...", "tx_channel": "...", "rx_device": "...", "rx_channel": "..."}]}',
+        "placeholder": '{"Preset 1": [{"tx_device": "...", "tx_channel": "...", "rx_device": "...", "rx_channel_index": 1}]}',
     },
 }
 
@@ -201,11 +208,14 @@ Professional instance to provide audio network routing control.
 Define presets in the plugin config as JSON. Each preset is a named list of
 subscriptions. Use "Recall Routing Preset" context action to apply one.
 
+Recalling a preset applies exactly the listed routes and clears all others.
+An empty preset clears all subscriptions.
+
 Example config:
 {
   "Meeting": [
-    {"tx_device": "MIC-01", "tx_channel": "01", "rx_device": "AMP-01", "rx_channel": "01"},
-    {"tx_device": "MIC-01", "tx_channel": "02", "rx_device": "AMP-01", "rx_channel": "02"}
+    {"tx_device": "MIC-01", "tx_channel": "01", "rx_device": "AMP-01", "rx_channel_index": 1},
+    {"tx_device": "MIC-01", "tx_channel": "02", "rx_device": "AMP-01", "rx_channel_index": 2}
   ],
   "Clear All": []
 }
@@ -293,6 +303,7 @@ class DanteDDMPlugin:
         self._domain_id: str | None = None
         self._domain_name: str | None = None
         self._devices: dict[str, dict] = {}  # id -> device data from GraphQL
+        self._state_keys: set[str] = set()  # Track keys for stale cleanup
         self._poll_task = None
         self._reconnect_task = None
         self._shutting_down = False
@@ -310,14 +321,13 @@ class DanteDDMPlugin:
         await api.state_set("device_count", 0)
         await api.state_set("subscription_count", 0)
 
-        # Subscribe to context actions
+        # Subscribe to context actions and programmatic route events
         await api.event_subscribe("plugin.dante.action.*", self._on_action)
 
-        # Subscribe to routing matrix cell clicks
-        await api.event_subscribe("plugin.dante.route.changed", self._on_route_click)
-
         # Connect
-        await self._connect(cfg)
+        connected = await self._connect(cfg)
+        if not connected:
+            self._schedule_reconnect(cfg)
 
         api.log("Dante DDM plugin started")
 
@@ -333,6 +343,7 @@ class DanteDDMPlugin:
 
         self._connected = False
         self._devices.clear()
+        self._state_keys.clear()
         self._domain_id = None
         self._domain_name = None
 
@@ -350,8 +361,8 @@ class DanteDDMPlugin:
 
     # ──── Connection ────
 
-    async def _connect(self, cfg: dict):
-        """Establish connection to DDM GraphQL API."""
+    async def _connect(self, cfg: dict) -> bool:
+        """Establish connection to DDM GraphQL API. Returns True on success."""
         try:
             import httpx
         except ImportError:
@@ -359,7 +370,7 @@ class DanteDDMPlugin:
                 "httpx not installed. Install with: pip install httpx",
                 level="error",
             )
-            return
+            return False
 
         url = cfg.get("ddm_url", "").strip()
         api_key = cfg.get("api_key", "").strip()
@@ -369,7 +380,7 @@ class DanteDDMPlugin:
                 "DDM URL and API key are required. Configure in plugin settings.",
                 level="error",
             )
-            return
+            return False
 
         verify = cfg.get("verify_tls", True)
 
@@ -408,7 +419,10 @@ class DanteDDMPlugin:
                 )
             else:
                 self.api.log("No Dante domains found", level="error")
-                return
+                if self._client:
+                    await self._client.aclose()
+                    self._client = None
+                return False
 
             self._connected = True
             await self.api.state_set("connected", True)
@@ -416,7 +430,7 @@ class DanteDDMPlugin:
             await self.api.event_emit("connected")
 
             # Start polling
-            interval = cfg.get("poll_interval", 3)
+            interval = cfg.get("poll_interval", 5)
             self._poll_task = self.api.create_task(
                 self._poll_loop(interval), name="dante_poll"
             )
@@ -424,6 +438,7 @@ class DanteDDMPlugin:
             self.api.log(
                 f"Connected to DDM, domain: {self._domain_name}"
             )
+            return True
 
         except Exception as e:
             self.api.log(f"Failed to connect to DDM: {e}", level="error")
@@ -434,30 +449,32 @@ class DanteDDMPlugin:
                 except Exception:
                     pass
                 self._client = None
-            self._schedule_reconnect(cfg)
+            return False
 
     def _schedule_reconnect(self, cfg: dict):
         """Schedule reconnection with exponential backoff."""
         if self._shutting_down:
             return
-        if self._reconnect_task:
-            return  # Already scheduled
+        if self._reconnect_task and not self._reconnect_task.done():
+            return  # Already running
 
         async def _reconnect():
             delay = 5
             max_delay = 60
-            while not self._shutting_down:
-                await asyncio.sleep(delay)
-                if self._connected or self._shutting_down:
-                    return
-                self.api.log(f"Reconnecting to DDM...", level="debug")
-                try:
-                    await self._connect(cfg)
-                    if self._connected:
+            try:
+                while not self._shutting_down:
+                    await asyncio.sleep(delay)
+                    if self._connected or self._shutting_down:
                         return
-                except Exception as e:
-                    self.api.log(f"Reconnect failed: {e}", level="warning")
-                delay = min(delay * 2, max_delay)
+                    self.api.log("Reconnecting to DDM...", level="debug")
+                    try:
+                        if await self._connect(cfg):
+                            return
+                    except Exception as e:
+                        self.api.log(f"Reconnect failed: {e}", level="warning")
+                    delay = min(delay * 2, max_delay)
+            finally:
+                self._reconnect_task = None
 
         self._reconnect_task = self.api.create_task(
             _reconnect(), name="dante_reconnect"
@@ -468,7 +485,11 @@ class DanteDDMPlugin:
     async def _graphql(
         self, query: str, variables: dict | None = None
     ) -> dict | None:
-        """Execute a GraphQL query/mutation. Returns data dict or None on error."""
+        """Execute a GraphQL query/mutation.
+
+        Returns data dict on success, None on GraphQL-level errors.
+        Raises on network/HTTP errors (caller decides how to handle).
+        """
         if not self._client:
             return None
 
@@ -476,22 +497,17 @@ class DanteDDMPlugin:
         if variables:
             body["variables"] = variables
 
-        try:
-            resp = await self._client.post("/graphql", json=body)
-            resp.raise_for_status()
-            result = resp.json()
+        resp = await self._client.post("/graphql", json=body)
+        resp.raise_for_status()
+        result = resp.json()
 
-            if "errors" in result:
-                errors = result["errors"]
-                msg = errors[0].get("message", str(errors[0])) if errors else "Unknown"
-                self.api.log(f"GraphQL error: {msg}", level="error")
-                return None
-
-            return result.get("data")
-
-        except Exception as e:
-            self.api.log(f"GraphQL request failed: {e}", level="error")
+        if "errors" in result:
+            errors = result["errors"]
+            msg = errors[0].get("message", str(errors[0])) if errors else "Unknown"
+            self.api.log(f"GraphQL error: {msg}", level="error")
             return None
+
+        return result.get("data")
 
     async def _fetch_domains(self) -> list[dict] | None:
         """Fetch available Dante domains."""
@@ -515,32 +531,46 @@ class DanteDDMPlugin:
 
     async def _poll_loop(self, interval: int):
         """Periodically poll DDM for device and routing state."""
+        consecutive_failures = 0
+        max_failures = 3
+
         while not self._shutting_down:
             try:
                 await self._refresh_state()
+                consecutive_failures = 0
             except Exception as e:
-                self.api.log(f"Poll error: {e}", level="error")
-                # Connection lost
-                if self._connected:
-                    self._connected = False
-                    await self.api.state_set("connected", False)
-                    await self.api.event_emit("disconnected")
-                    self._schedule_reconnect(self.api.config)
-                    return
+                consecutive_failures += 1
+                level = "error" if consecutive_failures >= max_failures else "warning"
+                self.api.log(
+                    f"Poll error ({consecutive_failures}/{max_failures}): {e}",
+                    level=level,
+                )
+                if consecutive_failures >= max_failures:
+                    if self._connected:
+                        self._connected = False
+                        await self.api.state_set("connected", False)
+                        await self.api.event_emit("disconnected")
+                        self._schedule_reconnect(self.api.config)
+                        return
 
             await asyncio.sleep(interval)
 
     async def _refresh_state(self):
-        """Fetch domain data and update state keys."""
+        """Fetch domain data and update state keys.
+
+        Raises on network errors (handled by _poll_loop).
+        Returns silently on GraphQL errors (non-fatal).
+        """
         domain = await self._fetch_domain()
         if domain is None:
-            raise ConnectionError("Failed to fetch domain data")
+            # GraphQL-level error -- logged by _graphql, not a connection loss
+            return
 
         devices = domain.get("devices") or []
         old_devices = dict(self._devices)
         self._devices = {d["id"]: d for d in devices}
 
-        # Track counts
+        new_keys: set[str] = set()
         subscription_count = 0
 
         # Update Tx and Rx channel state
@@ -552,29 +582,38 @@ class DanteDDMPlugin:
                 key = f"tx.{device_id}.{ch['index']}"
                 label = f"{device['name']} / {ch['name']}"
                 await self.api.state_set(key, label)
+                new_keys.add(key)
 
             # Rx channels
             for ch in device.get("rxChannels") or []:
-                key_base = f"rx.{device_id}.{ch['index']}"
+                rx_key = f"rx.{device_id}.{ch['index']}"
                 label = f"{device['name']} / {ch['name']}"
-                await self.api.state_set(key_base, label)
+                await self.api.state_set(rx_key, label)
+                new_keys.add(rx_key)
 
                 # Route status
                 summary = (ch.get("summary") or "NONE").lower()
                 route_key = f"route.{device_id}.{ch['index']}"
                 await self.api.state_set(route_key, summary)
+                new_keys.add(route_key)
 
                 # Route info (source description)
                 sub_device = ch.get("subscribedDevice") or ""
                 sub_channel = ch.get("subscribedChannel") or ""
+                info_key = f"route_info.{device_id}.{ch['index']}"
                 if sub_device:
                     info = f"{sub_device} / {sub_channel}"
                     subscription_count += 1
                 else:
                     info = ""
-                await self.api.state_set(
-                    f"route_info.{device_id}.{ch['index']}", info
-                )
+                await self.api.state_set(info_key, info)
+                new_keys.add(info_key)
+
+        # Clean up stale keys from devices that disappeared
+        stale_keys = self._state_keys - new_keys
+        for key in stale_keys:
+            await self.api.state_set(key, None)
+        self._state_keys = new_keys
 
         await self.api.state_set("device_count", len(devices))
         await self.api.state_set("subscription_count", subscription_count)
@@ -601,23 +640,27 @@ class DanteDDMPlugin:
 
         To unsubscribe, pass empty strings for tx_device_name and tx_channel_name.
         """
-        data = await self._graphql(
-            _MUTATION_SET_SUBSCRIPTIONS,
-            {
-                "input": {
-                    "deviceId": rx_device_id,
-                    "subscriptions": [
-                        {
-                            "rxChannelIndex": rx_channel_index,
-                            "subscribedDevice": tx_device_name,
-                            "subscribedChannel": tx_channel_name,
-                        }
-                    ],
-                    "allowSubscriptionToNonExistentDevice": False,
-                    "allowSubscriptionToNonExistentChannel": False,
-                }
-            },
-        )
+        try:
+            data = await self._graphql(
+                _MUTATION_SET_SUBSCRIPTIONS,
+                {
+                    "input": {
+                        "deviceId": rx_device_id,
+                        "subscriptions": [
+                            {
+                                "rxChannelIndex": rx_channel_index,
+                                "subscribedDevice": tx_device_name,
+                                "subscribedChannel": tx_channel_name,
+                            }
+                        ],
+                        "allowSubscriptionToNonExistentDevice": False,
+                        "allowSubscriptionToNonExistentChannel": False,
+                    }
+                },
+            )
+        except Exception as e:
+            self.api.log(f"Subscription request failed: {e}", level="error")
+            return False
 
         if data is None:
             return False
@@ -632,17 +675,21 @@ class DanteDDMPlugin:
 
         Each subscription dict: {rxChannelIndex, subscribedDevice, subscribedChannel}
         """
-        data = await self._graphql(
-            _MUTATION_SET_SUBSCRIPTIONS,
-            {
-                "input": {
-                    "deviceId": rx_device_id,
-                    "subscriptions": subscriptions,
-                    "allowSubscriptionToNonExistentDevice": True,
-                    "allowSubscriptionToNonExistentChannel": True,
-                }
-            },
-        )
+        try:
+            data = await self._graphql(
+                _MUTATION_SET_SUBSCRIPTIONS,
+                {
+                    "input": {
+                        "deviceId": rx_device_id,
+                        "subscriptions": subscriptions,
+                        "allowSubscriptionToNonExistentDevice": True,
+                        "allowSubscriptionToNonExistentChannel": True,
+                    }
+                },
+            )
+        except Exception as e:
+            self.api.log(f"Batch subscription request failed: {e}", level="error")
+            return False
 
         if data is None:
             return False
@@ -761,7 +808,11 @@ class DanteDDMPlugin:
             return {}
 
     async def recall_preset(self, preset_name: str) -> bool:
-        """Apply a named routing preset."""
+        """Apply a named routing preset.
+
+        Clears all existing subscriptions first, then applies the preset routes.
+        This ensures the routing table matches the preset exactly.
+        """
         presets = self._parse_presets()
         if preset_name not in presets:
             self.api.log(f"Preset not found: {preset_name}", level="error")
@@ -769,9 +820,21 @@ class DanteDDMPlugin:
 
         routes = presets[preset_name]
 
+        # Always clear existing subscriptions first
+        clear_ok = await self._clear_all_subscriptions()
+        if not clear_ok:
+            self.api.log(
+                "Warning: failed to clear some subscriptions before preset recall",
+                level="warning",
+            )
+
         if not routes:
-            # Empty preset = clear all subscriptions
-            return await self._clear_all_subscriptions()
+            # Empty preset = clear only (already done)
+            await self.api.event_emit(
+                "preset.recalled", {"preset_name": preset_name}
+            )
+            self.api.log(f"Recalled preset: {preset_name} (cleared all)")
+            return clear_ok
 
         # Group routes by Rx device for batch mutations
         by_rx_device: dict[str, list[dict]] = {}
@@ -850,7 +913,7 @@ class DanteDDMPlugin:
     # ──── Event Handlers ────
 
     async def _on_action(self, event_name: str, payload: dict | None):
-        """Handle context action events from the IDE."""
+        """Handle context action events from the IDE and programmatic events."""
         action = event_name.rsplit(".", 1)[-1] if "." in event_name else event_name
 
         if action == "refresh_domains":
@@ -874,7 +937,11 @@ class DanteDDMPlugin:
 
     async def _handle_refresh_domains(self):
         """Refresh the domain list and log results."""
-        domains = await self._fetch_domains()
+        try:
+            domains = await self._fetch_domains()
+        except Exception as e:
+            self.api.log(f"Failed to fetch domains: {e}", level="error")
+            return
         if domains is None:
             self.api.log("Failed to fetch domains", level="error")
             return
@@ -885,53 +952,65 @@ class DanteDDMPlugin:
             self.api.log(f"Domain: {d['name']} (ID: {d['id']})")
 
     async def _handle_route_action(self, payload: dict):
-        """Handle a programmatic route request via event."""
-        rx_device = payload.get("rx_device", "")
-        rx_channel_index = payload.get("rx_channel_index", 0)
-        tx_device_name = payload.get("tx_device_name", "")
-        tx_channel_name = payload.get("tx_channel_name", "")
+        """Handle a route request from either matrix click or programmatic event.
 
-        if not all([rx_device, rx_channel_index, tx_device_name, tx_channel_name]):
-            self.api.log("Route action missing required fields", level="error")
-            return
-
-        await self.route(rx_device, rx_channel_index, tx_device_name, tx_channel_name)
-
-    async def _handle_unroute_action(self, payload: dict):
-        """Handle a programmatic unroute request via event."""
-        rx_device = payload.get("rx_device", "")
-        rx_channel_index = payload.get("rx_channel_index", 0)
-
-        if not all([rx_device, rx_channel_index]):
-            self.api.log("Unroute action missing required fields", level="error")
-            return
-
-        await self.unroute(rx_device, rx_channel_index)
-
-    async def _on_route_click(self, event_name: str, payload: dict | None):
-        """Handle routing matrix cell clicks from the surface configurator."""
-        if not payload:
-            return
-
-        row = payload.get("row", "")  # Rx device_id.channel_index
-        col = payload.get("col", "")  # Tx device_id.channel_index
-        state = payload.get("state")  # True = route, False = unroute
-
-        # Resolve row -> Rx device name + channel index
-        rx_device_name, rx_channel_index = self._resolve_matrix_ref(row, "rx")
-        if not rx_device_name:
-            return
-
-        if state:
-            # Resolve col -> Tx device name + channel name
+        Matrix clicks send {row, col} with sanitized state key segments.
+        Programmatic events send {rx_device, rx_channel_index, tx_device_name,
+        tx_channel_name}.
+        """
+        if "row" in payload and "col" in payload:
+            # Matrix cell click
+            row = payload["row"]
+            col = payload["col"]
+            rx_device_name, rx_channel_index = self._resolve_matrix_ref(row, "rx")
             tx_device_name, tx_channel_name = self._resolve_matrix_ref(col, "tx")
-            if not tx_device_name:
+            if not rx_device_name or not tx_device_name:
+                self.api.log(
+                    f"Could not resolve matrix reference: row={row} col={col}",
+                    level="error",
+                )
                 return
             await self.route(
                 rx_device_name, rx_channel_index, tx_device_name, tx_channel_name
             )
         else:
+            # Programmatic event
+            rx_device = payload.get("rx_device", "")
+            rx_channel_index = payload.get("rx_channel_index", 0)
+            tx_device_name = payload.get("tx_device_name", "")
+            tx_channel_name = payload.get("tx_channel_name", "")
+
+            if not all([rx_device, rx_channel_index, tx_device_name, tx_channel_name]):
+                self.api.log("Route action missing required fields", level="error")
+                return
+
+            await self.route(
+                rx_device, rx_channel_index, tx_device_name, tx_channel_name
+            )
+
+    async def _handle_unroute_action(self, payload: dict):
+        """Handle an unroute request from either matrix click or programmatic event."""
+        if "row" in payload:
+            # Matrix cell click
+            row = payload["row"]
+            rx_device_name, rx_channel_index = self._resolve_matrix_ref(row, "rx")
+            if not rx_device_name:
+                self.api.log(
+                    f"Could not resolve matrix reference: row={row}",
+                    level="error",
+                )
+                return
             await self.unroute(rx_device_name, rx_channel_index)
+        else:
+            # Programmatic event
+            rx_device = payload.get("rx_device", "")
+            rx_channel_index = payload.get("rx_channel_index", 0)
+
+            if not all([rx_device, rx_channel_index]):
+                self.api.log("Unroute action missing required fields", level="error")
+                return
+
+            await self.unroute(rx_device, rx_channel_index)
 
     # ──── Helpers ────
 
