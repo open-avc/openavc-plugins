@@ -101,22 +101,22 @@ SAMPLE_CONFIG = {
     "verify_tls": False,
     "domain_id": "domain-1",
     "poll_interval": 60,  # Long interval so polling doesn't interfere with tests
-    "presets": [
-        {
-            "preset_name": "Meeting",
-            "tx_device": "MIC-01",
-            "tx_channel": "01",
-            "rx_device": "AMP-01",
-            "rx_channel_index": 1,
-        },
-        {
-            "preset_name": "Meeting",
-            "tx_device": "MIC-01",
-            "tx_channel": "02",
-            "rx_device": "AMP-01",
-            "rx_channel_index": 2,
-        },
-    ],
+    "_presets": {
+        "Meeting": [
+            {
+                "tx_device": "MIC-01",
+                "tx_channel": "01",
+                "rx_device": "AMP-01",
+                "rx_channel_index": 1,
+            },
+            {
+                "tx_device": "MIC-01",
+                "tx_channel": "02",
+                "rx_device": "AMP-01",
+                "rx_channel_index": 2,
+            },
+        ],
+    },
 }
 
 
@@ -597,7 +597,7 @@ async def test_stop_cleanup():
 
 @pytest.mark.asyncio
 async def test_parse_presets_valid():
-    """_parse_presets groups structured rows by preset_name."""
+    """_parse_presets reads _presets dict from config."""
     harness = PluginTestHarness()
     plugin = DanteDDMPlugin()
     plugin.api = (await harness.start_plugin(plugin, config=SAMPLE_CONFIG))
@@ -618,12 +618,145 @@ async def test_parse_presets_empty():
     plugin.api = (await harness.start_plugin(plugin, config={
         "ddm_url": "",
         "api_key": "",
-        "presets": [],
         "poll_interval": 9999,
     }))
 
     presets = plugin._parse_presets()
     assert presets == {}
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_current_routes():
+    """_snapshot_current_routes captures active subscriptions."""
+    plugin = DanteDDMPlugin()
+    plugin._devices = {
+        "dev-001": {
+            "id": "dev-001",
+            "name": "MIC-01",
+            "txChannels": [{"id": "tx-1", "index": 1, "name": "01"}],
+            "rxChannels": [],
+        },
+        "dev-002": {
+            "id": "dev-002",
+            "name": "AMP-01",
+            "txChannels": [],
+            "rxChannels": [
+                {
+                    "id": "rx-1", "index": 1, "name": "01",
+                    "subscribedDevice": "MIC-01", "subscribedChannel": "01",
+                },
+                {
+                    "id": "rx-2", "index": 2, "name": "02",
+                    "subscribedDevice": "", "subscribedChannel": "",
+                },
+            ],
+        },
+    }
+    routes = plugin._snapshot_current_routes()
+    assert len(routes) == 1
+    assert routes[0]["tx_device"] == "MIC-01"
+    assert routes[0]["rx_device"] == "AMP-01"
+    assert routes[0]["rx_channel_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_save_preset():
+    """save_preset captures current routes and saves to config."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "", "api_key": "", "poll_interval": 9999,
+    }))
+    plugin._devices = {
+        "dev-002": {
+            "id": "dev-002",
+            "name": "AMP-01",
+            "rxChannels": [
+                {"id": "rx-1", "index": 1, "name": "01",
+                 "subscribedDevice": "MIC-01", "subscribedChannel": "01"},
+            ],
+        },
+    }
+
+    await plugin._handle_save_preset({"name": "Test Preset"})
+
+    # Config should now have the preset
+    presets = plugin.api.config.get("_presets", {})
+    assert "Test Preset" in presets
+    assert len(presets["Test Preset"]) == 1
+    assert presets["Test Preset"][0]["tx_device"] == "MIC-01"
+
+    # Active preset should be set
+    assert await harness.state_get("plugin.dante.active_preset") == "Test Preset"
+    assert await harness.state_get("plugin.dante.preset_dirty") is False
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_update_preset():
+    """update_preset overwrites an existing preset."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "", "api_key": "", "poll_interval": 9999,
+        "_presets": {"Old": [{"tx_device": "X", "tx_channel": "1",
+                              "rx_device": "Y", "rx_channel_index": 1}]},
+    }))
+    plugin._devices = {}  # No active routes
+
+    await plugin._handle_update_preset({"name": "Old"})
+
+    presets = plugin.api.config.get("_presets", {})
+    assert "Old" in presets
+    assert presets["Old"] == []  # No devices = no routes
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_delete_preset():
+    """delete_preset removes preset and clears active state."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "", "api_key": "", "poll_interval": 9999,
+        "_presets": {"ToDelete": []},
+    }))
+
+    await plugin._handle_delete_preset({"name": "ToDelete"})
+
+    presets = plugin.api.config.get("_presets", {})
+    assert "ToDelete" not in presets
+    assert await harness.state_get("plugin.dante.active_preset") == ""
+
+    await harness.stop_plugin(plugin)
+
+
+@pytest.mark.asyncio
+async def test_dirty_tracking():
+    """route() sets preset_dirty to True."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    plugin.api = (await harness.start_plugin(plugin, config={
+        "ddm_url": "", "api_key": "", "poll_interval": 9999,
+    }))
+    plugin._devices = {
+        "dev-002": {
+            "id": "dev-002", "name": "AMP-01",
+            "rxChannels": [{"id": "rx-1", "index": 1, "name": "01"}],
+        },
+    }
+    plugin._set_subscription = AsyncMock(return_value=True)
+
+    # Initially not dirty
+    assert await harness.state_get("plugin.dante.preset_dirty") is False
+
+    await plugin.route("AMP-01", 1, "MIC-01", "01")
+
+    assert await harness.state_get("plugin.dante.preset_dirty") is True
 
     await harness.stop_plugin(plugin)
 

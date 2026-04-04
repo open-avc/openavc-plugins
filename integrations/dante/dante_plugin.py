@@ -92,47 +92,6 @@ CONFIG_SCHEMA = {
             },
         },
     },
-    "presets": {
-        "type": "mapping_list",
-        "label": "Routing presets",
-        "description": (
-            "Define named routing snapshots. Rows with the same preset name "
-            "are grouped into one preset. Recalling a preset applies exactly "
-            "the listed routes and clears all others."
-        ),
-        "item_schema": {
-            "preset_name": {
-                "type": "string",
-                "label": "Preset",
-                "required": True,
-                "placeholder": "Meeting",
-            },
-            "tx_device": {
-                "type": "string",
-                "label": "Tx Device",
-                "required": True,
-                "placeholder": "MIC-01",
-            },
-            "tx_channel": {
-                "type": "string",
-                "label": "Tx Channel",
-                "required": True,
-                "placeholder": "01",
-            },
-            "rx_device": {
-                "type": "string",
-                "label": "Rx Device",
-                "required": True,
-                "placeholder": "AMP-01",
-            },
-            "rx_channel_index": {
-                "type": "integer",
-                "label": "Rx Ch #",
-                "required": True,
-                "min": 1,
-            },
-        },
-    },
 }
 
 EXTENSIONS = {
@@ -174,13 +133,6 @@ EXTENSIONS = {
             "event": "action.refresh_domains",
         },
         {
-            "id": "recall_preset",
-            "label": "Recall Routing Preset",
-            "icon": "play",
-            "context": "global",
-            "event": "action.recall_preset",
-        },
-        {
             "id": "clear_all",
             "label": "Clear All Subscriptions",
             "icon": "x-circle",
@@ -198,6 +150,7 @@ SURFACE_LAYOUT = {
     "columns_state_pattern": "plugin.dante.tx.*",
     "cell_type": "route",
     "cell_state_pattern": "plugin.dante.route.{row}.{col}",
+    "presets": True,
 }
 
 AI_GUIDE = """
@@ -209,51 +162,58 @@ Professional instance to provide audio network routing control.
 1. Enter the GraphQL API endpoint URL (cloud or on-premise DDM).
 2. Enter the API key from your Dante Director or DDM admin dashboard.
 3. Optionally set a specific domain ID, or leave blank to auto-detect.
+4. Once connected, a routing matrix appears showing all Tx and Rx channels.
+
+## Routing Matrix
+
+The routing matrix shows transmitters (Tx) as columns and receivers (Rx) as rows.
+Click a crosspoint to route audio between them. Click an active crosspoint to
+unroute it. The matrix updates in real time as DDM state changes.
+
+## Routing Presets
+
+Save the current routing state as a named preset using the toolbar above the matrix.
+Recall a preset to restore that exact routing snapshot (clears all routes first).
+After recalling a preset and making changes, click "Update" to save the changes
+or "Save as New" to create a new preset.
+
+Presets are stored in the project file and can be recalled from macros/triggers
+by emitting plugin.dante.action.recall_preset with payload:
+{"preset_name": "Meeting"}.
 
 ## State Keys
 
-- plugin.dante.connected — Whether the plugin is connected to DDM (boolean)
-- plugin.dante.domain_name — Name of the active Dante domain (string)
-- plugin.dante.device_count — Number of Dante devices discovered (integer)
-- plugin.dante.subscription_count — Number of active audio subscriptions (integer)
-- plugin.dante.tx.<device_id>.<channel_index> — Tx channel display name (string)
-- plugin.dante.rx.<device_id>.<channel_index> — Rx channel display name (string)
-- plugin.dante.route.<rx_device_id>.<rx_channel_index> — Route status: "connected",
-  "in_progress", "warning", "error", or "none" (string)
-- plugin.dante.route_info.<rx_device_id>.<rx_channel_index> — Source description,
-  e.g. "MIC-01 / 01" (string)
+- plugin.dante.connected — Connected to DDM (boolean)
+- plugin.dante.domain_name — Active Dante domain name (string)
+- plugin.dante.device_count — Dante devices discovered (integer)
+- plugin.dante.subscription_count — Active audio subscriptions (integer)
+- plugin.dante.active_preset — Currently recalled preset name (string)
+- plugin.dante.preset_dirty — Routes changed since last recall (boolean)
+- plugin.dante.tx.<device_id>.<channel_index> — Tx channel label (string)
+- plugin.dante.rx.<device_id>.<channel_index> — Rx channel label (string)
+- plugin.dante.route.<rx_device_id>.<rx_channel_index> — Route status (string)
+- plugin.dante.route_info.<rx_device_id>.<rx_channel_index> — Source info (string)
 
 ## Events
 
-- plugin.dante.connected — Connection to DDM established
-- plugin.dante.disconnected — Connection to DDM lost
+- plugin.dante.connected — Connection established
+- plugin.dante.disconnected — Connection lost
 - plugin.dante.devices.updated — Device/channel list refreshed
 - plugin.dante.route.changed — A subscription was created or removed
 - plugin.dante.route.failed — A subscription mutation failed
 - plugin.dante.preset.recalled — A routing preset was applied
 
-## Routing Presets
-
-Add presets in the Routing Presets table. Each row has a preset name and a route
-(Tx device + channel -> Rx device + channel). Rows with the same preset name are
-grouped into one preset.
-
-Use "Recall Routing Preset" to apply a preset. This clears all existing routes
-first, then applies the preset's routes. Use "Clear All Subscriptions" to remove
-all routes without applying a preset.
-
 ## Macros / Triggers
 
-Use state keys in trigger conditions to automate based on Dante state. For example,
-trigger an alert when plugin.dante.connected becomes false, or when a route enters
-"error" status.
-
-To route audio from a macro or script, emit the plugin.dante.action.route event
-with payload: {"rx_device": "...", "rx_channel_index": 1,
+To route audio from a macro or script, emit plugin.dante.action.route with
+payload: {"rx_device": "...", "rx_channel_index": 1,
 "tx_device_name": "...", "tx_channel_name": "..."}.
 
 To unsubscribe, emit plugin.dante.action.unroute with payload:
 {"rx_device": "...", "rx_channel_index": 1}.
+
+To recall a preset, emit plugin.dante.action.recall_preset with payload:
+{"preset_name": "Meeting"}.
 """
 
 
@@ -342,6 +302,8 @@ class DanteDDMPlugin:
         await api.state_set("domain_name", "")
         await api.state_set("device_count", 0)
         await api.state_set("subscription_count", 0)
+        await api.state_set("active_preset", "")
+        await api.state_set("preset_dirty", False)
 
         # Subscribe to context actions and programmatic route events
         await api.event_subscribe("plugin.dante.action.*", self._on_action)
@@ -761,6 +723,7 @@ class DanteDDMPlugin:
                 f"Routed {tx_device_name}/{tx_channel_name} -> "
                 f"{rx_device_name}/{rx_channel_index}"
             )
+            await self.api.state_set("preset_dirty", True)
         else:
             await self.api.event_emit(
                 "route.failed",
@@ -809,25 +772,35 @@ class DanteDDMPlugin:
             self.api.log(
                 f"Unrouted {rx_device_name}/{rx_channel_index}"
             )
+            await self.api.state_set("preset_dirty", True)
 
         return success
+
+    # ──── Preset Management ────
+
+    def _snapshot_current_routes(self) -> list[dict]:
+        """Capture all active subscriptions as a list of route dicts."""
+        routes = []
+        for device in self._devices.values():
+            for ch in device.get("rxChannels") or []:
+                sub_device = ch.get("subscribedDevice") or ""
+                sub_channel = ch.get("subscribedChannel") or ""
+                if sub_device:
+                    routes.append({
+                        "tx_device": sub_device,
+                        "tx_channel": sub_channel,
+                        "rx_device": device["name"],
+                        "rx_channel_index": ch["index"],
+                    })
+        return routes
 
     # ──── Preset Recall ────
 
     def _parse_presets(self) -> dict[str, list[dict]]:
-        """Parse routing presets from config. Groups rows by preset_name."""
-        raw = self.api.config.get("presets", [])
-        if not isinstance(raw, list):
+        """Read presets from the managed _presets config key."""
+        presets = self.api.config.get("_presets", {})
+        if not isinstance(presets, dict):
             return {}
-        presets: dict[str, list[dict]] = {}
-        for row in raw:
-            name = row.get("preset_name", "").strip()
-            if not name:
-                continue
-            if name not in presets:
-                presets[name] = []
-            if row.get("rx_device") and row.get("tx_device"):
-                presets[name].append(row)
         return presets
 
     async def recall_preset(self, preset_name: str) -> bool:
@@ -898,6 +871,8 @@ class DanteDDMPlugin:
             await self.api.event_emit(
                 "preset.recalled", {"preset_name": preset_name}
             )
+            await self.api.state_set("active_preset", preset_name)
+            await self.api.state_set("preset_dirty", False)
             self.api.log(f"Recalled preset: {preset_name}")
         else:
             await self.api.event_emit(
@@ -931,6 +906,8 @@ class DanteDDMPlugin:
                     all_ok = False
 
         if all_ok:
+            await self.api.state_set("active_preset", "")
+            await self.api.state_set("preset_dirty", False)
             self.api.log("Cleared all subscriptions")
         return all_ok
 
@@ -954,6 +931,12 @@ class DanteDDMPlugin:
                     self.api.log("No presets configured", level="warning")
                 return
             await self.recall_preset(preset_name)
+        elif action == "save_preset":
+            await self._handle_save_preset(payload or {})
+        elif action == "update_preset":
+            await self._handle_update_preset(payload or {})
+        elif action == "delete_preset":
+            await self._handle_delete_preset(payload or {})
         elif action == "clear_all":
             await self._clear_all_subscriptions()
         elif action == "route":
@@ -976,6 +959,61 @@ class DanteDDMPlugin:
             return
         for d in domains:
             self.api.log(f"Domain: {d['name']} (ID: {d['id']})")
+
+    async def _handle_save_preset(self, payload: dict):
+        """Save current routing state as a new named preset."""
+        name = (payload.get("name") or "").strip()
+        if not name:
+            self.api.log("Save preset: name is required", level="error")
+            return
+        presets = dict(self._parse_presets())
+        if name in presets:
+            self.api.log(f"Preset '{name}' already exists", level="error")
+            return
+        routes = self._snapshot_current_routes()
+        presets[name] = routes
+        config = dict(self.api.config)
+        config["_presets"] = presets
+        await self.api.save_config(config)
+        await self.api.state_set("active_preset", name)
+        await self.api.state_set("preset_dirty", False)
+        self.api.log(f"Saved preset: {name} ({len(routes)} routes)")
+
+    async def _handle_update_preset(self, payload: dict):
+        """Update an existing preset with the current routing state."""
+        name = (payload.get("name") or "").strip()
+        if not name:
+            self.api.log("Update preset: name is required", level="error")
+            return
+        presets = dict(self._parse_presets())
+        if name not in presets:
+            self.api.log(f"Preset '{name}' does not exist", level="error")
+            return
+        routes = self._snapshot_current_routes()
+        presets[name] = routes
+        config = dict(self.api.config)
+        config["_presets"] = presets
+        await self.api.save_config(config)
+        await self.api.state_set("preset_dirty", False)
+        self.api.log(f"Updated preset: {name} ({len(routes)} routes)")
+
+    async def _handle_delete_preset(self, payload: dict):
+        """Delete a saved preset."""
+        name = (payload.get("name") or "").strip()
+        if not name:
+            self.api.log("Delete preset: name is required", level="error")
+            return
+        presets = dict(self._parse_presets())
+        if name not in presets:
+            self.api.log(f"Preset '{name}' does not exist", level="error")
+            return
+        del presets[name]
+        config = dict(self.api.config)
+        config["_presets"] = presets
+        await self.api.save_config(config)
+        await self.api.state_set("active_preset", "")
+        await self.api.state_set("preset_dirty", False)
+        self.api.log(f"Deleted preset: {name}")
 
     async def _handle_route_action(self, payload: dict):
         """Handle a route request from either matrix click or programmatic event.
