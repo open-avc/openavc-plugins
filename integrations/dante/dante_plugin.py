@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_INFO = {
     "id": "dante",
     "name": "Dante DDM",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "author": "OpenAVC",
     "description": "Audio routing via Dante Domain Manager or Dante Director Professional.",
     "category": "integration",

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_INFO = {
     "id": "mqtt",
     "name": "MQTT Bridge",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "author": "OpenAVC",
     "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration.",
     "category": "integration",
