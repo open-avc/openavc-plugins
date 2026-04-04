@@ -1,6 +1,6 @@
 {
     "schema_version": "1.0.0",
-    "updated": "2026-03-23",
+    "updated": "2026-04-03",
     "plugins": [
         {
             "id": "streamdeck",
@@ -18,6 +18,22 @@
             "has_native_dependencies": true,
             "verified": true,
             "description": "Use Elgato Stream Deck hardware as a physical control surface."
+        },
+        {
+            "id": "mqtt",
+            "name": "MQTT Bridge",
+            "file": "integrations/mqtt",
+            "format": "directory",
+            "category": "integration",
+            "version": "1.0.0",
+            "author": "OpenAVC",
+            "license": "MIT",
+            "platforms": ["all"],
+            "min_openavc_version": "0.3.0",
+            "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe"],
+            "has_native_dependencies": false,
+            "verified": true,
+            "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration."
         }
     ]
 }
