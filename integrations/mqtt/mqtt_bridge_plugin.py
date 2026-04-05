@@ -1,8 +1,8 @@
 """
 MQTT Bridge Plugin for OpenAVC
 
-Bridges OpenAVC state to/from an MQTT broker. Supports bidirectional state mapping:
-inbound (MQTT -> OpenAVC state), outbound (OpenAVC state -> MQTT publish), or both.
+Bridges OpenAVC to an MQTT broker. Outbound: publish state changes to MQTT.
+Inbound: set variables, send device commands, or execute macros from MQTT messages.
 
 Requires: gmqtt (MIT license, pure Python, native asyncio)
 """
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_INFO = {
     "id": "mqtt",
     "name": "MQTT Bridge",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "author": "OpenAVC",
     "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration.",
     "category": "integration",
@@ -29,6 +29,8 @@ PLUGIN_INFO = {
         "state_write",
         "event_emit",
         "event_subscribe",
+        "device_command",
+        "macro_execute",
     ],
     "dependencies": ["gmqtt>=0.6.0"],
 }
@@ -80,7 +82,7 @@ CONFIG_SCHEMA = {
     "topic_prefix": {
         "type": "string",
         "label": "Topic prefix",
-        "description": "Prefix prepended to all MQTT topics. Example: 'openavc/room1' becomes 'openavc/room1/device.projector.power'.",
+        "description": "Prefix prepended to auto-generated MQTT topics.",
         "default": "openavc",
         "placeholder": "openavc",
     },
@@ -98,13 +100,13 @@ CONFIG_SCHEMA = {
     "default_retain": {
         "type": "boolean",
         "label": "Retain messages",
-        "description": "Published messages are retained by the broker so new subscribers get the last value immediately.",
+        "description": "Published messages are retained by the broker.",
         "default": True,
     },
-    "mappings": {
+    "outbound_mappings": {
         "type": "mapping_list",
-        "label": "State mappings",
-        "description": "Map OpenAVC state keys to MQTT topics.",
+        "label": "Outbound (OpenAVC \u2192 MQTT)",
+        "description": "Publish OpenAVC state changes to MQTT topics.",
         "item_schema": {
             "state_key": {
                 "type": "state_key",
@@ -112,20 +114,61 @@ CONFIG_SCHEMA = {
                 "required": True,
                 "placeholder": "device.projector.power",
             },
-            "direction": {
-                "type": "select",
-                "label": "Direction",
-                "options": [
-                    {"value": "in", "label": "MQTT \u2192 OpenAVC"},
-                    {"value": "out", "label": "OpenAVC \u2192 MQTT"},
-                    {"value": "both", "label": "Bidirectional"},
-                ],
-                "default": "both",
-            },
             "topic": {
                 "type": "string",
                 "label": "Topic Override",
                 "placeholder": "auto from state key",
+            },
+        },
+    },
+    "inbound_mappings": {
+        "type": "mapping_list",
+        "label": "Inbound (MQTT \u2192 OpenAVC)",
+        "description": "Control OpenAVC from incoming MQTT messages.",
+        "item_schema": {
+            "topic": {
+                "type": "string",
+                "label": "MQTT Topic",
+                "required": True,
+                "placeholder": "sensors/room/temp",
+            },
+            "action": {
+                "type": "select",
+                "label": "Action",
+                "options": [
+                    {"value": "set_variable", "label": "Set Variable"},
+                    {"value": "device_command", "label": "Device Command"},
+                    {"value": "run_macro", "label": "Run Macro"},
+                ],
+                "default": "set_variable",
+            },
+            "variable_id": {
+                "type": "state_key",
+                "label": "Variable",
+                "placeholder": "Select variable...",
+                "visible_when": {"action": "set_variable"},
+            },
+            "device_id": {
+                "type": "device_ref",
+                "label": "Device",
+                "visible_when": {"action": "device_command"},
+            },
+            "command": {
+                "type": "command_ref",
+                "label": "Command",
+                "device_field": "device_id",
+                "visible_when": {"action": "device_command"},
+            },
+            "param_name": {
+                "type": "string",
+                "label": "Parameter",
+                "placeholder": "optional",
+                "visible_when": {"action": "device_command"},
+            },
+            "macro_id": {
+                "type": "macro_ref",
+                "label": "Macro",
+                "visible_when": {"action": "run_macro"},
             },
         },
     },
@@ -159,35 +202,51 @@ EXTENSIONS = {
 }
 
 AI_GUIDE = """
-The MQTT Bridge plugin connects OpenAVC state to an MQTT broker.
+The MQTT Bridge plugin connects OpenAVC to an MQTT broker.
 
 ## Configuration
 
 Connection settings (broker_host, broker_port, username, password, use_tls) are set
-in the plugin config. The topic_prefix is prepended to all MQTT topics.
+in the plugin config. The topic_prefix is prepended to auto-generated outbound topics.
 
-## State Mappings
+## Outbound Mappings (OpenAVC -> MQTT)
 
-Add mappings in the State Mappings table. Each row has:
-- State Key: the OpenAVC state key to bridge (e.g. device.projector.power)
-- Direction: "in" (MQTT to OpenAVC), "out" (OpenAVC to MQTT), or "both"
-- Topic Override: optional custom MQTT topic (leave blank to auto-generate)
+Publishes OpenAVC state changes to MQTT topics. Each row has:
+- State Key: pick the state key to publish (e.g. device.projector.power)
+- Topic Override: optional custom MQTT topic (leave blank to auto-generate from state key)
 
-By default, the MQTT topic is derived from the state key by replacing dots with
-slashes and prepending the topic prefix. For example, with prefix "openavc":
+Auto-generated topics replace dots with slashes and prepend the prefix:
   device.projector.power -> openavc/device/projector/power
 
-Set a Topic Override to use a custom topic instead of the auto-generated one.
+## Inbound Mappings (MQTT -> OpenAVC)
 
-## MQTT Topics
+Controls OpenAVC from incoming MQTT messages. Each row has an MQTT topic and an
+action type:
 
-Inbound messages are parsed as follows:
+- **Set Variable**: writes the MQTT payload value to a user variable (var.<id>)
+- **Device Command**: sends a command to a device, optionally passing the MQTT
+  payload as a parameter
+- **Run Macro**: executes a macro when any message arrives on the topic
+
+## MQTT Value Parsing
+
+Inbound message payloads are parsed automatically:
 - "true"/"false"/"on"/"off" -> boolean
 - Numeric strings -> int or float
-- JSON strings -> parsed, but only the top-level value is used (must be a primitive)
+- JSON primitives -> parsed value
 - Everything else -> string
 
-Outbound messages publish the state value as a string.
+## State Keys
+
+- plugin.mqtt.connected — Connected to broker (boolean)
+- plugin.mqtt.broker — Broker address (string)
+- plugin.mqtt.mapping_count — Total mapping count (integer)
+
+## Events
+
+- plugin.mqtt.connected — Broker connection established
+- plugin.mqtt.disconnected — Broker connection lost
+- plugin.mqtt.message.received — Inbound message processed
 """
 
 
@@ -197,16 +256,6 @@ def _state_key_to_topic(prefix: str, state_key: str) -> str:
     if prefix:
         return f"{prefix}/{topic}"
     return topic
-
-
-def _topic_to_state_key(prefix: str, topic: str) -> str | None:
-    """Convert an MQTT topic back to a state key. Slashes become dots."""
-    if prefix:
-        expected = prefix + "/"
-        if not topic.startswith(expected):
-            return None
-        topic = topic[len(expected):]
-    return topic.replace("/", ".")
 
 
 def _parse_mqtt_value(payload: str):
@@ -244,44 +293,41 @@ class MQTTBridgePlugin:
     def __init__(self):
         self.api = None
         self._client = None
-        self._mappings: list[dict] = []
-        self._topic_to_key: dict[str, str] = {}
-        self._key_to_topic: dict[str, str] = {}
-        self._inbound_keys: set[str] = set()
-        self._outbound_keys: set[str] = set()
-        self._suppress_echo: set[str] = set()  # Prevents echo loops on bidirectional mappings
+        # Outbound: state_key -> topic
+        self._outbound_keys: dict[str, str] = {}
+        # Inbound: topic -> mapping dict (action, variable_id, device_id, etc.)
+        self._inbound_mappings: dict[str, dict] = {}
+        self._suppress_echo: set[str] = set()
         self._reconnect_task = None
 
     async def start(self, api):
         self.api = api
         cfg = api.config
-
-        # Parse mappings (structured list from mapping_list config field)
-        self._mappings = [
-            m for m in cfg.get("mappings", [])
-            if m.get("state_key") and m.get("direction") in ("in", "out", "both")
-        ]
         prefix = cfg.get("topic_prefix", "openavc")
 
-        # Build lookup tables
-        for m in self._mappings:
-            key = m["state_key"]
+        # Parse outbound mappings
+        for m in cfg.get("outbound_mappings", []):
+            key = m.get("state_key", "").strip()
+            if not key:
+                continue
             override = (m.get("topic") or "").strip()
             topic = override if override else _state_key_to_topic(prefix, key)
-            direction = m["direction"]
+            self._outbound_keys[key] = topic
 
-            self._topic_to_key[topic] = key
-            self._key_to_topic[key] = topic
+        # Parse inbound mappings
+        for m in cfg.get("inbound_mappings", []):
+            topic = m.get("topic", "").strip()
+            action = m.get("action", "")
+            if not topic or not action:
+                continue
+            self._inbound_mappings[topic] = m
 
-            if direction in ("in", "both"):
-                self._inbound_keys.add(key)
-            if direction in ("out", "both"):
-                self._outbound_keys.add(key)
+        total = len(self._outbound_keys) + len(self._inbound_mappings)
 
         # Set initial state
         await api.state_set("connected", False)
         await api.state_set("broker", f"{cfg.get('broker_host', 'localhost')}:{cfg.get('broker_port', 1883)}")
-        await api.state_set("mapping_count", len(self._mappings))
+        await api.state_set("mapping_count", total)
 
         # Connect to broker
         await self._connect(cfg)
@@ -290,7 +336,7 @@ class MQTTBridgePlugin:
         if self._outbound_keys:
             await api.state_subscribe("*", self._on_state_change)
 
-        api.log(f"MQTT Bridge started with {len(self._mappings)} mapping(s)")
+        api.log(f"MQTT Bridge started ({len(self._outbound_keys)} outbound, {len(self._inbound_mappings)} inbound)")
 
     async def stop(self):
         if self._reconnect_task and not self._reconnect_task.done():
@@ -307,11 +353,8 @@ class MQTTBridgePlugin:
                 pass
             self._client = None
 
-        self._mappings.clear()
-        self._topic_to_key.clear()
-        self._key_to_topic.clear()
-        self._inbound_keys.clear()
         self._outbound_keys.clear()
+        self._inbound_mappings.clear()
         self._suppress_echo.clear()
 
         if self.api:
@@ -357,7 +400,6 @@ class MQTTBridgePlugin:
         except Exception as e:
             self.api.log(f"Failed to connect to {host}:{port}: {e}", level="error")
             await self.api.state_set("connected", False)
-            # Schedule reconnect
             self._schedule_reconnect(cfg)
 
     def _on_connect(self, client, flags, rc, properties):
@@ -376,16 +418,14 @@ class MQTTBridgePlugin:
 
         # Subscribe to inbound topics
         qos = int(self.api.config.get("default_qos", "0"))
-        for topic, key in self._topic_to_key.items():
-            if key in self._inbound_keys:
-                self._client.subscribe(topic, qos=qos)
-                self.api.log(f"Subscribed to {topic} -> {key}", level="debug")
+        for topic in self._inbound_mappings:
+            self._client.subscribe(topic, qos=qos)
+            self.api.log(f"Subscribed to {topic}", level="debug")
 
         # Publish current state for all outbound mappings
-        for key in self._outbound_keys:
+        for key, topic in self._outbound_keys.items():
             value = await self.api.state_get(key)
             if value is not None:
-                topic = self._key_to_topic[key]
                 self._publish(topic, value)
 
     def _on_message(self, client, topic, payload, qos, properties):
@@ -395,26 +435,47 @@ class MQTTBridgePlugin:
 
     async def _handle_message(self, topic: str, payload: bytes):
         text = payload.decode("utf-8", errors="replace") if payload else ""
-        state_key = self._topic_to_key.get(topic)
-        if not state_key:
+        mapping = self._inbound_mappings.get(topic)
+        if not mapping:
             return
 
         value = _parse_mqtt_value(text)
-
-        # Suppress echo for bidirectional mappings
-        if state_key in self._outbound_keys:
-            self._suppress_echo.add(state_key)
+        action = mapping.get("action", "")
 
         try:
-            await self.api.state_set(state_key, value)
+            if action == "set_variable":
+                var_id = mapping.get("variable_id", "").strip()
+                if var_id:
+                    await self.api.variable_set(var_id, value)
+                    self.api.log(f"Set var.{var_id} = {value}", level="debug")
+
+            elif action == "device_command":
+                device_id = mapping.get("device_id", "").strip()
+                command = mapping.get("command", "").strip()
+                if device_id and command:
+                    param_name = mapping.get("param_name", "").strip()
+                    params = {param_name: value} if param_name and value is not None else None
+                    await self.api.device_command(device_id, command, params)
+                    self.api.log(
+                        f"Sent {device_id}.{command}({params or ''})",
+                        level="debug",
+                    )
+
+            elif action == "run_macro":
+                macro_id = mapping.get("macro_id", "").strip()
+                if macro_id:
+                    await self.api.macro_execute(macro_id)
+                    self.api.log(f"Executed macro {macro_id}", level="debug")
+
         except Exception as e:
-            self.api.log(f"Failed to set state {state_key}: {e}", level="error")
-        finally:
-            self._suppress_echo.discard(state_key)
+            self.api.log(
+                f"Inbound action failed (topic={topic}, action={action}): {e}",
+                level="error",
+            )
 
         await self.api.event_emit("message.received", {
             "topic": topic,
-            "state_key": state_key,
+            "action": action,
             "value": value,
         })
 
@@ -429,7 +490,6 @@ class MQTTBridgePlugin:
             self.api.log(f"Disconnected from broker: {exc}", level="warning")
         else:
             self.api.log("Disconnected from broker")
-        # gmqtt handles reconnection internally, but if it fails we schedule our own
         self._schedule_reconnect(self.api.config)
 
     async def _on_state_change(self, key: str, value, old_value):
@@ -437,11 +497,11 @@ class MQTTBridgePlugin:
         if key not in self._outbound_keys:
             return
         if key in self._suppress_echo:
-            return  # This change came from an inbound MQTT message, don't echo it back
+            return
         if not self._client or not self._client.is_connected:
             return
 
-        topic = self._key_to_topic.get(key)
+        topic = self._outbound_keys.get(key)
         if topic:
             self._publish(topic, value)
 
@@ -458,7 +518,7 @@ class MQTTBridgePlugin:
     def _schedule_reconnect(self, cfg: dict):
         """Schedule a reconnection attempt after a delay."""
         if self._reconnect_task and not self._reconnect_task.done():
-            return  # Already scheduled
+            return
 
         async def _reconnect():
             delay = 5
@@ -467,7 +527,7 @@ class MQTTBridgePlugin:
                 await asyncio.sleep(delay)
                 if self._client and self._client.is_connected:
                     return
-                self.api.log(f"Reconnecting to broker in {delay}s...", level="debug")
+                self.api.log(f"Reconnecting to broker...", level="debug")
                 try:
                     await self._connect(cfg)
                     if self._client and self._client.is_connected:
