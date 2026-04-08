@@ -106,6 +106,20 @@ Place your plugin directory under the correct category:
 | Sensors | `sensors/` | Environmental inputs (occupancy, temperature, light) |
 | Utility | `utility/` | Analytics, logging, voice control bridges |
 
+## Validation
+
+Run the validator before submitting:
+
+```bash
+python validate.py                               # Validate all plugins
+python validate.py integrations/mqtt              # Validate a specific plugin
+python validate.py --check-index                  # Also check index.json consistency
+```
+
+## Using an AI Assistant
+
+If you use an AI coding assistant, point it to [`AGENTS.md`](../AGENTS.md) in the root of this repository. It contains the complete Plugin API, manifest format, configuration schema, and examples in a format optimized for LLM agents. Have your assistant run `python validate.py` on its output to catch errors before you submit.
+
 ## Review Process
 
 1. Submit a pull request with your plugin directory under the correct category

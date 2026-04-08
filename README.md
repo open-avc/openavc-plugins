@@ -28,6 +28,20 @@ See the [Creating Plugins](https://github.com/open-avc/openavc/blob/main/docs/cr
 
 For contribution guidelines, see [Contributing Plugins](docs/contributing-plugins.md).
 
+### Using an AI Assistant
+
+If you use an AI coding assistant, point it to [`AGENTS.md`](AGENTS.md) in this repository. It contains the complete Plugin API, manifest format, and examples in a format optimized for LLM agents. Run `python validate.py` to check the result before submitting.
+
+## Validation
+
+Run the validator before submitting a pull request:
+
+```bash
+python validate.py                               # Validate all plugins
+python validate.py integrations/mqtt              # Validate a specific plugin
+python validate.py --check-index                  # Also check index.json consistency
+```
+
 ## License
 
 All plugins in this repository are MIT licensed. See [LICENSE](LICENSE) for details.
