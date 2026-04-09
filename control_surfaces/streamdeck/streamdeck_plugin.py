@@ -108,12 +108,26 @@ DECK_MODELS = {
 }
 
 
+def _unwrap_binding(value):
+    """Unwrap a binding value that may be a single dict or an array of dicts.
+
+    The Surface Configurator stores press/release/hold as arrays to support
+    multiple sequential actions. The plugin handler expects a single dict
+    (the first action, which carries the mode and config).
+    """
+    if isinstance(value, list) and len(value) > 0:
+        return value[0] if isinstance(value[0], dict) else None
+    if isinstance(value, dict):
+        return value
+    return None
+
+
 class StreamDeckPlugin:
 
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -419,9 +433,9 @@ class StreamDeckPlugin:
         if not assignment:
             return
 
-        # Get press binding
+        # Get press binding (UI stores press as an array of actions)
         bindings = assignment.get("bindings", {})
-        press = bindings.get("press") if isinstance(bindings, dict) else None
+        press = _unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
         feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
 
         # Backward compat
@@ -579,7 +593,7 @@ class StreamDeckPlugin:
 
             # Toggle mode: on_label/off_label override static label
             bindings = assignment.get("bindings", {})
-            press_binding = bindings.get("press") if isinstance(bindings, dict) else None
+            press_binding = _unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
             if press_binding and isinstance(press_binding, dict) and press_binding.get("mode") == "toggle":
                 tk = press_binding.get("toggle_key", "")
                 tv = press_binding.get("toggle_value")
@@ -826,7 +840,7 @@ class StreamDeckPlugin:
                 if isinstance(feedback, dict) and feedback.get("key"):
                     feedback_keys.add(feedback["key"])
                 # Toggle key (for label/icon updates on toggle state change)
-                press = bindings.get("press", {})
+                press = _unwrap_binding(bindings.get("press"))
                 if isinstance(press, dict) and press.get("toggle_key"):
                     feedback_keys.add(press["toggle_key"])
             # Legacy format
@@ -857,7 +871,7 @@ class StreamDeckPlugin:
                 feedback = bindings.get("feedback", {})
                 if isinstance(feedback, dict) and feedback.get("key") == key:
                     matched = True
-                press = bindings.get("press", {})
+                press = _unwrap_binding(bindings.get("press"))
                 if isinstance(press, dict) and press.get("toggle_key") == key:
                     matched = True
             # Legacy
