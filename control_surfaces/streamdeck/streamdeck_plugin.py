@@ -127,7 +127,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -449,7 +449,14 @@ class StreamDeckPlugin:
 
         if mode == "hold_repeat":
             if pressed:
-                await self._execute_action(press, key_index)
+                # Cancel any existing hold task for this key first
+                old_task = self._hold_tasks.pop(key_index, None)
+                if old_task:
+                    self.api.cancel_task(old_task)
+                # Store task ID synchronously BEFORE any await to prevent
+                # race condition where release fires during _execute_action
+                # and can't find the task to cancel.  The periodic task's
+                # first iteration fires the action almost immediately.
                 interval = press.get("hold_repeat_ms", 200) / 1000.0
                 self._hold_tasks[key_index] = self.api.create_periodic_task(
                     lambda: self._execute_action(press, key_index),
