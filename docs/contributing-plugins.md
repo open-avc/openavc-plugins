@@ -80,8 +80,8 @@ Add your plugin to `index.json` in the root of the repository:
 {
     "id": "your_plugin",
     "name": "Your Plugin Name",
-    "file": "category/your_plugin/your_plugin_plugin.py",
-    "format": "python",
+    "file": "category/your_plugin",
+    "format": "directory",
     "category": "utility",
     "version": "1.0.0",
     "author": "Your Name",

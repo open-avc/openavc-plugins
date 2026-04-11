@@ -273,7 +273,7 @@ await api.state_set("status", "connected")
 await api.variable_set("room_occupied", True)
 
 # Subscribe to state changes matching glob (requires: state_read)
-# Callback signature: async (key: str, value: Any, old_value: Any) -> None
+# Callback signature: (key: str, value: Any, old_value: Any) -> None  (sync or async)
 sub_id = await api.state_subscribe("device.*.power", on_power_change)
 
 # Unsubscribe
@@ -300,7 +300,7 @@ await api.event_emit("connected", {"broker": "mqtt.example.com"})
 # Actual event: plugin.my_plugin.connected
 
 # Subscribe to events matching glob (requires: event_subscribe)
-# Callback signature: async (event_name: str, payload: dict) -> None
+# Callback signature: (event_name: str, payload: dict) -> None  (sync or async)
 handler_id = await api.event_subscribe("device.connected.*", on_device_connected)
 
 # Unsubscribe
@@ -341,7 +341,7 @@ result = await api.device_command("switcher1", "set_input", {"input": 3})
 task = api.create_task(my_coroutine(), name="my_worker")
 
 # Create a repeating task (auto-cancelled on stop)
-# Calls the async function every interval_seconds
+# Calls the function (sync or async) every interval_seconds
 task_id = api.create_periodic_task(check_status, interval_seconds=30.0, name="status_check")
 
 # Cancel a periodic task by ID
