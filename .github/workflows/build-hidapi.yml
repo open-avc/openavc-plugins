@@ -81,7 +81,6 @@ jobs:
               cmake --build build
               mkdir -p /workspace/dist
               cp -L build/src/libusb/libhidapi-libusb.so /workspace/dist/libhidapi-libusb.so
-              file /workspace/dist/libhidapi-libusb.so
             '
 
       - name: Package
