@@ -1,0 +1,124 @@
+# Build HIDAPI shared libraries for Linux.
+#
+# Produces libhidapi-libusb.so for x86_64 and aarch64, packaged as zip
+# files attached to a GitHub release. The Stream Deck plugin's
+# native_dependencies point here so the plugin installer can download the
+# correct binary at install time (same pattern as the Windows hidapi.dll
+# from the upstream HIDAPI release).
+#
+# Trigger manually: Actions > Build HIDAPI > Run workflow
+
+name: Build HIDAPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "HIDAPI version tag (e.g. 0.15.0)"
+        required: true
+        default: "0.15.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-x86_64:
+    name: Build x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc g++ libusb-1.0-0-dev
+
+      - name: Clone and build HIDAPI
+        run: |
+          git clone --depth 1 --branch hidapi-${{ inputs.version }} \
+            https://github.com/libusb/hidapi.git
+          cd hidapi
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Package
+        run: |
+          mkdir dist
+          # Copy the actual .so (follow symlinks)
+          cp -L hidapi/build/src/libusb/libhidapi-libusb.so dist/libhidapi-libusb.so
+          # Verify it's a real ELF binary, not a symlink or text file
+          file dist/libhidapi-libusb.so
+          cd dist && zip ../hidapi-linux-x86_64.zip libhidapi-libusb.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hidapi-linux-x86_64
+          path: hidapi-linux-x86_64.zip
+
+  build-aarch64:
+    name: Build aarch64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU for ARM64 emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: Build HIDAPI in ARM64 container
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${{ github.workspace }}:/workspace" \
+            ubuntu:22.04 bash -c '
+              set -e
+              apt-get update
+              apt-get install -y cmake gcc g++ libusb-1.0-0-dev git
+              git clone --depth 1 --branch hidapi-${{ inputs.version }} \
+                https://github.com/libusb/hidapi.git
+              cd hidapi
+              cmake -B build -DCMAKE_BUILD_TYPE=Release
+              cmake --build build
+              mkdir -p /workspace/dist
+              cp -L build/src/libusb/libhidapi-libusb.so /workspace/dist/libhidapi-libusb.so
+              file /workspace/dist/libhidapi-libusb.so
+            '
+
+      - name: Package
+        run: |
+          cd dist && zip ../hidapi-linux-aarch64.zip libhidapi-libusb.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hidapi-linux-aarch64
+          path: hidapi-linux-aarch64.zip
+
+  release:
+    name: Create release
+    needs: [build-x86_64, build-aarch64]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "hidapi-${{ inputs.version }}"
+          name: "HIDAPI ${{ inputs.version }} (Linux)"
+          body: |
+            Pre-built `libhidapi-libusb` shared libraries for Linux.
+
+            Built from [libusb/hidapi](https://github.com/libusb/hidapi) v${{ inputs.version }} (BSD-3-Clause).
+
+            Used by the Stream Deck plugin to communicate with Elgato devices over USB HID.
+            The plugin installer downloads the correct zip automatically at install time.
+
+            | File | Architecture |
+            |------|-------------|
+            | `hidapi-linux-x86_64.zip` | x86_64 (Intel/AMD 64-bit) |
+            | `hidapi-linux-aarch64.zip` | aarch64 (ARM 64-bit, Raspberry Pi) |
+          files: |
+            artifacts/hidapi-linux-x86_64/hidapi-linux-x86_64.zip
+            artifacts/hidapi-linux-aarch64/hidapi-linux-aarch64.zip

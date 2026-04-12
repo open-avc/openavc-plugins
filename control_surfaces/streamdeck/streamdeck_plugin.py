@@ -38,6 +38,35 @@ def _lazy_import():
     ImageDraw = _ID
     ImageFont = _IF
 
+    # On Linux, LD_LIBRARY_PATH set after process start is not picked up by
+    # dlopen (glibc caches it at startup).  Extend the StreamDeck library's
+    # HIDAPI search to also try full paths into .deps/, which makes dlopen
+    # treat them as path lookups instead of name-only lookups.
+    if platform_mod.system() == "Linux":
+        _patch_hidapi_search()
+
+
+def _patch_hidapi_search():
+    """Extend HIDAPI library search to find .so files bundled in .deps/."""
+    try:
+        from StreamDeck.Transport.LibUSBHIDAPI import LibUSBHIDAPI
+    except ImportError:
+        return
+
+    deps_dir = str(Path(__file__).parent.parent / ".deps")
+    original_load = LibUSBHIDAPI.Library._load_hidapi_library
+
+    def _extended_load(self, search_list):
+        # Try the standard system search first
+        result = original_load(self, search_list)
+        if result is not None:
+            return result
+        # Fall back to full paths in .deps/
+        deps_paths = [os.path.join(deps_dir, os.path.basename(n)) for n in search_list]
+        return original_load(self, deps_paths)
+
+    LibUSBHIDAPI.Library._load_hidapi_library = _extended_load
+
 
 # ──── Model Definitions ────
 
@@ -127,7 +156,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.0.2",
+        "version": "1.0.3",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -146,7 +175,7 @@ class StreamDeckPlugin:
                     "type": "library_load",
                     "names": {
                         "Windows": "hidapi.dll",
-                        "Linux": "libhidapi-libusb.so.0",
+                        "Linux": "libhidapi-libusb.so",
                     },
                 },
                 "platforms": {
@@ -156,12 +185,14 @@ class StreamDeckPlugin:
                         "extract": "x64/hidapi.dll",
                     },
                     "linux_x64": {
-                        "package": "libhidapi-libusb0",
-                        "install_cmd": "sudo apt-get install -y libhidapi-libusb0",
+                        "url": "https://github.com/open-avc/openavc-plugins/releases/download/hidapi-0.15.0/hidapi-linux-x86_64.zip",
+                        "type": "zip",
+                        "extract": "libhidapi-libusb.so",
                     },
                     "linux_arm64": {
-                        "package": "libhidapi-libusb0",
-                        "install_cmd": "sudo apt-get install -y libhidapi-libusb0",
+                        "url": "https://github.com/open-avc/openavc-plugins/releases/download/hidapi-0.15.0/hidapi-linux-aarch64.zip",
+                        "type": "zip",
+                        "extract": "libhidapi-libusb.so",
                     },
                 },
             },
@@ -304,14 +335,12 @@ class StreamDeckPlugin:
         try:
             _lazy_import()
         except ImportError as e:
-            self.api.log(
-                f"Failed to import Stream Deck library: {e}. "
-                f"Make sure the 'streamdeck' and 'pillow' packages are installed.",
-                level="error",
-            )
             if "hidapi" in str(e).lower() or "hid" in str(e).lower():
-                self._log_hidapi_help()
-            raise
+                raise RuntimeError(self._hidapi_error_message()) from e
+            raise RuntimeError(
+                "Failed to import Stream Deck library. "
+                "Make sure the 'streamdeck' and 'pillow' packages are installed."
+            ) from e
 
         # Load Lucide icon font for button icon rendering
         self._load_icon_font()
@@ -327,9 +356,8 @@ class StreamDeckPlugin:
         try:
             decks = StreamDeck.DeviceManager().enumerate()
         except Exception as e:
-            self.api.log(f"Could not enumerate Stream Deck devices: {e}", level="error")
             if "hidapi" in str(e).lower() or "hid" in str(e).lower():
-                self._log_hidapi_help()
+                raise RuntimeError(self._hidapi_error_message()) from e
             raise
 
         if not decks:
@@ -943,26 +971,23 @@ class StreamDeckPlugin:
                 return btn
         return None
 
-    def _log_hidapi_help(self):
-        """Log platform-specific help for installing hidapi."""
+    @staticmethod
+    def _hidapi_error_message() -> str:
+        """Return a user-friendly error message for missing HIDAPI library."""
         system = platform_mod.system()
         if system == "Windows":
-            self.api.log(
+            return (
                 "HIDAPI library not found. It should have been installed automatically. "
                 "Check that plugin_repo/.deps/hidapi.dll exists. If not, reinstall "
-                "the Stream Deck plugin from the community repository.",
-                level="error",
+                "the Stream Deck plugin from the community repository."
             )
         elif system == "Linux":
-            self.api.log(
-                "HIDAPI library not found. Install it with: "
-                "sudo apt-get install -y libhidapi-libusb0",
-                level="error",
+            return (
+                "HIDAPI library not found. Run these commands on the server, "
+                "then restart the plugin:\n"
+                "  sudo apt-get install -y libhidapi-libusb0\n"
+                "  echo 'SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"0fd9\", MODE=\"0666\"' "
+                "| sudo tee /etc/udev/rules.d/99-streamdeck.rules\n"
+                "  sudo udevadm control --reload-rules && sudo udevadm trigger"
             )
-            self.api.log(
-                "For non-root USB access, add a udev rule: "
-                'echo \'SUBSYSTEM=="usb", ATTRS{idVendor}=="0fd9", MODE="0666"\' | '
-                "sudo tee /etc/udev/rules.d/99-streamdeck.rules && "
-                "sudo udevadm control --reload-rules && sudo udevadm trigger",
-                level="error",
-            )
+        return "HIDAPI library not found. See the Stream Deck plugin README for install instructions."
