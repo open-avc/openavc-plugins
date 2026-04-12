@@ -31,14 +31,14 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake gcc g++ libusb-1.0-0-dev
+          sudo apt-get install -y cmake gcc g++ pkg-config libusb-1.0-0-dev
 
       - name: Clone and build HIDAPI
         run: |
           git clone --depth 1 --branch hidapi-${{ inputs.version }} \
             https://github.com/libusb/hidapi.git
           cd hidapi
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DHIDAPI_WITH_HIDRAW=OFF
           cmake --build build
 
       - name: Package
@@ -73,11 +73,11 @@ jobs:
             ubuntu:22.04 bash -c '
               set -e
               apt-get update
-              apt-get install -y cmake gcc g++ libusb-1.0-0-dev git
+              apt-get install -y cmake gcc g++ pkg-config libusb-1.0-0-dev git
               git clone --depth 1 --branch hidapi-${{ inputs.version }} \
                 https://github.com/libusb/hidapi.git
               cd hidapi
-              cmake -B build -DCMAKE_BUILD_TYPE=Release
+              cmake -B build -DCMAKE_BUILD_TYPE=Release -DHIDAPI_WITH_HIDRAW=OFF
               cmake --build build
               mkdir -p /workspace/dist
               cp -L build/src/libusb/libhidapi-libusb.so /workspace/dist/libhidapi-libusb.so
