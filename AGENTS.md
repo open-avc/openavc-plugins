@@ -560,10 +560,10 @@ EXTENSIONS = {
             "renderer": "iframe",               # Only "iframe" supported
             "renderer_url": "/plugins/{plugin_id}/panel/index.html",
             "default_size": {"col_span": 3, "row_span": 2},
-            "config_schema": {
-                "title": {"type": "string", "label": "Title", "default": "Status"},
-                "state_key": {"type": "string", "label": "State Key", "default": ""},
-            },
+            "config_schema": [
+                {"key": "title", "type": "text", "label": "Title", "default": "Status"},
+                {"key": "state_key", "type": "state_key", "label": "State Key", "default": ""},
+            ],
         },
     ],
 }
