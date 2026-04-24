@@ -1,0 +1,13 @@
+{
+    "id": "dante",
+    "name": "Dante DDM",
+    "version": "1.2.0",
+    "author": "OpenAVC",
+    "description": "Audio routing via Dante Domain Manager or Dante Director Professional.",
+    "category": "integration",
+    "license": "MIT",
+    "platforms": ["all"],
+    "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe"],
+    "dependencies": ["httpx>=0.27.0"],
+    "min_openavc_version": "0.3.0"
+}
