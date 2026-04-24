@@ -30,7 +30,7 @@
             "license": "MIT",
             "platforms": ["all"],
             "min_openavc_version": "0.3.0",
-            "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe"],
+            "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe", "device_command", "macro_execute"],
             "has_native_dependencies": false,
             "verified": false,
             "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration."
