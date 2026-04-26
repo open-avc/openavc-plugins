@@ -37,7 +37,7 @@ Every plugin must include a `plugin.json` that mirrors the `PLUGIN_INFO` dict:
     "platforms": ["all"],
     "capabilities": ["state_read", "state_write", "event_emit"],
     "dependencies": [],
-    "min_openavc_version": "1.0.0"
+    "min_openavc_version": "0.3.0"
 }
 ```
 
@@ -87,7 +87,7 @@ Add your plugin to `index.json` in the root of the repository:
     "author": "Your Name",
     "license": "MIT",
     "platforms": ["all"],
-    "min_openavc_version": "1.0.0",
+    "min_openavc_version": "0.3.0",
     "capabilities": ["state_read", "state_write", "event_emit"],
     "has_native_dependencies": false,
     "verified": false,

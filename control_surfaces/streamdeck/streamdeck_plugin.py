@@ -162,7 +162,7 @@ class StreamDeckPlugin:
         "category": "control_surface",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        "min_openavc_version": "1.0.0",
+        "min_openavc_version": "0.3.0",
         "dependencies": ["streamdeck", "pillow>=10.0"],
         "native_dependencies": [
             {

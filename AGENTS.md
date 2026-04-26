@@ -88,7 +88,7 @@ PLUGIN_INFO = {
 PLUGIN_INFO = {
     # ... required fields ...
     "platforms": ["all"],           # win_x64 | linux_x64 | linux_arm64 | all
-    "min_openavc_version": "1.0.0", # Minimum compatible OpenAVC version
+    "min_openavc_version": "0.3.0", # Minimum compatible OpenAVC version
     "dependencies": [],             # pip packages (must be MIT-compatible)
     "native_dependencies": [],      # Platform-level SDKs (see section 10)
     "capabilities": [],             # API permissions needed (see below)
@@ -787,7 +787,7 @@ Every plugin directory must include a `plugin.json` that mirrors `PLUGIN_INFO`:
     "platforms": ["all"],
     "capabilities": ["state_read", "state_write", "event_emit"],
     "dependencies": [],
-    "min_openavc_version": "1.0.0"
+    "min_openavc_version": "0.3.0"
 }
 ```
 
@@ -819,7 +819,7 @@ Every plugin must have an entry in `index.json`. The catalog is used by the Prog
     "author": "Your Name",
     "license": "MIT",
     "platforms": ["all"],
-    "min_openavc_version": "1.0.0",
+    "min_openavc_version": "0.3.0",
     "capabilities": ["state_read", "state_write", "event_emit"],
     "has_native_dependencies": false,
     "verified": false,

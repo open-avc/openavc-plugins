@@ -10,5 +10,5 @@
     "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe", "macro_execute", "device_command", "usb_access"],
     "dependencies": ["streamdeck", "pillow>=10.0"],
     "has_native_dependencies": true,
-    "min_openavc_version": "1.0.0"
+    "min_openavc_version": "0.3.0"
 }
