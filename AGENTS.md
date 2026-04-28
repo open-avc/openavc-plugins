@@ -102,13 +102,16 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | Capability | What It Unlocks |
 |------------|----------------|
 | `state_read` | `state_get()`, `state_get_pattern()`, `state_subscribe()` |
-| `state_write` | `state_set()` (own namespace only), `variable_set()` |
+| `state_write` | `state_set()` (own `plugin.<id>.*` namespace only) |
+| `variable_write` | `variable_set()` (writes to `var.*` user variables) |
 | `event_emit` | `event_emit()` |
 | `event_subscribe` | `event_subscribe()` |
 | `macro_execute` | `macro_execute()` |
 | `device_command` | `device_command()` |
 | `network_listen` | Plugin may open network ports |
 | `usb_access` | Plugin may access USB devices |
+
+`state_write` and `variable_write` are independent. `state_write` lets a plugin write its own namespaced state (e.g., `plugin.my_plugin.connected`). `variable_write` lets a plugin write user variables (`var.*`) — shared room-logic state. Most plugins need only `state_write`. Declare `variable_write` only when the plugin explicitly contributes to user-variable state, e.g., a sensor reporting occupancy into `var.room_occupied` or a bridge mirroring an external system.
 
 Calling a method without the required capability raises `PluginPermissionError`.
 
@@ -268,8 +271,8 @@ devices = await api.state_get_pattern("device.*.power")
 await api.state_set("status", "connected")
 # Actual key: plugin.my_plugin.status
 
-# Write a user variable (requires: state_write)
-# Writes to var.<variable_id>, bypassing namespace restriction
+# Write a user variable (requires: variable_write)
+# Writes to var.<variable_id> — shared room-logic state
 await api.variable_set("room_occupied", True)
 
 # Subscribe to state changes matching glob (requires: state_read)
@@ -285,7 +288,7 @@ await api.state_unsubscribe(sub_id)
 **State key namespaces:**
 ```
 device.<device_id>.<property>    # Device state (read-only for plugins)
-var.<variable_id>                # User variables (writable via variable_set)
+var.<variable_id>                # User variables (writable via variable_set; requires variable_write)
 ui.<element_id>.<property>       # UI element state
 system.<property>                # System state (uptime, version, etc.)
 plugin.<plugin_id>.*             # Plugin namespace (writable via state_set)
@@ -1103,7 +1106,7 @@ class OccupancySensorPlugin:
         "category": "sensor",
         "license": "MIT",
         "platforms": ["all"],
-        "capabilities": ["state_read", "state_write", "event_emit"],
+        "capabilities": ["state_read", "state_write", "variable_write", "event_emit"],
     }
 
     CONFIG_SCHEMA = {
@@ -1182,7 +1185,8 @@ class OccupancySensorPlugin:
 | Using `asyncio.create_task()` | Use `api.create_task()`. Framework tasks are auto-cancelled on stop. |
 | Including `plugin.<id>.` prefix in `state_set()` | The prefix is added automatically. Just pass the key name. |
 | Including `plugin.<id>.` prefix in `event_emit()` | Same -- auto-prefixed. |
-| Writing to state keys outside plugin namespace | `state_set()` only allows `plugin.<id>.*`. Use `variable_set()` for user vars. |
+| Writing to state keys outside plugin namespace | `state_set()` only allows `plugin.<id>.*`. Use `variable_set()` for user vars (requires `variable_write`). |
+| Calling `variable_set()` with only `state_write` declared | `variable_set()` needs the separate `variable_write` capability. Add it to your manifest. |
 | Storing nested objects in state | State values must be flat primitives: str, int, float, bool, None. |
 | Not declaring capabilities | API calls without matching capability raise `PluginPermissionError`. |
 | Blocking the event loop | Use `await` for I/O. Never use `time.sleep()` -- use `asyncio.sleep()`. |

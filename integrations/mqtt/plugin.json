@@ -1,13 +1,13 @@
 {
     "id": "mqtt",
     "name": "MQTT Bridge",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "author": "OpenAVC",
     "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration.",
     "category": "integration",
     "license": "MIT",
     "platforms": ["all"],
-    "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe", "device_command", "macro_execute"],
+    "capabilities": ["state_read", "state_write", "variable_write", "event_emit", "event_subscribe", "device_command", "macro_execute"],
     "dependencies": ["gmqtt>=0.6.0"],
-    "min_openavc_version": "0.3.0"
+    "min_openavc_version": "0.9.0"
 }
