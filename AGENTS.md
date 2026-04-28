@@ -440,6 +440,18 @@ You do not need to manually unsubscribe or delete state keys in `stop()`. You on
 
 If a plugin's callbacks fail 10 consecutive times, the plugin is automatically disabled. The counter resets on any successful callback. Implement proper error handling in callbacks to prevent this.
 
+### 6.6 Hot Reload
+
+Two distinct things get called "reload":
+
+- **Config reload** (user toggles enable, edits config in the IDE, project file changes). The platform calls `stop()`, then instantiates a new plugin from the cached class and calls `start()` with the new config. The plugin file is **not** re-read; code edits do not take effect.
+- **Code reload** (server restart, fresh plugin scan). The platform re-executes the plugin file via `importlib`. A new module object and a new class object replace the cached ones. Module-level state (globals, top-level caches) is reset.
+
+Two things to avoid:
+
+- **Don't cache `type(self)` or the plugin class outside the platform's registry.** After a code reload, the registry holds the new class; any external cache still holds the old one. `isinstance(new_instance, OldClass)` returns False, and method lookup against the stale class runs old code.
+- **Don't rely on module-level state surviving a code reload.** Counters or caches defined at the top of your plugin file are reset when the file is re-executed. Put long-lived state on the instance (`self.foo`) so each `start()` rebuilds it.
+
 ---
 
 ## 7. Extensions (UI Integration)
