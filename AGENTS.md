@@ -18,15 +18,16 @@ This file is a self-contained reference for LLM-based coding agents helping user
 5. [Plugin API Reference](#5-plugin-api-reference)
 6. [Plugin Lifecycle](#6-plugin-lifecycle)
 7. [Extensions (UI Integration)](#7-extensions-ui-integration)
-8. [Panel Elements (Custom UI)](#8-panel-elements-custom-ui)
-9. [Surface Layout (Control Surfaces)](#9-surface-layout-control-surfaces)
-10. [Native Dependencies](#10-native-dependencies)
-11. [Testing](#11-testing)
-12. [Repository Structure and Naming](#12-repository-structure-and-naming)
-13. [index.json Catalog Entry](#13-indexjson-catalog-entry)
-14. [Validation](#14-validation)
-15. [Complete Examples](#15-complete-examples)
-16. [Common Mistakes](#16-common-mistakes)
+8. [Macro Actions](#8-macro-actions)
+9. [Panel Elements (Custom UI)](#9-panel-elements-custom-ui)
+10. [Surface Layout (Control Surfaces)](#10-surface-layout-control-surfaces)
+11. [Native Dependencies](#11-native-dependencies)
+12. [Testing](#12-testing)
+13. [Repository Structure and Naming](#13-repository-structure-and-naming)
+14. [index.json Catalog Entry](#14-indexjson-catalog-entry)
+15. [Validation](#15-validation)
+16. [Complete Examples](#16-complete-examples)
+17. [Common Mistakes](#17-common-mistakes)
 
 ---
 
@@ -560,11 +561,116 @@ async def on_action(self, event, payload):
 
 ---
 
-## 8. Panel Elements (Custom UI)
+## 8. Macro Actions
+
+Plugins can register new macro action types that show up in the macro builder and run inside the macro engine alongside built-in actions like `device.command` and `state.set`.
+
+Use this for actions that aren't tied to a single device — playing a sound on every panel, sending a notification, posting to Slack, triggering a scene on an external system.
+
+### 8.1 Declaration
+
+Define `MACRO_ACTIONS` as a class-level dict. Each entry maps an action type string to a handler method name plus a parameter schema for the macro builder.
+
+```python
+class AudioPlayerPlugin:
+
+    PLUGIN_INFO = {
+        "id": "audio_player",
+        "name": "Audio Player",
+        ...
+    }
+
+    MACRO_ACTIONS = {
+        "audio_player.play": {
+            "label": "Play Sound",
+            "description": "Play a sound on every panel with the Audio Player element",
+            "icon": "volume-2",                 # Lucide icon name (optional)
+            "handler": "action_play",            # method name on this class
+            "params": [
+                {
+                    "key": "sound",
+                    "type": "select",
+                    "label": "Sound",
+                    "required": True,
+                    "options_source": "plugin.audio_player.sounds",
+                },
+                {
+                    "key": "volume",
+                    "type": "float",
+                    "label": "Volume",
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.1,
+                },
+            ],
+        },
+        "audio_player.stop": {
+            "label": "Stop All Sounds",
+            "handler": "action_stop",
+            "params": [],
+        },
+    }
+
+    async def action_play(self, params, context):
+        sound = params["sound"]
+        volume = params.get("volume", 1.0)
+        # Plugin already has self.api from start() — write play_request, etc.
+        ...
+
+    async def action_stop(self, params, context):
+        ...
+```
+
+### 8.2 Action Naming
+
+Every action type must be **prefixed with the plugin's id** followed by a dot. The suffix must be lowercase letters, digits, or underscores (`audio_player.play`, `mqtt_bridge.publish`, `slack.send_message`). The validator rejects anything else at load time, which prevents two plugins from claiming the same action name.
+
+### 8.3 Param Schema
+
+Each param entry supports the following fields:
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `key` | Yes | The key under `step.params`. Must be unique within the action. |
+| `type` | Yes | One of: `text`, `integer`, `float`, `boolean`, `select`, `state_key`, `device_ref`, `macro_ref`. |
+| `label` | No | Human-readable label in the macro builder form. |
+| `description` | No | Inline help text under the field. |
+| `required` | No | Marks the field with a red asterisk. |
+| `default` | No | Initial value when a new step is added. |
+| `min`, `max`, `step` | No | Numeric input constraints. |
+| `options` | For `select` | Array of `{value, label}` for static dropdowns. |
+| `options_source` | For `select` | State key that holds a JSON list, populated dynamically by the plugin. Either `options` or `options_source` is required for `select`. |
+
+Field types `text`, `integer`, `float`, and `select` also support **dynamic values**: a user can switch the field into "$var.foo" mode and the macro engine will resolve it from state at runtime before invoking the handler.
+
+### 8.4 Handler Signature
+
+```python
+async def handler(self, params: dict, context: dict) -> None:
+    ...
+```
+
+- `params` is the resolved parameter dict (with `$var.foo` already looked up).
+- `context` is the macro execution context (currently used for trigger payloads).
+- Handlers must be `async`. The validator rejects plain `def` methods.
+- Raise to fail the step. The error message is shown in the macro builder and emitted as a `macro.step_error.<macro_id>` event with the plugin id in the context.
+
+### 8.5 Lifecycle
+
+Actions register automatically when the plugin starts and unregister when it stops. There is no API call to make — the platform reads `MACRO_ACTIONS` from the class. If a project file references an action whose plugin isn't installed or enabled, the macro builder shows a "Missing plugin" warning on the affected steps and the macro fails at that step if run.
+
+### 8.6 No Capability Required
+
+`MACRO_ACTIONS` is purely declarative, like `EXTENSIONS`. The handler runs in the plugin's own code with whatever `self.api` permissions you declared in `capabilities`.
+
+---
+
+## 9. Panel Elements (Custom UI)
 
 Plugins can provide custom HTML/CSS/JS UI elements for touch panels via iframes.
 
-### 8.1 Declaration
+### 9.1 Declaration
 
 ```python
 EXTENSIONS = {
@@ -584,7 +690,7 @@ EXTENSIONS = {
 }
 ```
 
-### 8.2 File Placement
+### 9.2 File Placement
 
 Place panel files in a `panel/` subdirectory within your plugin directory:
 
@@ -597,7 +703,7 @@ my_plugin/
     └── app.js
 ```
 
-### 8.3 Communication API
+### 9.3 Communication API
 
 The iframe communicates with the panel via `postMessage`.
 
@@ -644,7 +750,7 @@ window.parent.postMessage({
 
 ---
 
-## 9. Surface Layout (Control Surfaces)
+## 10. Surface Layout (Control Surfaces)
 
 Control surface plugins (Stream Deck, MIDI controllers) declare their physical layout so the IDE can show a visual configurator.
 
@@ -668,7 +774,7 @@ The actual layout may be detected from hardware at runtime. The static definitio
 
 ---
 
-## 10. Native Dependencies
+## 11. Native Dependencies
 
 For plugins that require platform-level libraries (C shared libraries, USB drivers, etc.).
 
@@ -721,7 +827,7 @@ PLUGIN_INFO = {
 
 ---
 
-## 11. Testing
+## 12. Testing
 
 OpenAVC provides a test harness for plugin development.
 
@@ -763,7 +869,7 @@ async def test_my_plugin():
 
 ---
 
-## 12. Repository Structure and Naming
+## 13. Repository Structure and Naming
 
 ```
 openavc-plugins/
@@ -819,7 +925,7 @@ Every plugin must include a `README.md` that covers:
 
 ---
 
-## 13. index.json Catalog Entry
+## 14. index.json Catalog Entry
 
 Every plugin must have an entry in `index.json`. The catalog is used by the Programmer IDE's "Browse Plugins" feature.
 
@@ -862,7 +968,7 @@ Every plugin must have an entry in `index.json`. The catalog is used by the Prog
 
 ---
 
-## 14. Validation
+## 15. Validation
 
 Run the validation script before submitting:
 
@@ -886,9 +992,9 @@ The validator checks:
 
 ---
 
-## 15. Complete Examples
+## 16. Complete Examples
 
-### 15.1 Minimal Plugin (Utility)
+### 16.1 Minimal Plugin (Utility)
 
 ```python
 """
@@ -960,7 +1066,7 @@ class RoomActivityPlugin:
         return {"status": "ok", "message": "Tracking active"}
 ```
 
-### 15.2 Integration Plugin (MQTT Bridge)
+### 16.2 Integration Plugin (MQTT Bridge)
 
 ```python
 """
@@ -1097,7 +1203,7 @@ class MQTTBridgePlugin:
         return {"status": "error", "message": "Disconnected from broker"}
 ```
 
-### 15.3 Sensor Plugin (Occupancy)
+### 16.3 Sensor Plugin (Occupancy)
 
 ```python
 """
@@ -1178,7 +1284,7 @@ class OccupancySensorPlugin:
 
 ---
 
-## 16. Common Mistakes
+## 17. Common Mistakes
 
 ### Plugin Structure
 
@@ -1222,6 +1328,16 @@ class OccupancySensorPlugin:
 | `format` set to `"python"` | For directory-based plugins, use `"directory"`. |
 | `verified` set to `true` | Only maintainers verify. Always submit with `false`. |
 | Fields don't match `PLUGIN_INFO` / `plugin.json` | All three must be consistent. |
+
+### Macro Actions
+
+| Mistake | Fix |
+|---------|-----|
+| Action key not prefixed with plugin id | Action types must look like `<plugin_id>.<name>`. The validator rejects mismatches. |
+| Handler is `def`, not `async def` | All macro action handlers must be coroutines. |
+| `handler` field references a missing method | The method must exist on the plugin class with the exact name. |
+| `select` param has no `options` or `options_source` | One or the other is required for `select` type. |
+| Manually resolving `$var.foo` inside the handler | The macro engine resolves dynamic params before calling your handler. Just use `params[key]`. |
 
 ---
 

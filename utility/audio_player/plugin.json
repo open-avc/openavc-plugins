@@ -1,0 +1,13 @@
+{
+  "id": "audio_player",
+  "name": "Audio Player",
+  "version": "0.1.0",
+  "author": "OpenAVC",
+  "description": "Play sound effects through panels — chimes, bells, alerts, notifications.",
+  "category": "utility",
+  "license": "MIT",
+  "platforms": ["all"],
+  "min_openavc_version": "0.6.0",
+  "capabilities": ["state_write"],
+  "dependencies": []
+}

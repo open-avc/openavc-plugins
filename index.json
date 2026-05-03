@@ -1,6 +1,6 @@
 {
     "schema_version": "1.0.0",
-    "updated": "2026-04-28",
+    "updated": "2026-05-03",
     "plugins": [
         {
             "id": "streamdeck",
@@ -50,6 +50,22 @@
             "has_native_dependencies": false,
             "verified": false,
             "description": "Audio routing via Dante Domain Manager or Dante Director Professional."
+        },
+        {
+            "id": "audio_player",
+            "name": "Audio Player",
+            "file": "utility/audio_player",
+            "format": "directory",
+            "category": "utility",
+            "version": "0.1.0",
+            "author": "OpenAVC",
+            "license": "MIT",
+            "platforms": ["all"],
+            "min_openavc_version": "0.6.0",
+            "capabilities": ["state_write"],
+            "has_native_dependencies": false,
+            "verified": false,
+            "description": "Play sound effects through panels — chimes, bells, alerts, notifications."
         }
     ]
 }
