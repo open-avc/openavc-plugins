@@ -4,28 +4,31 @@ Play short sound effects through OpenAVC panels — chimes for meeting starts, b
 
 ## How to Use It
 
-The plugin has no settings panel. You play sounds from macros, scripts, or button bindings.
+The plugin doesn't ship any sounds. You upload your own to the project's Assets section and reference them from macros or scripts.
 
-### From a macro
+### 1. Upload your sounds
+
+Programmer IDE → **Project → Assets** → drop in `.mp3`, `.wav`, `.ogg`, or `.m4a` files. They appear in the **Audio** filter and are automatically picked up by this plugin.
+
+### 2. Trigger from a macro
 
 1. Open or create a macro in the **Macros** view.
-2. Click **+ Add Step** → scroll to the **Plugin Actions** section → **Audio Player** → **Play Sound**.
-3. Pick a sound from the dropdown and (optionally) set a volume.
-4. Run the macro. Every connected panel plays the sound.
+2. **+ Add Step** → scroll to **Plugin Actions** → **Audio Player** → **Play Sound**.
+3. Pick the sound from the dropdown and (optionally) set a volume.
+4. Run the macro — every connected panel plays the sound.
 
-### From a button on a panel
+### 3. Trigger from a panel button
 
-1. In **UI Builder**, select a button.
-2. In **Press Action**, choose **Run macro** and pick a macro that contains a Play Sound step.
+In **UI Builder**, set a button's **Press Action** to **Run Macro** and pick a macro that contains a Play Sound step.
 
-### From a script
+### 4. Trigger from a script
 
 ```python
 from openavc import plugins, on_event
 
 @on_event("ui.press.lobby_chime")
 async def chime(event):
-    await plugins.audio_player.play("chime_soft", volume=0.6)
+    await plugins.audio_player.play("assets://lobby_chime.mp3", volume=0.6)
 ```
 
 Available script methods: `play(sound, volume=1.0)`, `stop()`, `set_volume(volume)`, `mute()`, `unmute()`, `list_sounds()`.
@@ -34,38 +37,13 @@ Available script methods: `play(sound, volume=1.0)`, `stop()`, `set_volume(volum
 
 Audio plays in the panel browser, not on the OpenAVC server. When you fire `audio_player.play`, the plugin writes a state key that every connected panel watches; each panel plays the sound through its speakers.
 
-**Audio plays globally** — every connected panel chimes. Per-panel targeting (e.g. "lobby only") is a future feature waiting on platform-level panel identity.
+**Audio plays globally** — every connected panel plays. Per-panel targeting (e.g. "lobby only") is a future feature waiting on platform-level panel identity.
 
 ## Requirements
 
 - **Browser audio unlock.** Modern browsers block audio until the user has tapped the screen at least once. Tap any panel once after it loads; audio works silently from there. Sounds that arrive before that first tap are dropped (logged in the browser console).
 - **Speakers on the panel device.** Tablets, mini PCs, and TVs almost always have audio out.
-
-## Built-in Sounds
-
-| ID | Description |
-|----|-------------|
-| `chime_soft` | Gentle bong — meeting starts |
-| `chime_doorbell` | Two-tone confirmation — arrivals |
-| `bell_school` | Glass-bell ring — class change / period transition |
-| `alert_attention` | Three-tone questioning chime — get attention |
-| `notification_pop` | Short pluck — button feedback |
-| `countdown_beep` | Single tick — timer / countdown |
-| `success` | Rising tone — action confirmed |
-| `error` | Descending tone — action failed |
-| `applause_short` | Crowd applause — award / celebration |
-
-All sounds are CC0 (Kenney's interface sounds pack and BigSoundBank).
-
-## Custom Sounds
-
-Upload audio files to **Project → Assets** (`.mp3`, `.wav`, `.ogg`, `.m4a` accepted) and reference them by `assets://filename.mp3`:
-
-```python
-await plugins.audio_player.play("assets://my_custom_chime.mp3")
-```
-
-In a macro Play Sound step, type the `assets://` reference into the sound field (or pick from the autocomplete once project audio assets are wired into the dropdown — coming soon).
+- **At least one audio asset uploaded** to the project, otherwise the Play Sound dropdown will be empty.
 
 ## State Keys
 
@@ -76,18 +54,20 @@ In a macro Play Sound step, type the `assets://` reference into the sound field 
 | `plugin.audio_player.last_played_at` | string (ISO 8601) | When the last sound was played. |
 | `plugin.audio_player.master_volume` | float (0.0–1.0) | Global volume multiplier. |
 | `plugin.audio_player.muted` | bool | When true, no sounds play regardless of volume. |
-| `plugin.audio_player.sounds` | string (JSON) | Available sounds list, used by the macro builder dropdown. |
+| `plugin.audio_player.sounds` | string (JSON) | Available sounds list (built from project audio assets), used by the macro builder dropdown. |
 
-You can bind UI elements to any of these state keys. For example, a "Mute" toggle on a panel can write `plugin.audio_player.muted` directly.
+You can bind UI elements to any of these. For example, a "Mute" toggle on a panel can write `plugin.audio_player.muted` directly.
 
 ## Troubleshooting
 
+**Empty sound dropdown in the macro builder.** No audio assets are uploaded yet. Open **Project → Assets** and add some audio files.
+
+**Newly uploaded sound doesn't appear.** The macro builder fetches the sound list once when it loads. Click the ↻ button next to "Plugin Actions" in the Add Step menu to refresh.
+
 **No sound on any panel.** First tap of the panel after page load unlocks audio. Tap anywhere on the panel and try again. Check the browser console for `[panel-audio]` messages.
 
-**Custom sound doesn't play.** Confirm the file is in **Project → Assets**, the filename matches exactly (case-sensitive), and the extension is one of the supported types (`.mp3`, `.wav`, `.ogg`, `.m4a`).
-
-**Refreshing the sound dropdown.** Sounds are fetched once when the macro builder loads. After uploading a new asset or installing a plugin update, click the ↻ button next to "Plugin Actions" in the macro Add Step menu.
+**Sound plays on some panels but not others.** A panel that hasn't been tapped yet has audio still locked. Each panel needs one user gesture to unlock.
 
 ## License
 
-MIT. Built-in sounds are CC0 (see [`sounds/manifest.json`](sounds/manifest.json) for source attribution).
+MIT.

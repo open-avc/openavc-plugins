@@ -91,15 +91,36 @@ async def test_initial_state_keys_set(harness_and_plugin):
 
 
 @pytest.mark.asyncio
-async def test_sound_catalog_published(harness_and_plugin):
+async def test_sound_catalog_starts_empty(harness_and_plugin):
     harness, _ = harness_and_plugin
     catalog_json = harness.state.get("plugin.audio_player.sounds")
     assert isinstance(catalog_json, str)
     catalog = json.loads(catalog_json)
-    # We ship 10 placeholder built-in sounds in manifest.json
-    assert len(catalog) >= 1
-    for entry in catalog:
-        assert "value" in entry and "label" in entry
+    # No project assets uploaded in the harness — catalog is empty
+    assert catalog == []
+
+
+@pytest.mark.asyncio
+async def test_sound_catalog_picks_up_project_audio_assets(harness_and_plugin):
+    harness, _ = harness_and_plugin
+    # Simulate the platform publishing the project asset list
+    asset_list = json.dumps([
+        {"name": "lobby_chime.mp3", "size": 1234, "extension": "mp3", "type": "audio"},
+        {"name": "logo.png", "size": 5000, "extension": "png", "type": "image"},
+        {"name": "dismiss.wav", "size": 2200, "extension": "wav", "type": "audio"},
+    ])
+    harness.state.set("project.assets", asset_list, source="test")
+    # Subscribe callbacks fire synchronously via the harness's event bus,
+    # but the plugin's _on_assets_changed is async — yield once
+    import asyncio
+    await asyncio.sleep(0)
+
+    catalog_json = harness.state.get("plugin.audio_player.sounds")
+    catalog = json.loads(catalog_json)
+    values = {entry["value"] for entry in catalog}
+    assert values == {"assets://lobby_chime.mp3", "assets://dismiss.wav"}
+    # Image asset is correctly filtered out
+    assert "assets://logo.png" not in values
 
 
 @pytest.mark.asyncio
@@ -263,14 +284,12 @@ async def test_script_set_volume_and_mute(harness_and_plugin):
     assert harness.state.get("plugin.audio_player.muted") is False
 
 
-def test_script_list_sounds_is_sync(harness_and_plugin):
-    # Note: harness_and_plugin is async so we can't actually use it from a
-    # sync test, but list_sounds itself doesn't need the harness — we can
-    # construct the plugin directly.
+def test_script_list_sounds_is_sync():
+    # list_sounds is sync and just returns a copy of the internal asset list
     plugin = AudioPlayerPlugin()
-    plugin._builtin_sounds = [{"id": "x", "name": "X"}]
+    plugin._audio_assets = [{"name": "x.mp3", "type": "audio"}]
     sounds = plugin.script_list_sounds()
-    assert sounds == [{"id": "x", "name": "X"}]
+    assert sounds == [{"name": "x.mp3", "type": "audio"}]
     # Returns a copy, not the internal list
-    sounds.append({"id": "y"})
-    assert plugin._builtin_sounds == [{"id": "x", "name": "X"}]
+    sounds.append({"name": "y.mp3"})
+    assert plugin._audio_assets == [{"name": "x.mp3", "type": "audio"}]

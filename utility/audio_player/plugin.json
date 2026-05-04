@@ -1,13 +1,13 @@
 {
   "id": "audio_player",
   "name": "Audio Player",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "author": "OpenAVC",
-  "description": "Play sound effects through panels. Use the 'Play Sound' macro action or call from a script.",
+  "description": "Play sound effects through panels. Upload audio in Project → Assets, then trigger from macros or scripts.",
   "category": "utility",
   "license": "MIT",
   "platforms": ["all"],
   "min_openavc_version": "0.10.3",
-  "capabilities": ["state_write"],
+  "capabilities": ["state_read", "state_write"],
   "dependencies": []
 }

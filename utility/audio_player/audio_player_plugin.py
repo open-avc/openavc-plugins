@@ -1,22 +1,18 @@
 """
 OpenAVC Audio Player Plugin
 
-Plays sound effects through panel browsers. Triggered from macros, scripts,
-and UI bindings. Use cases include meeting-start chimes, "class dismissed"
-bells, doorbell tones, paging notifications, button-press feedback.
+Plays sound effects through panel browsers. Sounds are uploaded to the
+project's Assets section (Programmer IDE → Project → Assets) and then
+referenced from macros, scripts, or button bindings.
 
-Architecture: audio playback happens in a panel-side UI element that
-subscribes to a state key. Macro actions write a play request to that key;
-every panel running an Audio Player element receives the state update and
-plays the sound. Targeting falls out of element placement — put the element
-on the lobby page only and only the lobby chimes; put it on a shared base
-page and the whole building chimes.
+Architecture: server-side plugin only — audio playback lives in the panel
+runtime. Plugin writes a state key when triggered; every connected panel
+watches that key and plays the sound through its speakers.
 """
 
 import json
 import time
 import uuid
-from pathlib import Path
 
 
 class AudioPlayerPlugin:
@@ -24,31 +20,39 @@ class AudioPlayerPlugin:
     PLUGIN_INFO = {
         "id": "audio_player",
         "name": "Audio Player",
-        "version": "0.3.2",
+        "version": "0.4.0",
         "author": "OpenAVC",
-        "description": "Play sound effects through panels. Use the 'Play Sound' macro action or call from a script.",
+        "description": "Play sound effects through panels. Upload audio in Project → Assets, then trigger from macros or scripts.",
         "category": "utility",
         "license": "MIT",
         "platforms": ["all"],
         "min_openavc_version": "0.10.3",
-        "capabilities": ["state_write"],
+        "capabilities": ["state_read", "state_write"],
         "usage": (
-            "**From a macro:** Add a step → **Plugin Actions** → **Audio Player** → **Play Sound**, "
-            "then pick a sound from the dropdown.\n\n"
-            "**From a panel button:** Bind the button's press action to a macro that contains a Play Sound step.\n\n"
-            "**From a script:**\n\n"
+            "**1. Upload your sounds.** Open **Project → Assets**, then drop in "
+            "the audio files you want to play (`.mp3`, `.wav`, `.ogg`, `.m4a`). "
+            "They appear in the **Audio** filter and become available to this "
+            "plugin automatically.\n\n"
+            "**2. Trigger them from a macro.** In the **Macros** view, "
+            "**+ Add Step** → **Plugin Actions** → **Audio Player** → "
+            "**Play Sound**. Pick the file from the dropdown and (optionally) "
+            "set a volume.\n\n"
+            "**3. Or from a panel button.** In **UI Builder**, set the button's "
+            "**Press Action** to **Run Macro** and pick the macro that contains "
+            "the Play Sound step.\n\n"
+            "**4. Or from a script:**\n\n"
             "```python\n"
             "from openavc import plugins, on_event\n\n"
             "@on_event(\"ui.press.lobby_chime\")\n"
             "async def chime(event):\n"
-            "    await plugins.audio_player.play(\"chime_soft\", volume=0.6)\n"
+            "    await plugins.audio_player.play(\"assets://lobby_chime.mp3\", volume=0.6)\n"
             "```\n\n"
-            "Audio plays on **every connected panel**. The first tap on a panel after page load "
-            "unlocks audio (browser autoplay policy) — sounds before that first tap are dropped.\n\n"
-            "**Built-in sounds:** chime_soft, chime_doorbell, bell_school, alert_attention, "
-            "notification_pop, countdown_beep, success, error, applause_short. "
-            "**Custom sounds:** upload `.mp3`/`.wav`/`.ogg`/`.m4a` to **Project → Assets** "
-            "and reference as `assets://filename.mp3`."
+            "Audio plays on **every connected panel**. The first tap on a panel "
+            "after page load unlocks audio (browser autoplay policy) — sounds "
+            "before that first tap are dropped.\n\n"
+            "**Other actions:** Stop All Sounds, Set Master Volume, Mute, Unmute "
+            "(also available as `plugins.audio_player.stop()`, `set_volume(...)`, "
+            "`mute()`, `unmute()` from scripts)."
         ),
     }
 
@@ -65,7 +69,7 @@ class AudioPlayerPlugin:
                     "label": "Sound",
                     "required": True,
                     "options_source": "plugin.audio_player.sounds",
-                    "description": "A built-in sound or a custom audio asset uploaded to the project.",
+                    "description": "Audio file uploaded to Project → Assets.",
                 },
                 {
                     "key": "volume",
@@ -123,7 +127,7 @@ class AudioPlayerPlugin:
     SCRIPT_API = {
         "play": {
             "handler": "script_play",
-            "doc": "Play a sound on every connected panel. Pass the sound id (built-in sound) or 'assets://filename.mp3' for a project-uploaded audio asset.",
+            "doc": "Play a sound on every connected panel. Pass an `assets://filename.mp3` reference to a project audio asset.",
         },
         "stop": {
             "handler": "script_stop",
@@ -143,42 +147,47 @@ class AudioPlayerPlugin:
         },
         "list_sounds": {
             "handler": "script_list_sounds",
-            "doc": "Return the list of built-in sounds with their metadata.",
+            "doc": "Return the list of audio assets currently available in the project.",
             "sync": True,
         },
     }
 
     def __init__(self):
         self.api = None
-        self._builtin_sounds: list[dict] = []
+        self._audio_assets: list[dict] = []
 
     # ──── Lifecycle ────
 
     async def start(self, api):
         self.api = api
-        self._builtin_sounds = self._load_builtin_manifest()
 
-        # Initial state values. The panel element subscribes to play_request
-        # to learn when to play; last_played and last_played_at are read-only
-        # observability helpers; master_volume and muted apply globally.
+        # Initial state values. Panel runtime watches play_request to know
+        # when to play; last_played and last_played_at are observability
+        # helpers; master_volume and muted apply globally.
         await self.api.state_set("play_request", "")
         await self.api.state_set("last_played", "")
         await self.api.state_set("last_played_at", "")
         await self.api.state_set("master_volume", 1.0)
         await self.api.state_set("muted", False)
 
-        # Publish the sound catalog as a JSON-serialized list so the macro
-        # builder can populate the sound dropdown via options_source.
+        # Seed catalog from current project assets, then subscribe so it
+        # refreshes whenever an asset is uploaded or deleted.
+        initial = await self.api.state_get("project.assets")
+        self._refresh_audio_assets(initial)
         await self._publish_sound_catalog()
+        await self.api.state_subscribe("project.assets", self._on_assets_changed)
 
-        self.api.log(f"Audio Player started — {len(self._builtin_sounds)} built-in sound(s)")
+        self.api.log(f"Audio Player started — {len(self._audio_assets)} audio asset(s)")
 
     async def stop(self):
         # Auto-cleanup handles state keys, subscriptions, and tasks.
         pass
 
     async def health_check(self):
-        return {"status": "ok", "message": f"{len(self._builtin_sounds)} built-in sounds available"}
+        return {
+            "status": "ok",
+            "message": f"{len(self._audio_assets)} audio asset(s) available",
+        }
 
     # ──── Macro action handlers ────
 
@@ -186,7 +195,10 @@ class AudioPlayerPlugin:
         """Write a play request — every connected panel will play."""
         sound = params.get("sound")
         if not sound:
-            raise ValueError("audio_player.play requires a 'sound' parameter")
+            raise ValueError(
+                "audio_player.play requires a 'sound' parameter "
+                "(e.g. 'assets://chime.mp3')"
+            )
         volume = float(params.get("volume", 1.0))
         if not 0.0 <= volume <= 1.0:
             raise ValueError(f"volume must be between 0.0 and 1.0 (got {volume})")
@@ -197,13 +209,6 @@ class AudioPlayerPlugin:
             "volume": volume,
             "ts": time.time(),
         }
-        # Resolve to a URL so panel.js doesn't have to guess file extensions.
-        # Built-in sounds map through the manifest; assets:// pass through to
-        # the panel runtime (which already knows the project asset URL pattern).
-        url = self._resolve_sound_url(sound)
-        if url:
-            request["url"] = url
-
         await self.api.state_set("play_request", json.dumps(request))
         await self.api.state_set("last_played", sound)
         await self.api.state_set("last_played_at", _iso_now())
@@ -228,9 +233,7 @@ class AudioPlayerPlugin:
     # ──── Script API handlers ────
     #
     # These delegate to the macro action handlers but expose Pythonic
-    # signatures so user scripts can call them naturally. Same underlying
-    # behavior — just a friendlier surface for code than the (params, context)
-    # macro envelope.
+    # signatures so user scripts can call them naturally.
 
     async def script_play(self, sound: str, volume: float = 1.0) -> None:
         await self.action_play({"sound": sound, "volume": volume}, {})
@@ -248,54 +251,48 @@ class AudioPlayerPlugin:
         await self.action_unmute({}, {})
 
     def script_list_sounds(self) -> list[dict]:
-        return list(self._builtin_sounds)
+        return list(self._audio_assets)
 
     # ──── Internal helpers ────
 
-    def _resolve_sound_url(self, sound: str) -> str | None:
-        """Build a fetchable URL for a sound id.
+    async def _on_assets_changed(self, _key: str, value, _old) -> None:
+        self._refresh_audio_assets(value)
+        await self._publish_sound_catalog()
 
-        Returns None for `assets://*` references (panel.js handles those —
-        only it knows the project asset URL pattern) and for unrecognized
-        sounds (fall through to panel.js convention as a last resort).
-        """
-        if not sound or not isinstance(sound, str):
-            return None
-        if sound.startswith(("assets://", "http://", "https://", "/")):
-            # Pass-through: panel.js resolves these. We return None here and
-            # the panel falls back to its own resolver against `request.sound`.
-            return None
-        for entry in self._builtin_sounds:
-            if entry.get("id") == sound:
-                file_name = entry.get("file")
-                if file_name:
-                    return f"/api/plugins/audio_player/files/sounds/{file_name}"
-        return None
-
-    def _load_builtin_manifest(self) -> list[dict]:
-        """Read the built-in sound library manifest from the plugin directory."""
-        manifest_path = Path(__file__).parent / "sounds" / "manifest.json"
-        if not manifest_path.is_file():
-            return []
+    def _refresh_audio_assets(self, raw_value) -> None:
+        """Parse the project.assets state value and keep just the audio entries."""
+        if not raw_value or not isinstance(raw_value, str):
+            self._audio_assets = []
+            return
         try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            if self.api:
-                self.api.log(f"Failed to read sound manifest: {e}", level="warning")
-            return []
-        sounds = data.get("sounds", [])
-        return [s for s in sounds if isinstance(s, dict) and s.get("id") and s.get("file")]
+            assets = json.loads(raw_value)
+        except json.JSONDecodeError:
+            self._audio_assets = []
+            return
+        if not isinstance(assets, list):
+            self._audio_assets = []
+            return
+        self._audio_assets = [
+            a for a in assets
+            if isinstance(a, dict) and a.get("type") == "audio" and a.get("name")
+        ]
 
     async def _publish_sound_catalog(self) -> None:
         """Write the available-sound list as a JSON string for dropdown population.
 
-        Format matches the plugin macro action `options_source` contract:
+        Format matches the plugin macro action ``options_source`` contract:
         a JSON-serialized list of ``{value, label}`` objects. The macro
         builder reads this state key when rendering the sound picker.
+
+        Each entry's value is an ``assets://filename`` reference — exactly
+        what the action handler wants and what panel.js knows how to play.
         """
         catalog = [
-            {"value": s["id"], "label": s.get("name") or s["id"]}
-            for s in self._builtin_sounds
+            {
+                "value": f"assets://{asset['name']}",
+                "label": asset["name"],
+            }
+            for asset in self._audio_assets
         ]
         await self.api.state_set("sounds", json.dumps(catalog))
 
