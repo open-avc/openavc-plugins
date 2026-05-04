@@ -24,13 +24,13 @@ class AudioPlayerPlugin:
     PLUGIN_INFO = {
         "id": "audio_player",
         "name": "Audio Player",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "author": "OpenAVC",
         "description": "Play sound effects through panels — chimes, bells, alerts, notifications.",
         "category": "utility",
         "license": "MIT",
         "platforms": ["all"],
-        "min_openavc_version": "0.6.0",
+        "min_openavc_version": "0.10.3",
         "capabilities": ["state_write"],
     }
 
@@ -165,7 +165,7 @@ class AudioPlayerPlugin:
     # ──── Macro action handlers ────
 
     async def action_play(self, params: dict, _context: dict) -> None:
-        """Write a play request — every panel with the element will play."""
+        """Write a play request — every connected panel will play."""
         sound = params.get("sound")
         if not sound:
             raise ValueError("audio_player.play requires a 'sound' parameter")
@@ -179,6 +179,13 @@ class AudioPlayerPlugin:
             "volume": volume,
             "ts": time.time(),
         }
+        # Resolve to a URL so panel.js doesn't have to guess file extensions.
+        # Built-in sounds map through the manifest; assets:// pass through to
+        # the panel runtime (which already knows the project asset URL pattern).
+        url = self._resolve_sound_url(sound)
+        if url:
+            request["url"] = url
+
         await self.api.state_set("play_request", json.dumps(request))
         await self.api.state_set("last_played", sound)
         await self.api.state_set("last_played_at", _iso_now())
@@ -226,6 +233,26 @@ class AudioPlayerPlugin:
         return list(self._builtin_sounds)
 
     # ──── Internal helpers ────
+
+    def _resolve_sound_url(self, sound: str) -> str | None:
+        """Build a fetchable URL for a sound id.
+
+        Returns None for `assets://*` references (panel.js handles those —
+        only it knows the project asset URL pattern) and for unrecognized
+        sounds (fall through to panel.js convention as a last resort).
+        """
+        if not sound or not isinstance(sound, str):
+            return None
+        if sound.startswith(("assets://", "http://", "https://", "/")):
+            # Pass-through: panel.js resolves these. We return None here and
+            # the panel falls back to its own resolver against `request.sound`.
+            return None
+        for entry in self._builtin_sounds:
+            if entry.get("id") == sound:
+                file_name = entry.get("file")
+                if file_name:
+                    return f"/api/plugins/audio_player/files/sounds/{file_name}"
+        return None
 
     def _load_builtin_manifest(self) -> list[dict]:
         """Read the built-in sound library manifest from the plugin directory."""

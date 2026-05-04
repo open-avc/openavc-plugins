@@ -1,105 +1,95 @@
 {
-  "_doc": "Built-in sound library for the Audio Player plugin. Each entry must point to an MP3 file in this directory. Every sound must be MIT/CC0 or compatible. license_audit MUST be 'verified' before shipping the plugin — entries with 'pending' will not be played by the panel element.",
+  "_doc": "Built-in sound library for the Audio Player plugin. Each entry maps a sound id to a file in this directory. All sounds must be MIT/CC0 or compatible. license_audit MUST be 'verified' before shipping; entries with 'pending' will not be played.",
   "sounds": [
     {
       "id": "chime_soft",
       "name": "Soft Chime",
-      "file": "chime_soft.mp3",
+      "file": "chime_soft.wav",
       "category": "chime",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "chime_doorbell",
       "name": "Doorbell",
-      "file": "chime_doorbell.mp3",
+      "file": "chime_doorbell.wav",
       "category": "chime",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "bell_school",
       "name": "School Bell",
-      "file": "bell_school.mp3",
+      "file": "bell_school.wav",
       "category": "bell",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "alert_attention",
       "name": "Attention Alert",
-      "file": "alert_attention.mp3",
+      "file": "alert_attention.wav",
       "category": "alert",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "notification_pop",
       "name": "Notification Pop",
-      "file": "notification_pop.mp3",
+      "file": "notification_pop.wav",
       "category": "notification",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "countdown_beep",
       "name": "Countdown Beep",
-      "file": "countdown_beep.mp3",
+      "file": "countdown_beep.wav",
       "category": "alert",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "success",
       "name": "Success Tone",
-      "file": "success.mp3",
+      "file": "success.wav",
       "category": "feedback",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "error",
       "name": "Error Tone",
-      "file": "error.mp3",
+      "file": "error.wav",
       "category": "feedback",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://kenney.nl/assets/interface-sounds",
+      "credit": "Kenney (kenney.nl)",
+      "license_audit": "verified"
     },
     {
       "id": "applause_short",
-      "name": "Short Applause",
+      "name": "Applause",
       "file": "applause_short.mp3",
       "category": "fun",
-      "duration_seconds": null,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
-    },
-    {
-      "id": "silence_1s",
-      "name": "1 Second of Silence",
-      "file": "silence_1s.mp3",
-      "category": "utility",
-      "duration_seconds": 1.0,
-      "license": null,
-      "source_url": null,
-      "license_audit": "pending"
+      "license": "CC0-1.0",
+      "source_url": "https://bigsoundbank.com/applause-1-s2363.html",
+      "credit": "BigSoundBank (CC0)",
+      "license_audit": "verified"
     }
   ]
 }
