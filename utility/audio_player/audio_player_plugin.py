@@ -24,7 +24,7 @@ class AudioPlayerPlugin:
     PLUGIN_INFO = {
         "id": "audio_player",
         "name": "Audio Player",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "author": "OpenAVC",
         "description": "Play sound effects through panels — chimes, bells, alerts, notifications.",
         "category": "utility",
@@ -37,7 +37,7 @@ class AudioPlayerPlugin:
     MACRO_ACTIONS = {
         "audio_player.play": {
             "label": "Play Sound",
-            "description": "Play a sound on every panel with the Audio Player element.",
+            "description": "Play a sound on every connected panel.",
             "icon": "volume-2",
             "handler": "action_play",
             "params": [
@@ -99,6 +99,34 @@ class AudioPlayerPlugin:
             "icon": "volume-2",
             "handler": "action_unmute",
             "params": [],
+        },
+    }
+
+    SCRIPT_API = {
+        "play": {
+            "handler": "script_play",
+            "doc": "Play a sound on every connected panel. Pass the sound id (built-in sound) or 'assets://filename.mp3' for a project-uploaded audio asset.",
+        },
+        "stop": {
+            "handler": "script_stop",
+            "doc": "Stop sounds currently playing on every panel.",
+        },
+        "set_volume": {
+            "handler": "script_set_volume",
+            "doc": "Set the global master volume (0.0 to 1.0).",
+        },
+        "mute": {
+            "handler": "script_mute",
+            "doc": "Mute all sound playback (overrides volume).",
+        },
+        "unmute": {
+            "handler": "script_unmute",
+            "doc": "Resume playback after mute().",
+        },
+        "list_sounds": {
+            "handler": "script_list_sounds",
+            "doc": "Return the list of built-in sounds with their metadata.",
+            "sync": True,
         },
     }
 
@@ -171,6 +199,31 @@ class AudioPlayerPlugin:
 
     async def action_unmute(self, _params: dict, _context: dict) -> None:
         await self.api.state_set("muted", False)
+
+    # ──── Script API handlers ────
+    #
+    # These delegate to the macro action handlers but expose Pythonic
+    # signatures so user scripts can call them naturally. Same underlying
+    # behavior — just a friendlier surface for code than the (params, context)
+    # macro envelope.
+
+    async def script_play(self, sound: str, volume: float = 1.0) -> None:
+        await self.action_play({"sound": sound, "volume": volume}, {})
+
+    async def script_stop(self) -> None:
+        await self.action_stop({}, {})
+
+    async def script_set_volume(self, volume: float) -> None:
+        await self.action_set_volume({"volume": volume}, {})
+
+    async def script_mute(self) -> None:
+        await self.action_mute({}, {})
+
+    async def script_unmute(self) -> None:
+        await self.action_unmute({}, {})
+
+    def script_list_sounds(self) -> list[dict]:
+        return list(self._builtin_sounds)
 
     # ──── Internal helpers ────
 

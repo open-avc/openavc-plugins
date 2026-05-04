@@ -31,7 +31,7 @@ if str(_PLUGINS_ROOT) not in sys.path:
 
 try:
     from server.core.plugin_test_harness import PluginTestHarness
-    from server.core.plugin_loader import validate_macro_actions
+    from server.core.plugin_loader import validate_macro_actions, validate_script_api
 except ModuleNotFoundError:
     pytest.skip(
         "openavc repo not available as sibling directory",
@@ -203,3 +203,74 @@ async def test_mute_unmute(harness_and_plugin):
     assert harness.state.get("plugin.audio_player.muted") is True
     await plugin.action_unmute({}, {})
     assert harness.state.get("plugin.audio_player.muted") is False
+
+
+# ──── SCRIPT_API ────
+
+
+def test_script_api_schema_valid():
+    valid, error = validate_script_api(
+        AudioPlayerPlugin.SCRIPT_API, "audio_player", AudioPlayerPlugin
+    )
+    assert valid is True, error
+
+
+def test_script_api_handlers_exist():
+    import inspect
+    for method_name, spec in AudioPlayerPlugin.SCRIPT_API.items():
+        handler = getattr(AudioPlayerPlugin, spec["handler"], None)
+        assert handler is not None, f"{method_name} handler '{spec['handler']}' missing"
+        is_async = inspect.iscoroutinefunction(handler)
+        wants_sync = bool(spec.get("sync"))
+        assert is_async != wants_sync, (
+            f"{method_name} handler '{spec['handler']}' async/sync flag mismatch"
+        )
+
+
+@pytest.mark.asyncio
+async def test_script_play(harness_and_plugin):
+    harness, plugin = harness_and_plugin
+    await plugin.script_play("doorbell", volume=0.4)
+    request = json.loads(harness.state.get("plugin.audio_player.play_request"))
+    assert request["sound"] == "doorbell"
+    assert request["volume"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_script_play_default_volume(harness_and_plugin):
+    harness, plugin = harness_and_plugin
+    await plugin.script_play("chime_soft")
+    request = json.loads(harness.state.get("plugin.audio_player.play_request"))
+    assert request["volume"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_script_stop(harness_and_plugin):
+    harness, plugin = harness_and_plugin
+    await plugin.script_stop()
+    request = json.loads(harness.state.get("plugin.audio_player.play_request"))
+    assert request.get("stop") is True
+
+
+@pytest.mark.asyncio
+async def test_script_set_volume_and_mute(harness_and_plugin):
+    harness, plugin = harness_and_plugin
+    await plugin.script_set_volume(0.3)
+    assert harness.state.get("plugin.audio_player.master_volume") == 0.3
+    await plugin.script_mute()
+    assert harness.state.get("plugin.audio_player.muted") is True
+    await plugin.script_unmute()
+    assert harness.state.get("plugin.audio_player.muted") is False
+
+
+def test_script_list_sounds_is_sync(harness_and_plugin):
+    # Note: harness_and_plugin is async so we can't actually use it from a
+    # sync test, but list_sounds itself doesn't need the harness — we can
+    # construct the plugin directly.
+    plugin = AudioPlayerPlugin()
+    plugin._builtin_sounds = [{"id": "x", "name": "X"}]
+    sounds = plugin.script_list_sounds()
+    assert sounds == [{"id": "x", "name": "X"}]
+    # Returns a copy, not the internal list
+    sounds.append({"id": "y"})
+    assert plugin._builtin_sounds == [{"id": "x", "name": "X"}]
