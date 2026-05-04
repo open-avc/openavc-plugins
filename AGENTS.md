@@ -19,15 +19,16 @@ This file is a self-contained reference for LLM-based coding agents helping user
 6. [Plugin Lifecycle](#6-plugin-lifecycle)
 7. [Extensions (UI Integration)](#7-extensions-ui-integration)
 8. [Macro Actions](#8-macro-actions)
-9. [Panel Elements (Custom UI)](#9-panel-elements-custom-ui)
-10. [Surface Layout (Control Surfaces)](#10-surface-layout-control-surfaces)
-11. [Native Dependencies](#11-native-dependencies)
-12. [Testing](#12-testing)
-13. [Repository Structure and Naming](#13-repository-structure-and-naming)
-14. [index.json Catalog Entry](#14-indexjson-catalog-entry)
-15. [Validation](#15-validation)
-16. [Complete Examples](#16-complete-examples)
-17. [Common Mistakes](#17-common-mistakes)
+9. [Script API](#9-script-api)
+10. [Panel Elements (Custom UI)](#10-panel-elements-custom-ui)
+11. [Surface Layout (Control Surfaces)](#11-surface-layout-control-surfaces)
+12. [Native Dependencies](#12-native-dependencies)
+13. [Testing](#13-testing)
+14. [Repository Structure and Naming](#14-repository-structure-and-naming)
+15. [index.json Catalog Entry](#15-indexjson-catalog-entry)
+16. [Validation](#16-validation)
+17. [Complete Examples](#17-complete-examples)
+18. [Common Mistakes](#18-common-mistakes)
 
 ---
 
@@ -666,7 +667,104 @@ Actions register automatically when the plugin starts and unregister when it sto
 
 ---
 
-## 9. Panel Elements (Custom UI)
+## 9. Script API
+
+Plugins can expose methods that user scripts call as `openavc.plugins.<plugin_id>.<method>(...)`. Same shape as the macro action declaration but with a different runtime — scripts call methods like normal Python functions (positional + keyword arguments) instead of dispatching through the macro engine with a uniform params dict.
+
+Use this to give script authors a clean Pythonic interface to plugin behavior. A user writing a script shouldn't have to construct JSON state writes to play a sound; they should be able to write `await plugins.audio_player.play("chime_soft", volume=0.6)`.
+
+### 9.1 Declaration
+
+```python
+class AudioPlayerPlugin:
+
+    PLUGIN_INFO = {
+        "id": "audio_player",
+        "name": "Audio Player",
+        ...
+    }
+
+    SCRIPT_API = {
+        "play": {
+            "handler": "script_play",
+            "doc": "Play a sound on every panel with the Audio Player element.",
+        },
+        "stop": {
+            "handler": "script_stop",
+            "doc": "Stop currently-playing sounds on every panel.",
+        },
+        "list_sounds": {
+            "handler": "script_list_sounds",
+            "doc": "Return the list of available sounds.",
+            "sync": True,    # handler is `def`, not `async def`
+        },
+    }
+
+    async def script_play(self, sound: str, volume: float = 1.0) -> None:
+        # Reuse the macro action handler; signature differs
+        await self.action_play({"sound": sound, "volume": volume}, {})
+
+    async def script_stop(self) -> None:
+        await self.action_stop({}, {})
+
+    def script_list_sounds(self) -> list[dict]:
+        return list(self._builtin_sounds)
+```
+
+### 9.2 Method and Plugin Naming
+
+The plugin id and every method name must be valid Python identifiers (lowercase start, letters/digits/underscores only). Names beginning with underscore are rejected so plugins can't shadow proxy machinery. The validator catches all of this at load time.
+
+If your plugin id has dashes or other illegal-in-Python characters, declaring `SCRIPT_API` will fail validation. Pick an identifier-friendly id — `audio_player`, not `audio-player`.
+
+### 9.3 Async vs Sync Handlers
+
+Default is async. Set `"sync": True` when the handler is a regular `def`. The validator enforces that the flag matches the actual method type — mismatches fail to load with a clear error.
+
+Mixed plugins are normal: most methods async (because they touch state, await macros, etc.), but quick read-only accessors like `list_sounds` can stay sync.
+
+### 9.4 Method Signatures
+
+Pure Python — positional args, keyword args, defaults, type hints all work. No `(params, context)` envelope (that's macro actions). Scripts call them like any other function:
+
+```python
+from openavc import plugins, on_event
+
+@on_event("ui.press.lobby_chime")
+async def on_press(event):
+    await plugins.audio_player.play("chime_soft", volume=0.6)
+    await plugins.audio_player.list_sounds()  # sync, no await
+```
+
+Raised exceptions propagate to the script and surface in the System Log.
+
+### 9.5 Lifecycle and Capabilities
+
+`SCRIPT_API` is purely declarative. No capability declaration is required to declare methods, and no API call is needed to register them. Methods are picked up at plugin start and removed at plugin stop. They run as the plugin instance, with whatever capabilities you declared in `PLUGIN_INFO`.
+
+When a plugin stops, scripts that still hold a reference to `plugins.<plugin_id>` get an `AttributeError` on subsequent attribute access ("not currently running"). When a plugin isn't installed at all, `plugins.<plugin_id>` raises `AttributeError` ("not installed or not currently running"). Both error messages are explicit so script authors can fix typos and missing-plugin issues quickly.
+
+### 9.6 Sharing Code with Macro Actions
+
+A plugin can expose the same behavior as both a macro action and a script method. The cleanest pattern is to keep the underlying logic in a private helper (or in the macro action handler) and have the script-API method delegate:
+
+```python
+async def action_play(self, params: dict, _context: dict) -> None:
+    await self._do_play(params["sound"], params.get("volume", 1.0))
+
+async def script_play(self, sound: str, volume: float = 1.0) -> None:
+    await self._do_play(sound, volume)
+
+async def _do_play(self, sound: str, volume: float) -> None:
+    # actual work here
+    ...
+```
+
+This keeps the two surfaces in sync without forcing one to call into the other.
+
+---
+
+## 10. Panel Elements (Custom UI)
 
 Plugins can provide custom HTML/CSS/JS UI elements for touch panels via iframes.
 
@@ -750,7 +848,7 @@ window.parent.postMessage({
 
 ---
 
-## 10. Surface Layout (Control Surfaces)
+## 11. Surface Layout (Control Surfaces)
 
 Control surface plugins (Stream Deck, MIDI controllers) declare their physical layout so the IDE can show a visual configurator.
 
@@ -774,7 +872,7 @@ The actual layout may be detected from hardware at runtime. The static definitio
 
 ---
 
-## 11. Native Dependencies
+## 12. Native Dependencies
 
 For plugins that require platform-level libraries (C shared libraries, USB drivers, etc.).
 
@@ -827,7 +925,7 @@ PLUGIN_INFO = {
 
 ---
 
-## 12. Testing
+## 13. Testing
 
 OpenAVC provides a test harness for plugin development.
 
@@ -869,7 +967,7 @@ async def test_my_plugin():
 
 ---
 
-## 13. Repository Structure and Naming
+## 14. Repository Structure and Naming
 
 ```
 openavc-plugins/
@@ -925,7 +1023,7 @@ Every plugin must include a `README.md` that covers:
 
 ---
 
-## 14. index.json Catalog Entry
+## 15. index.json Catalog Entry
 
 Every plugin must have an entry in `index.json`. The catalog is used by the Programmer IDE's "Browse Plugins" feature.
 
@@ -968,7 +1066,7 @@ Every plugin must have an entry in `index.json`. The catalog is used by the Prog
 
 ---
 
-## 15. Validation
+## 16. Validation
 
 Run the validation script before submitting:
 
@@ -992,9 +1090,9 @@ The validator checks:
 
 ---
 
-## 16. Complete Examples
+## 17. Complete Examples
 
-### 16.1 Minimal Plugin (Utility)
+### 17.1 Minimal Plugin (Utility)
 
 ```python
 """
@@ -1066,7 +1164,7 @@ class RoomActivityPlugin:
         return {"status": "ok", "message": "Tracking active"}
 ```
 
-### 16.2 Integration Plugin (MQTT Bridge)
+### 17.2 Integration Plugin (MQTT Bridge)
 
 ```python
 """
@@ -1203,7 +1301,7 @@ class MQTTBridgePlugin:
         return {"status": "error", "message": "Disconnected from broker"}
 ```
 
-### 16.3 Sensor Plugin (Occupancy)
+### 17.3 Sensor Plugin (Occupancy)
 
 ```python
 """
@@ -1284,7 +1382,7 @@ class OccupancySensorPlugin:
 
 ---
 
-## 17. Common Mistakes
+## 18. Common Mistakes
 
 ### Plugin Structure
 
@@ -1338,6 +1436,16 @@ class OccupancySensorPlugin:
 | `handler` field references a missing method | The method must exist on the plugin class with the exact name. |
 | `select` param has no `options` or `options_source` | One or the other is required for `select` type. |
 | Manually resolving `$var.foo` inside the handler | The macro engine resolves dynamic params before calling your handler. Just use `params[key]`. |
+
+### Script API
+
+| Mistake | Fix |
+|---------|-----|
+| Plugin id contains dashes or starts with a digit | Plugin id must be a valid Python identifier — `audio_player`, not `audio-player`. |
+| Method name starts with `_` | Underscore-prefixed names are reserved for proxy machinery; pick a public name. |
+| Sync `def` handler without `"sync": True` | Default expects async. Add `"sync": True` to opt out, or make the handler `async def`. |
+| `"sync": True` on an async handler | The flag must match the actual method type. |
+| Calling another plugin's script methods from inside your plugin | Don't reach across plugin boundaries. Use state keys, events, or macros to coordinate. |
 
 ---
 
