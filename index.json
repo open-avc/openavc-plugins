@@ -57,7 +57,7 @@
             "file": "utility/audio_player",
             "format": "directory",
             "category": "utility",
-            "version": "0.3.1",
+            "version": "0.3.2",
             "author": "OpenAVC",
             "license": "MIT",
             "platforms": ["all"],

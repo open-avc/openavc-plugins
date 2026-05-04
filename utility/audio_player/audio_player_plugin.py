@@ -24,7 +24,7 @@ class AudioPlayerPlugin:
     PLUGIN_INFO = {
         "id": "audio_player",
         "name": "Audio Player",
-        "version": "0.3.1",
+        "version": "0.3.2",
         "author": "OpenAVC",
         "description": "Play sound effects through panels. Use the 'Play Sound' macro action or call from a script.",
         "category": "utility",
@@ -32,6 +32,24 @@ class AudioPlayerPlugin:
         "platforms": ["all"],
         "min_openavc_version": "0.10.3",
         "capabilities": ["state_write"],
+        "usage": (
+            "**From a macro:** Add a step → **Plugin Actions** → **Audio Player** → **Play Sound**, "
+            "then pick a sound from the dropdown.\n\n"
+            "**From a panel button:** Bind the button's press action to a macro that contains a Play Sound step.\n\n"
+            "**From a script:**\n\n"
+            "```python\n"
+            "from openavc import plugins, on_event\n\n"
+            "@on_event(\"ui.press.lobby_chime\")\n"
+            "async def chime(event):\n"
+            "    await plugins.audio_player.play(\"chime_soft\", volume=0.6)\n"
+            "```\n\n"
+            "Audio plays on **every connected panel**. The first tap on a panel after page load "
+            "unlocks audio (browser autoplay policy) — sounds before that first tap are dropped.\n\n"
+            "**Built-in sounds:** chime_soft, chime_doorbell, bell_school, alert_attention, "
+            "notification_pop, countdown_beep, success, error, applause_short. "
+            "**Custom sounds:** upload `.mp3`/`.wav`/`.ogg`/`.m4a` to **Project → Assets** "
+            "and reference as `assets://filename.mp3`."
+        ),
     }
 
     MACRO_ACTIONS = {

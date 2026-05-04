@@ -92,8 +92,30 @@ PLUGIN_INFO = {
     "platforms": ["all"],           # win_x64 | linux_x64 | linux_arm64 | all
     "min_openavc_version": "0.3.0", # Minimum compatible OpenAVC version
     "dependencies": [],             # pip packages (must be MIT-compatible)
-    "native_dependencies": [],      # Platform-level SDKs (see section 10)
+    "native_dependencies": [],      # Platform-level SDKs (see section 11)
     "capabilities": [],             # API permissions needed (see below)
+    "usage": "...",                 # Markdown shown on the plugin's IDE page
+}
+```
+
+### `usage` (Markdown)
+
+The `usage` field renders below the description on the plugin's detail page in the Programmer IDE as a **How to Use** section. Use it to tell users where to actually use the plugin — most won't read the README.
+
+Plain markdown works (headings, links, fenced code blocks, lists, tables via GFM). Keep it focused on *how to use the plugin from the IDE*, not what the plugin does internally:
+
+```python
+PLUGIN_INFO = {
+    "id": "audio_player",
+    # ...
+    "usage": (
+        "**From a macro:** Add a step → **Plugin Actions** → **Audio Player** → **Play Sound**.\n\n"
+        "**From a script:**\n\n"
+        "```python\n"
+        "await plugins.audio_player.play(\"chime_soft\")\n"
+        "```\n\n"
+        "Audio plays on every connected panel."
+    ),
 }
 ```
 
