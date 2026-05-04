@@ -57,7 +57,7 @@
             "file": "utility/audio_player",
             "format": "directory",
             "category": "utility",
-            "version": "0.3.0",
+            "version": "0.3.1",
             "author": "OpenAVC",
             "license": "MIT",
             "platforms": ["all"],
@@ -65,7 +65,7 @@
             "capabilities": ["state_write"],
             "has_native_dependencies": false,
             "verified": false,
-            "description": "Play sound effects through panels — chimes, bells, alerts, notifications."
+            "description": "Play sound effects through panels. Use the 'Play Sound' macro action or call from a script."
         }
     ]
 }

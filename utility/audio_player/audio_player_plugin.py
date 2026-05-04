@@ -24,9 +24,9 @@ class AudioPlayerPlugin:
     PLUGIN_INFO = {
         "id": "audio_player",
         "name": "Audio Player",
-        "version": "0.3.0",
+        "version": "0.3.1",
         "author": "OpenAVC",
-        "description": "Play sound effects through panels — chimes, bells, alerts, notifications.",
+        "description": "Play sound effects through panels. Use the 'Play Sound' macro action or call from a script.",
         "category": "utility",
         "license": "MIT",
         "platforms": ["all"],
