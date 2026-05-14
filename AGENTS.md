@@ -168,7 +168,7 @@ Define `CONFIG_SCHEMA` as a class-level dict to declare configurable settings. T
 CONFIG_SCHEMA = {
     # Text input
     "broker_host": {
-        "type": "string",
+        "type": "text",
         "label": "Broker Host",
         "description": "MQTT broker hostname or IP",
         "default": "localhost",
@@ -241,7 +241,7 @@ CONFIG_SCHEMA = {
         "type": "group",
         "label": "Connection Settings",
         "fields": {
-            "host": {"type": "string", "required": True, "label": "Host"},
+            "host": {"type": "text", "required": True, "label": "Host"},
             "port": {"type": "integer", "default": 1883, "label": "Port"},
         },
     },
@@ -251,7 +251,7 @@ CONFIG_SCHEMA = {
         "type": "mapping_list",
         "label": "Topic Mappings",
         "item_schema": {
-            "topic": {"type": "string", "required": True, "label": "MQTT Topic"},
+            "topic": {"type": "text", "required": True, "label": "MQTT Topic"},
             "state_key": {"type": "state_key", "required": True, "label": "State Key"},
             "direction": {
                 "type": "select",
@@ -790,7 +790,7 @@ This keeps the two surfaces in sync without forcing one to call into the other.
 
 Plugins can provide custom HTML/CSS/JS UI elements for touch panels via iframes.
 
-### 9.1 Declaration
+### 10.1 Declaration
 
 ```python
 EXTENSIONS = {
@@ -810,7 +810,7 @@ EXTENSIONS = {
 }
 ```
 
-### 9.2 File Placement
+### 10.2 File Placement
 
 Place panel files in a `panel/` subdirectory within your plugin directory:
 
@@ -823,7 +823,7 @@ my_plugin/
     └── app.js
 ```
 
-### 9.3 Communication API
+### 10.3 Communication API
 
 The iframe communicates with the panel via `postMessage`.
 
@@ -831,25 +831,30 @@ The iframe communicates with the panel via `postMessage`.
 
 | Type | When | Payload |
 |------|------|---------|
-| `openavc:init` | Once, on iframe load | `{config, theme, state}` |
-| `openavc:state` | On state change | `{key, value}` |
-| `openavc:theme` | On theme change | `{variables}` |
+| `openavc:init` | Once, on iframe load | `{config, theme, state, elementId}` — `state` is a snapshot of keys in this plugin's namespace (`plugin.<plugin_id>.*`); other namespaces are not included |
+| `openavc:state` | On every state change in the system | `{key, value}` |
+
+Theme changes after the iframe loads are not pushed. Read theme variables from `openavc:init` and cache them.
 
 **Messages sent by iframe:**
 
-| Type | Purpose | Payload |
-|------|---------|---------|
-| `openavc:command` | Send device command | `{device, command, params}` |
-| `openavc:set_state` | Write state value | `{key, value}` |
-| `openavc:navigate` | Navigate to page | `{page}` |
+All outbound messages use `type: "openavc:action"` (with an `action` field selecting the operation) or `type: "openavc:navigate"`.
+
+| Type | `action` | Purpose | Payload |
+|------|----------|---------|---------|
+| `openavc:action` | `device.command` | Send a device command | `{device, command, params}` |
+| `openavc:action` | `state.set` | Write a state value | `{key, value}` |
+| `openavc:navigate` | — | Navigate to a page | `{page}` |
+
+State writes from iframes are restricted to the `var.*` and `plugin.*` namespaces. Writes to `device.*`, `system.*`, `isc.*`, `ui.*`, or any other namespace are rejected by the server.
 
 **Example iframe JavaScript:**
 
 ```javascript
 window.addEventListener("message", (event) => {
     if (event.data.type === "openavc:init") {
-        const { config, theme, state } = event.data;
-        // Initialize with current config, theme, and state
+        const { config, theme, state, elementId } = event.data;
+        // Initialize with current config, theme, and namespace-filtered state snapshot
     }
     if (event.data.type === "openavc:state") {
         const { key, value } = event.data;
@@ -859,14 +864,23 @@ window.addEventListener("message", (event) => {
 
 // Send a device command
 window.parent.postMessage({
-    type: "openavc:command",
+    type: "openavc:action",
+    action: "device.command",
     device: "projector1",
     command: "power_on",
     params: {}
 }, "*");
+
+// Write a state key
+window.parent.postMessage({
+    type: "openavc:action",
+    action: "state.set",
+    key: "plugin.my_plugin.foo",
+    value: "bar"
+}, "*");
 ```
 
-**Security:** Iframes are sandboxed with `allow-scripts allow-same-origin`. They cannot access the parent DOM or navigate the parent page.
+**Security:** Iframes are sandboxed with `allow-scripts` only. The iframe runs with an **opaque origin**, which means it cannot access the parent DOM, cannot read or write cookies / localStorage / sessionStorage, cannot make credentialed fetch requests to the host, and cannot navigate the parent page. All interaction with the panel goes through the postMessage API above.
 
 ---
 
@@ -1140,7 +1154,7 @@ class RoomActivityPlugin:
 
     CONFIG_SCHEMA = {
         "track_pattern": {
-            "type": "string",
+            "type": "text",
             "label": "State Pattern",
             "description": "Glob pattern for state keys to track (e.g., device.*.power)",
             "default": "device.*.power",
@@ -1220,7 +1234,7 @@ class MQTTBridgePlugin:
 
     CONFIG_SCHEMA = {
         "broker_host": {
-            "type": "string",
+            "type": "text",
             "label": "Broker Host",
             "required": True,
         },
@@ -1232,7 +1246,7 @@ class MQTTBridgePlugin:
             "max": 65535,
         },
         "topic_prefix": {
-            "type": "string",
+            "type": "text",
             "label": "Topic Prefix",
             "default": "openavc",
             "description": "Prefix for all MQTT topics (e.g., openavc/device/proj/power)",
@@ -1349,7 +1363,7 @@ class OccupancySensorPlugin:
 
     CONFIG_SCHEMA = {
         "sensor_url": {
-            "type": "string",
+            "type": "text",
             "label": "Sensor URL",
             "required": True,
             "description": "HTTP endpoint that returns occupancy JSON",
@@ -1362,7 +1376,7 @@ class OccupancySensorPlugin:
             "max": 300,
         },
         "variable_id": {
-            "type": "string",
+            "type": "text",
             "label": "Variable ID",
             "default": "room_occupied",
             "description": "User variable to set (true/false)",
