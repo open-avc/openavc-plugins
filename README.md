@@ -4,6 +4,14 @@ Community plugin repository for [OpenAVC](https://github.com/open-avc/openavc) â
 
 Plugins extend OpenAVC with system-wide integrations, control surfaces, sensors, and services that go beyond single-device protocol translation (which is what [drivers](https://github.com/open-avc/openavc-drivers) are for).
 
+<p align="center">
+  <a href="https://raw.githubusercontent.com/open-avc/openavc-plugins/main/docs/images/stream-deck-room-control.jpg">
+    <img src="https://raw.githubusercontent.com/open-avc/openavc-plugins/main/docs/images/stream-deck-room-control.jpg" alt="Elgato Stream Deck running the OpenAVC plugin to control a real conference room" width="70%">
+  </a>
+</p>
+
+<p align="center"><sub><i>The Stream Deck plugin in action: physical buttons mapped to room macros, with per-key icons and live state. Click to enlarge.</i></sub></p>
+
 ## Plugin Categories
 
 | Category | Directory | Examples |
