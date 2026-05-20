@@ -25,6 +25,7 @@ VALID_CAPABILITIES = {
     "state_read", "state_write", "variable_write",
     "event_emit", "event_subscribe",
     "macro_execute", "device_command", "network_listen", "usb_access",
+    "http_endpoints",
 }
 
 VALID_CATEGORIES = {"control_surface", "integration", "sensor", "utility"}

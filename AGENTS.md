@@ -134,6 +134,7 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | `device_command` | `device_command()` |
 | `network_listen` | Plugin may open network ports |
 | `usb_access` | Plugin may access USB devices |
+| `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*` |
 
 `state_write` and `variable_write` are independent. `state_write` lets a plugin write its own namespaced state (e.g., `plugin.my_plugin.connected`). `variable_write` lets a plugin write user variables (`var.*`) — shared room-logic state. Most plugins need only `state_write`. Declare `variable_write` only when the plugin explicitly contributes to user-variable state, e.g., a sensor reporting occupancy into `var.room_occupied` or a bridge mirroring an external system.
 
