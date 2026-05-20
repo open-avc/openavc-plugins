@@ -28,6 +28,8 @@ from integrations.video_panel.sidecar import SidecarSupervisor
 
 try:
     import yaml
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
 
     from integrations.video_panel.video_panel_plugin import VideoPanelPlugin
 
@@ -183,3 +185,196 @@ def test_plugin_info_manifest_shape():
             entry = dep["platforms"][platform_key]
             assert entry["url"].startswith("https://github.com/")
             assert entry["extract"]
+
+
+# ──── Probe parsing (pure) ────
+
+_PROBE_HEVC = (
+    "Input #0, rtsp, from 'rtsp://cam/1':\n"
+    "  Duration: N/A, start: 0.000000, bitrate: N/A\n"
+    "    Stream #0:0: Video: hevc (Main), yuvj420p(pc, bt709), 1920x1080, 20 fps, 20 tbr, 90k tbn\n"
+    "At least one output file must be specified\n"
+)
+_PROBE_H264_BASELINE = (
+    "Input #0, rtsp, from 'rtsp://cam/2':\n"
+    "    Stream #0:0: Video: h264 (Constrained Baseline), yuv420p(progressive), 1280x720, 15 fps, 15 tbr\n"
+    "    Stream #0:1: Audio: aac, 48000 Hz, stereo\n"
+)
+_PROBE_H264_HIGH = (
+    "Input #0, rtsp, from 'rtsp://cam/3':\n"
+    "    Stream #0:0[0x100]: Video: h264 (High), yuvj420p(pc), 2592x1944, 20 fps\n"
+)
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_parse_probe_hevc_recommends_transcode():
+    r = VideoPanelPlugin._parse_probe(_PROBE_HEVC)
+    assert r["ok"] is True
+    assert r["codec"] == "hevc" and r["profile"] == "Main"
+    assert (r["width"], r["height"]) == (1920, 1080)
+    assert r["fps"] == 20.0
+    assert r["transcode_recommended"] is True
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_parse_probe_h264_baseline_is_clean():
+    r = VideoPanelPlugin._parse_probe(_PROBE_H264_BASELINE)
+    assert r["codec"] == "h264" and "Baseline" in r["profile"]
+    assert (r["width"], r["height"]) == (1280, 720)
+    assert r["transcode_recommended"] is False
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_parse_probe_h264_high_plays_without_transcode():
+    r = VideoPanelPlugin._parse_probe(_PROBE_H264_HIGH)
+    assert r["codec"] == "h264" and r["profile"] == "High"
+    assert (r["width"], r["height"]) == (2592, 1944)
+    assert r["transcode_recommended"] is False
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_parse_probe_surfaces_auth_and_unreachable_errors():
+    auth = VideoPanelPlugin._parse_probe("rtsp://cam: 401 Unauthorized\n")
+    assert auth["ok"] is False and "password" in auth["message"].lower()
+    down = VideoPanelPlugin._parse_probe("rtsp://cam: Connection refused\n")
+    assert down["ok"] is False and "reach" in down["message"].lower()
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_slugify_and_entry_shaping():
+    assert VideoPanelPlugin._slugify("Front Door Cam!") == "front_door_cam"
+    assert VideoPanelPlugin._slugify("   ") == "camera"
+
+    class _In:  # mimic CameraIn attribute access
+        name = "  Lobby  "
+        rtsp_url = "  rtsp://cam/x  "
+        username = "admin"
+        password = "p"
+        codec_hint = "auto"
+        transcode = "always"
+        hardware_accel = "auto"
+
+    entry = VideoPanelPlugin._entry_from_input(_In(), "lobby")
+    assert entry == {
+        "stream_id": "lobby",
+        "name": "Lobby",
+        "rtsp_url": "rtsp://cam/x",
+        "username": "admin",
+        "password": "p",
+        "codec_hint": "auto",
+        "transcode": "always",
+        "hardware_accel": "auto",
+    }
+
+
+# ──── Cameras CRUD over HTTP (fake api + mocked MediaMTX) ────
+
+
+class _FakeApi:
+    """Stands in for the scoped PluginAPI in CRUD endpoint tests."""
+
+    def __init__(self, config=None):
+        self._config = dict(config or {})
+        self.saved = []
+        self.state = {}
+
+    @property
+    def config(self):
+        return dict(self._config)
+
+    async def save_config(self, cfg):
+        self._config = dict(cfg)
+        self.saved.append(dict(cfg))
+
+    async def state_set(self, key, value):
+        self.state[key] = value
+
+    def log(self, message, level="info"):
+        pass
+
+
+def _crud_client(monkeypatch, config=None):
+    plugin = VideoPanelPlugin()
+    plugin.api = _FakeApi(config)
+    plugin._ffmpeg_bin = None
+    plugin._cameras = list((config or {}).get("cameras", []))
+    added, deleted = [], []
+
+    async def fake_post(path, body):
+        added.append((path, body))
+        return True
+
+    async def fake_delete(path):
+        deleted.append(path)
+        return True
+
+    async def fake_get(path):
+        return {"items": []}
+
+    monkeypatch.setattr(plugin, "_api_post", fake_post)
+    monkeypatch.setattr(plugin, "_api_delete", fake_delete)
+    monkeypatch.setattr(plugin, "_api_get", fake_get)
+
+    app = FastAPI()
+    app.include_router(plugin._build_router())
+    return TestClient(app), plugin, added, deleted
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_crud_add_list_edit_delete(monkeypatch):
+    client, plugin, added, deleted = _crud_client(monkeypatch)
+
+    # Add: stream_id auto-derived from the name, MediaMTX path created, persisted.
+    r = client.post("/streams", json={"name": "Front Door", "rtsp_url": "rtsp://cam/1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["stream_id"] == "front_door" and body["status"] == "idle"
+    assert added[-1][0] == "/v3/config/paths/add/front_door"
+    assert added[-1][1] == {"source": "rtsp://cam/1", "sourceOnDemand": True}
+    assert plugin.api.saved[-1]["cameras"][0]["stream_id"] == "front_door"
+
+    # A second camera with the same name gets a unique id.
+    r = client.post("/streams", json={"name": "Front Door", "rtsp_url": "rtsp://cam/2"})
+    assert r.json()["stream_id"] == "front_door_2"
+
+    # List returns both.
+    listing = client.get("/streams").json()
+    assert {c["stream_id"] for c in listing} == {"front_door", "front_door_2"}
+
+    # Edit changes the source: delete-then-add against the live sidecar.
+    deleted.clear(); added.clear()
+    r = client.put("/streams/front_door", json={"name": "Front", "rtsp_url": "rtsp://cam/9"})
+    assert r.status_code == 200, r.text
+    assert "/v3/config/paths/delete/front_door" in deleted
+    assert added[-1] == ("/v3/config/paths/add/front_door", {"source": "rtsp://cam/9", "sourceOnDemand": True})
+
+    # Delete removes it from the list, the sidecar, and persists.
+    r = client.delete("/streams/front_door")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert "/v3/config/paths/delete/front_door" in deleted
+    assert [c["stream_id"] for c in plugin.api.saved[-1]["cameras"]] == ["front_door_2"]
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_crud_validation_and_conflicts(monkeypatch):
+    client, plugin, _added, _deleted = _crud_client(monkeypatch)
+
+    # Malformed URL is rejected before anything is saved.
+    assert client.post("/streams", json={"name": "X", "rtsp_url": "not-a-url"}).status_code == 422
+    # An explicit, duplicate stream_id conflicts.
+    client.post("/streams", json={"name": "A", "rtsp_url": "rtsp://cam/1", "stream_id": "cam_a"})
+    dup = client.post("/streams", json={"name": "B", "rtsp_url": "rtsp://cam/2", "stream_id": "cam_a"})
+    assert dup.status_code == 409
+    # Editing a missing camera is a 404.
+    assert client.put("/streams/nope", json={"name": "N", "rtsp_url": "rtsp://cam/3"}).status_code == 404
+    # Bad stream-id characters are rejected.
+    bad = client.post("/streams", json={"name": "C", "rtsp_url": "rtsp://cam/4", "stream_id": "bad id!"})
+    assert bad.status_code == 422
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_probe_and_snapshot_need_ffmpeg(monkeypatch):
+    client, _plugin, _added, _deleted = _crud_client(monkeypatch)
+    # ffmpeg is unavailable in this fake -> probe reports 503, not a crash.
+    r = client.post("/streams/probe", json={"rtsp_url": "rtsp://cam/1"})
+    assert r.status_code == 503

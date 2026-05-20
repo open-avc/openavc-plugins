@@ -13,6 +13,7 @@ management UI and WHEP playback are layered on in later parts of the plugin.
 import asyncio
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -20,7 +21,8 @@ import time
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Response
+from pydantic import BaseModel
 
 # Sibling module. The plugin loader execs this file with the plugin directory on
 # sys.path (so the flat import resolves) but not as a package, so a relative
@@ -47,13 +49,42 @@ _STATUS_POLL_SECONDS = 5.0
 _MEDIAMTX_VERSION = "1.18.2"
 _SIDECAR_USER = "openavc"
 
+# ffmpeg-backed operations can hang on an unreachable camera; bound them hard.
+_PROBE_TIMEOUT = 15.0
+_SNAPSHOT_TIMEOUT = 15.0
+
+# Stream ids become MediaMTX path names and panel-element binding values, so
+# keep them to a portable, URL-safe character set.
+_STREAM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+class CameraIn(BaseModel):
+    """Add/edit payload for a camera. The IDE Cameras form posts this shape."""
+
+    name: str
+    stream_id: str | None = None
+    rtsp_url: str
+    username: str = ""
+    password: str = ""
+    codec_hint: str = "auto"      # auto | h264 | h265
+    transcode: str = "auto"       # auto | always | never
+    hardware_accel: str = "auto"  # auto | none | qsv | nvenc | vaapi | v4l2m2m
+
+
+class ProbeIn(BaseModel):
+    """Probe payload — tests an RTSP URL before it is saved as a camera."""
+
+    rtsp_url: str
+    username: str = ""
+    password: str = ""
+
 
 class VideoPanelPlugin:
 
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "author": "OpenAVC",
         "description": "Display H.264 and H.265 IP camera streams on the panel.",
         "category": "integration",
@@ -221,6 +252,11 @@ class VideoPanelPlugin:
     # ──── Cameras / streams ────
 
     async def _load_cameras(self):
+        # self._cameras is the authored/configured list (the source of truth the
+        # CRUD endpoints edit and persist). MediaMTX registration is attempted for
+        # each but a sidecar rejection doesn't drop the camera from the list —
+        # it's still configured, just not currently streamable, which the status
+        # poller reflects.
         cams = self.api.config.get("cameras", [])
         self._cameras = []
         if not isinstance(cams, list):
@@ -231,21 +267,87 @@ class VideoPanelPlugin:
             stream_id = (cam.get("stream_id") or "").strip()
             if not stream_id:
                 continue
-            source = self._camera_source_url(cam)
-            if not source:
-                self.api.log(f"camera '{stream_id}' has no rtsp_url; skipping", "warning")
-                continue
-            ok = await self._api_post(
-                f"/v3/config/paths/add/{stream_id}",
-                {"source": source, "sourceOnDemand": True},
+            self._cameras.append(cam)
+            await self._sync_path_add(cam)
+
+    async def _sync_path_add(self, cam):
+        """Register (or re-register) a camera's path with the running sidecar."""
+        stream_id = cam["stream_id"]
+        source = self._camera_source_url(cam)
+        if not source:
+            self.api.log(
+                f"camera '{stream_id}' has no usable rtsp_url; not registered with sidecar",
+                "warning",
             )
-            if ok:
-                self._cameras.append(cam)
-            else:
-                self.api.log(
-                    f"sidecar rejected camera '{stream_id}'; check the RTSP URL",
-                    "warning",
-                )
+            return False
+        ok = await self._api_post(
+            f"/v3/config/paths/add/{stream_id}",
+            {"source": source, "sourceOnDemand": True},
+        )
+        if not ok:
+            self.api.log(
+                f"sidecar rejected camera '{stream_id}'; check the RTSP URL",
+                "warning",
+            )
+        return ok
+
+    async def _sync_path_delete(self, stream_id):
+        """Remove a camera's path from the running sidecar (idempotent)."""
+        return await self._api_delete(f"/v3/config/paths/delete/{stream_id}")
+
+    async def _persist_cameras(self):
+        """Write the current camera list back to the project file via the platform."""
+        cfg = self.api.config  # a copy; safe to mutate
+        cfg["cameras"] = self._cameras
+        await self.api.save_config(cfg)
+
+    def _find_camera(self, stream_id):
+        for c in self._cameras:
+            if c.get("stream_id") == stream_id:
+                return c
+        return None
+
+    def _unique_stream_id(self, name):
+        base = self._slugify(name)
+        sid = base
+        n = 2
+        while self._find_camera(sid):
+            sid = f"{base}_{n}"
+            n += 1
+        return sid
+
+    @staticmethod
+    def _slugify(name):
+        slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
+        return slug or "camera"
+
+    @staticmethod
+    def _entry_from_input(cam, stream_id):
+        return {
+            "stream_id": stream_id,
+            "name": (cam.name or "").strip() or stream_id,
+            "rtsp_url": (cam.rtsp_url or "").strip(),
+            "username": cam.username or "",
+            "password": cam.password or "",
+            "codec_hint": cam.codec_hint or "auto",
+            "transcode": cam.transcode or "auto",
+            "hardware_accel": cam.hardware_accel or "auto",
+        }
+
+    async def _live_status_map(self):
+        data = await self._api_get("/v3/paths/list")
+        live = {}
+        if data:
+            for item in data.get("items", []):
+                name = item.get("name")
+                if name:
+                    # `ready` is deprecated in 1.18.x in favour of `available`.
+                    live[name] = bool(item.get("available", item.get("ready", False)))
+        return live
+
+    @staticmethod
+    def _camera_view(cam, live):
+        return {**cam, "status": "streaming" if live.get(cam["stream_id"]) else "idle"}
 
     async def _publish_streams(self):
         listing = [
@@ -277,11 +379,15 @@ class VideoPanelPlugin:
 
     @staticmethod
     def _camera_source_url(cam):
-        url = (cam.get("rtsp_url") or "").strip()
+        return VideoPanelPlugin._source_url(
+            cam.get("rtsp_url") or "", cam.get("username") or "", cam.get("password") or ""
+        )
+
+    @staticmethod
+    def _source_url(url, username, password):
+        url = (url or "").strip()
         if not url or "://" not in url:
             return None
-        username = cam.get("username") or ""
-        password = cam.get("password") or ""
         if not username:
             return url
         scheme, _, rest = url.partition("://")
@@ -305,7 +411,101 @@ class VideoPanelPlugin:
                 "stream_ids": [c["stream_id"] for c in self._cameras],
             }
 
+        @router.get("/streams")
+        async def list_streams():
+            live = await self._live_status_map()
+            return [self._camera_view(c, live) for c in self._cameras]
+
+        @router.post("/streams")
+        async def add_stream(cam: CameraIn):
+            self._validate_url(cam.rtsp_url)
+            stream_id = (cam.stream_id or "").strip() or self._unique_stream_id(cam.name)
+            self._validate_stream_id(stream_id)
+            if self._find_camera(stream_id):
+                raise HTTPException(409, f"A camera with id '{stream_id}' already exists.")
+            entry = self._entry_from_input(cam, stream_id)
+            self._cameras.append(entry)
+            await self._persist_cameras()
+            await self._sync_path_add(entry)
+            await self._publish_streams()
+            live = await self._live_status_map()
+            return self._camera_view(entry, live)
+
+        @router.put("/streams/{stream_id}")
+        async def edit_stream(stream_id: str, cam: CameraIn):
+            existing = self._find_camera(stream_id)
+            if not existing:
+                raise HTTPException(404, f"No camera with id '{stream_id}'.")
+            self._validate_url(cam.rtsp_url)
+            new_id = (cam.stream_id or "").strip() or stream_id
+            self._validate_stream_id(new_id)
+            if new_id != stream_id and self._find_camera(new_id):
+                raise HTTPException(409, f"A camera with id '{new_id}' already exists.")
+            entry = self._entry_from_input(cam, new_id)
+            self._cameras[self._cameras.index(existing)] = entry
+            await self._persist_cameras()
+            # save_config does not restart the plugin, so the MediaMTX path must be
+            # re-synced live. Delete-then-add covers both source edits and renames.
+            await self._sync_path_delete(stream_id)
+            await self._sync_path_add(entry)
+            await self._publish_streams()
+            live = await self._live_status_map()
+            return self._camera_view(entry, live)
+
+        @router.delete("/streams/{stream_id}")
+        async def delete_stream(stream_id: str):
+            existing = self._find_camera(stream_id)
+            if not existing:
+                raise HTTPException(404, f"No camera with id '{stream_id}'.")
+            self._cameras.remove(existing)
+            await self._persist_cameras()
+            await self._sync_path_delete(stream_id)
+            await self.api.state_set(f"streams.{stream_id}", None)
+            await self._publish_streams()
+            return {"ok": True, "stream_id": stream_id}
+
+        @router.post("/streams/probe")
+        async def probe_stream(body: ProbeIn):
+            self._validate_url(body.rtsp_url)
+            if not self._ffmpeg_bin:
+                raise HTTPException(
+                    503,
+                    "ffmpeg is not available. Reinstall the Video Panel plugin to "
+                    "fetch its native dependencies.",
+                )
+            url = self._source_url(body.rtsp_url, body.username, body.password)
+            return await self._probe_rtsp(url)
+
+        @router.get("/streams/{stream_id}/snapshot.jpg")
+        async def snapshot(stream_id: str):
+            cam = self._find_camera(stream_id)
+            if not cam:
+                raise HTTPException(404, f"No camera with id '{stream_id}'.")
+            if not self._ffmpeg_bin:
+                raise HTTPException(503, "ffmpeg is not available.")
+            data = await self._snapshot_rtsp(self._camera_source_url(cam))
+            if not data:
+                raise HTTPException(502, "Could not capture a frame from the camera.")
+            return Response(
+                content=data,
+                media_type="image/jpeg",
+                headers={"Cache-Control": "no-store"},
+            )
+
         return router
+
+    @staticmethod
+    def _validate_url(url):
+        if not url or "://" not in url:
+            raise HTTPException(422, "RTSP URL must be a full URL, e.g. rtsp://host:554/stream.")
+
+    @staticmethod
+    def _validate_stream_id(stream_id):
+        if not _STREAM_ID_RE.fullmatch(stream_id or ""):
+            raise HTTPException(
+                422,
+                "Stream ID may contain only letters, numbers, hyphens, and underscores.",
+            )
 
     # ──── MediaMTX control API ────
 
@@ -329,6 +529,16 @@ class VideoPanelPlugin:
         except httpx.HTTPError:
             return False
 
+    async def _api_delete(self, path):
+        url = f"http://{_API_HOST}:{_API_PORT}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.delete(url)
+            # 404 means the path is already gone — fine for an idempotent delete.
+            return resp.status_code in (200, 204, 404)
+        except httpx.HTTPError:
+            return False
+
     async def _wait_until_ready(self):
         deadline = time.monotonic() + _READY_TIMEOUT
         while time.monotonic() < deadline:
@@ -336,6 +546,115 @@ class VideoPanelPlugin:
                 return True
             await asyncio.sleep(0.3)
         return False
+
+    # ──── ffmpeg: probe + snapshot ────
+
+    async def _probe_rtsp(self, url):
+        """Run `ffmpeg -i <url>` and parse the stream info it prints to stderr.
+
+        ffprobe isn't bundled (the native dep extracts only ffmpeg), so we use
+        ffmpeg with no output file: it prints the input's stream details, then
+        exits non-zero because no output was given. The details are what we want.
+        """
+        args = [str(self._ffmpeg_bin), "-hide_banner", "-rtsp_transport", "tcp", "-i", url]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+            )
+        except OSError as e:
+            return {"ok": False, "message": f"Could not run ffmpeg: {e}"}
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_PROBE_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {
+                "ok": False,
+                "message": "Timed out connecting to the camera. Check the URL, "
+                "credentials, and that the camera is reachable on the network.",
+            }
+        return self._parse_probe(stderr.decode("utf-8", "replace"))
+
+    @staticmethod
+    def _parse_probe(text):
+        vid_line = next(
+            (ln for ln in text.splitlines() if re.search(r"Stream #\d+:\d+.*: Video:", ln)),
+            None,
+        )
+        if not vid_line:
+            lowered = text.lower()
+            if "401 unauthorized" in lowered or "authorization failed" in lowered:
+                return {"ok": False, "message": "Authentication failed. Check the username and password."}
+            if any(s in lowered for s in ("connection refused", "no route to host", "timed out", "timeout")):
+                return {"ok": False, "message": "Could not reach the camera. Check the URL and that the device is online."}
+            return {"ok": False, "message": "No video stream was found at that URL."}
+        m = re.search(r"Video:\s*([A-Za-z0-9_]+)(?:\s*\(([^)]*)\))?", vid_line)
+        codec = m.group(1).lower() if m else ""
+        profile = (m.group(2) or "").strip() if m else ""
+        res = re.search(r"(\d{2,5})x(\d{2,5})", vid_line)
+        fps_m = re.search(r"(\d+(?:\.\d+)?)\s*fps", vid_line)
+        result = {
+            "ok": True,
+            "codec": codec,
+            "profile": profile,
+            "width": int(res.group(1)) if res else None,
+            "height": int(res.group(2)) if res else None,
+            "fps": float(fps_m.group(1)) if fps_m else None,
+        }
+        result.update(VideoPanelPlugin._transcode_recommendation(codec, profile))
+        return result
+
+    @staticmethod
+    def _transcode_recommendation(codec, profile):
+        p = (profile or "").lower()
+        if codec in ("hevc", "h265"):
+            return {
+                "transcode_recommended": True,
+                "advice": "This camera streams H.265/HEVC, which most browsers can't play. "
+                "It will be transcoded to H.264 for the panel.",
+            }
+        if codec == "h264":
+            if "baseline" in p:
+                return {
+                    "transcode_recommended": False,
+                    "advice": "H.264 Baseline plays directly in every browser. No transcoding needed.",
+                }
+            label = f"H.264 {profile}".strip()
+            return {
+                "transcode_recommended": False,
+                "advice": f"{label} should play in most browsers. If it stutters or fails on a "
+                "panel, set Transcode to Always.",
+            }
+        if not codec:
+            return {
+                "transcode_recommended": True,
+                "advice": "Could not identify the video codec; it may be transcoded.",
+            }
+        return {
+            "transcode_recommended": True,
+            "advice": f"Codec '{codec}' may not play in browsers and will be transcoded to H.264.",
+        }
+
+    async def _snapshot_rtsp(self, url):
+        if not url:
+            return None
+        args = [
+            str(self._ffmpeg_bin), "-hide_banner", "-rtsp_transport", "tcp", "-i", url,
+            "-frames:v", "1", "-q:v", "4", "-f", "image2", "-",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            )
+        except OSError:
+            return None
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_SNAPSHOT_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return None
+        return stdout or None
 
     # ──── Config + binaries ────
 
