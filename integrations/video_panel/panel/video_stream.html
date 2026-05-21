@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Video Stream</title>
+  <link rel="stylesheet" href="video_stream.css">
+</head>
+<body>
+  <div id="stage">
+    <video id="video" autoplay muted playsinline></video>
+    <div id="label" class="overlay-label" hidden></div>
+    <div id="status" class="overlay-status">
+      <div id="spinner" class="spinner"></div>
+      <div id="statusText" class="status-text">Connecting&hellip;</div>
+      <button id="retry" class="retry-btn" type="button" hidden>Retry</button>
+    </div>
+  </div>
+  <script src="video_stream.js"></script>
+</body>
+</html>

@@ -277,6 +277,8 @@ class _FakeApi:
         self._config = dict(config or {})
         self.saved = []
         self.state = {}
+        self.proxy_calls = []
+        self.proxy_location = None  # canned WHEP Location for POST responses
 
     @property
     def config(self):
@@ -291,6 +293,19 @@ class _FakeApi:
 
     def log(self, message, level="info"):
         pass
+
+    async def proxy_to(self, url, request, *, timeout=30.0):
+        """Stand in for PluginAPI.proxy_to: record the upstream URL, return a
+        canned response shaped like MediaMTX's WHEP replies."""
+        from starlette.responses import Response as _Resp
+
+        self.proxy_calls.append({"url": url, "method": request.method})
+        if request.method == "POST":
+            headers = {"location": self.proxy_location} if self.proxy_location else {}
+            return _Resp(content=b"v=0\r\n", status_code=201, headers=headers)
+        if request.method == "DELETE":
+            return _Resp(content=b"", status_code=200)
+        return _Resp(content=b"", status_code=204)  # PATCH
 
 
 def _crud_client(monkeypatch, config=None):
@@ -378,3 +393,103 @@ def test_probe_and_snapshot_need_ffmpeg(monkeypatch):
     # ffmpeg is unavailable in this fake -> probe reports 503, not a crash.
     r = client.post("/streams/probe", json={"rtsp_url": "rtsp://cam/1"})
     assert r.status_code == 503
+
+
+# ──── WHEP reverse proxy ────
+
+
+def _whep_client(streams=None, auth_pass="sidecarpass"):
+    plugin = VideoPanelPlugin()
+    plugin.api = _FakeApi({"streams": streams or []})
+    plugin._auth_pass = auth_pass
+    plugin._ffmpeg_bin = None
+    plugin._streams = list(streams or [])
+    app = FastAPI()
+    # Mount at root so request.url.path is "/whep/<id>", which is what the
+    # Location-rewrite reflects. The platform mounts it under /api/plugins/<id>/ext.
+    app.include_router(plugin._build_router())
+    return TestClient(app), plugin, plugin.api
+
+
+_WHEP_STREAM = {
+    "stream_id": "front_door",
+    "name": "Front Door",
+    "rtsp_url": "rtsp://cam/1",
+    "username": "",
+    "password": "",
+}
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_whep_offer_proxies_to_sidecar_and_rewrites_location():
+    client, _plugin, api = _whep_client(streams=[_WHEP_STREAM])
+    api.proxy_location = "/front_door/whep/abc-123-uuid"
+
+    r = client.post(
+        "/whep/front_door",
+        content=b"v=0\r\noffer",
+        headers={"Content-Type": "application/sdp"},
+    )
+    assert r.status_code == 201, r.text
+    # Forwarded to the localhost sidecar WHEP endpoint with read creds in userinfo.
+    assert api.proxy_calls[-1] == {
+        "url": "http://openavc:sidecarpass@127.0.0.1:8889/front_door/whep",
+        "method": "POST",
+    }
+    # MediaMTX's path-absolute Location is rewritten to live under this mount so
+    # the browser's PATCH/DELETE come back through the authenticated proxy.
+    assert r.headers["location"] == "/whep/front_door/abc-123-uuid"
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_whep_trickle_and_teardown_target_the_session():
+    client, _plugin, api = _whep_client(streams=[_WHEP_STREAM])
+    expected = "http://openavc:sidecarpass@127.0.0.1:8889/front_door/whep/abc-123-uuid"
+
+    pr = client.patch(
+        "/whep/front_door/abc-123-uuid",
+        content=b"a=ice-ufrag:x\r\n",
+        headers={"Content-Type": "application/trickle-ice-sdpfrag"},
+    )
+    assert pr.status_code == 204
+    assert api.proxy_calls[-1] == {"url": expected, "method": "PATCH"}
+
+    dr = client.delete("/whep/front_door/abc-123-uuid")
+    assert dr.status_code == 200
+    assert api.proxy_calls[-1] == {"url": expected, "method": "DELETE"}
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_whep_offer_unknown_stream_is_404_without_hitting_sidecar():
+    client, _plugin, api = _whep_client(streams=[])
+    r = client.post(
+        "/whep/ghost", content=b"v=0", headers={"Content-Type": "application/sdp"}
+    )
+    assert r.status_code == 404
+    assert api.proxy_calls == []
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_whep_rejects_malformed_session_id():
+    client, _plugin, api = _whep_client(streams=[_WHEP_STREAM])
+    # Underscore is outside the UUID-ish secret charset -> rejected before proxying.
+    r = client.delete("/whep/front_door/bad_secret")
+    assert r.status_code == 422
+    assert api.proxy_calls == []
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_video_stream_panel_element_extension_shape():
+    elements = VideoPanelPlugin.EXTENSIONS["panel_elements"]
+    assert len(elements) == 1
+    el = elements[0]
+    assert el["type"] == "video_stream"
+    assert el["label"] == "Video Stream"
+    assert el["renderer"] == "iframe"
+    assert el["ext_auth"] is True
+    assert el["sandbox_permissions"] == ["allow-same-origin"]
+    assert el["allow_features"] == ["autoplay"]
+    # The stream picker is driven by the plugin's published stream_ids list.
+    stream_field = next(f for f in el["config_schema"] if f["key"] == "stream_id")
+    assert stream_field["type"] == "select"
+    assert stream_field["options_source"] == "plugin.video_panel.stream_ids"

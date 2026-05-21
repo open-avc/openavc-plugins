@@ -21,7 +21,7 @@ import time
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 # Sibling module. The plugin loader execs this file with the plugin directory on
@@ -57,6 +57,10 @@ _SNAPSHOT_TIMEOUT = 15.0
 # keep them to a portable, URL-safe character set.
 _STREAM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
+# WHEP session secrets are MediaMTX-minted UUIDs; constrain to a URL-safe set
+# before they're spliced into the proxied sidecar URL.
+_SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
+
 
 class StreamIn(BaseModel):
     """Add/edit payload for a video stream. The IDE Video Streams form posts this."""
@@ -84,7 +88,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -149,6 +153,55 @@ class VideoPanelPlugin:
                 },
             },
         ],
+    }
+
+    # Panel element: an iframe that plays one stream over WHEP/WebRTC. The
+    # panel runtime serves panel/video_stream.html (named for the element
+    # type) and injects config + theme + a plugin-scoped ext_token via
+    # postMessage; the iframe presents that token to the /ext/whep routes.
+    EXTENSIONS = {
+        "panel_elements": [
+            {
+                "type": "video_stream",
+                "label": "Video Stream",
+                "renderer": "iframe",
+                "renderer_url": "panel/video_stream.html",
+                "default_size": {"col_span": 6, "row_span": 4},
+                # allow-same-origin: the iframe is served same-origin and must
+                # send a fetch with the platform session so its /ext/* calls
+                # authenticate. autoplay: start playback without a user gesture.
+                "sandbox_permissions": ["allow-same-origin"],
+                "allow_features": ["autoplay"],
+                "ext_auth": True,
+                "config_schema": [
+                    {
+                        "key": "stream_id",
+                        "label": "Stream",
+                        "type": "select",
+                        "options_source": "plugin.video_panel.stream_ids",
+                    },
+                    {
+                        "key": "fit",
+                        "label": "Fit",
+                        "type": "select",
+                        "options": ["contain", "cover"],
+                        "default": "contain",
+                    },
+                    {
+                        "key": "show_label",
+                        "label": "Show stream name overlay",
+                        "type": "boolean",
+                        "default": False,
+                    },
+                    {
+                        "key": "reconnect_on_idle",
+                        "label": "Auto-reconnect when tab regains focus",
+                        "type": "boolean",
+                        "default": True,
+                    },
+                ],
+            }
+        ]
     }
 
     def __init__(self):
@@ -492,7 +545,50 @@ class VideoPanelPlugin:
                 headers={"Cache-Control": "no-store"},
             )
 
+        # ── WHEP (WebRTC playback) reverse proxy ──
+        # The panel iframe's WHEP client POSTs an SDP offer here; we forward it
+        # to the sidecar's WebRTC server (localhost, Basic-authed via the URL
+        # userinfo httpx applies) and return the SDP answer. MediaMTX answers
+        # with a path-absolute Location (/{stream_id}/whep/{session}); left
+        # as-is the browser would resolve the follow-up PATCH/DELETE against
+        # the origin root, bypassing this authenticated mount. So we rewrite
+        # Location to sit under the incoming request path — the trickle and
+        # teardown then come back through here.
+        @router.post("/whep/{stream_id}")
+        async def whep_offer(stream_id: str, request: Request):
+            self._validate_stream_id(stream_id)
+            if not self._find_stream(stream_id):
+                raise HTTPException(404, f"No stream with id '{stream_id}'.")
+            resp = await self.api.proxy_to(self._whep_url(stream_id), request)
+            location = resp.headers.get("location")
+            if location:
+                secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
+            return resp
+
+        @router.patch("/whep/{stream_id}/{secret}")
+        async def whep_trickle(stream_id: str, secret: str, request: Request):
+            self._validate_stream_id(stream_id)
+            self._validate_secret(secret)
+            return await self.api.proxy_to(self._whep_url(stream_id, secret), request)
+
+        @router.delete("/whep/{stream_id}/{secret}")
+        async def whep_teardown(stream_id: str, secret: str, request: Request):
+            self._validate_stream_id(stream_id)
+            self._validate_secret(secret)
+            return await self.api.proxy_to(self._whep_url(stream_id, secret), request)
+
         return router
+
+    def _whep_url(self, stream_id, secret=None):
+        """Build the localhost sidecar WHEP URL, with read creds in the userinfo.
+
+        httpx turns the userinfo into a Basic ``Authorization`` header, which is
+        how the sidecar's ``openavc`` (read/playback) user is authenticated.
+        """
+        cred = f"{_SIDECAR_USER}:{self._auth_pass}@" if self._auth_pass else ""
+        base = f"http://{cred}{_WEBRTC_HOST}:{_WEBRTC_PORT}/{stream_id}/whep"
+        return f"{base}/{secret}" if secret else base
 
     @staticmethod
     def _validate_url(url):
@@ -506,6 +602,11 @@ class VideoPanelPlugin:
                 422,
                 "Stream ID may contain only letters, numbers, hyphens, and underscores.",
             )
+
+    @staticmethod
+    def _validate_secret(secret):
+        if not _SECRET_RE.fullmatch(secret or ""):
+            raise HTTPException(422, "Invalid WHEP session id.")
 
     # ──── MediaMTX control API ────
 

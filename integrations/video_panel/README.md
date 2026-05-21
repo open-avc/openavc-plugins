@@ -35,6 +35,20 @@ Credentials are sent to the source as part of the stream address; you do not
 need to embed them in the URL yourself. Use **Test** when adding a stream to
 confirm it is reachable and to see whether it needs transcoding.
 
+## Showing a stream on a panel
+
+In the UI Builder, add a **Video Stream** element to a page, then open its
+properties and pick the stream from the **Stream** list. Other options:
+
+| Option | Description |
+|--------|-------------|
+| Fit | `contain` shows the whole picture with letterboxing; `cover` fills the element and crops the edges |
+| Show stream name overlay | Draws the stream's name along the bottom of the video |
+| Auto-reconnect when tab regains focus | Reconnects after the panel has been in the background (on by default) |
+
+The element shows a spinner while connecting and a Retry button if the stream
+goes offline. Playback is muted and starts on its own.
+
 ## State keys
 
 | Key | Type | Description |
