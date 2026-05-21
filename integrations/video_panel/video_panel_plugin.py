@@ -1,12 +1,12 @@
 """Video Panel plugin for OpenAVC.
 
-Shows H.264 / H.265 IP camera streams (and any other RTSP source) on the
-touch panel. The plugin bundles MediaMTX as a sidecar that pulls each camera's
-RTSP feed and republishes it as browser-playable WebRTC (WHEP). The sidecar
-binds to localhost only; the panel reaches it through OpenAVC's own HTTP
-server, so camera traffic inherits the platform's authentication.
+Shows H.264 / H.265 video streams (IP cameras and any other RTSP/RTMP/SRT
+source) on the touch panel. The plugin bundles MediaMTX as a sidecar that pulls
+each source's feed and republishes it as browser-playable WebRTC (WHEP). The
+sidecar binds to localhost only; the panel reaches it through OpenAVC's own HTTP
+server, so stream traffic inherits the platform's authentication.
 
-This module owns the sidecar lifecycle and the plugin's state. Camera
+This module owns the sidecar lifecycle and the plugin's state. Stream
 management UI and WHEP playback are layered on in later parts of the plugin.
 """
 
@@ -49,7 +49,7 @@ _STATUS_POLL_SECONDS = 5.0
 _MEDIAMTX_VERSION = "1.18.2"
 _SIDECAR_USER = "openavc"
 
-# ffmpeg-backed operations can hang on an unreachable camera; bound them hard.
+# ffmpeg-backed operations can hang on an unreachable source; bound them hard.
 _PROBE_TIMEOUT = 15.0
 _SNAPSHOT_TIMEOUT = 15.0
 
@@ -58,8 +58,8 @@ _SNAPSHOT_TIMEOUT = 15.0
 _STREAM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
-class CameraIn(BaseModel):
-    """Add/edit payload for a camera. The IDE Cameras form posts this shape."""
+class StreamIn(BaseModel):
+    """Add/edit payload for a video stream. The IDE Video Streams form posts this."""
 
     name: str
     stream_id: str | None = None
@@ -72,7 +72,7 @@ class CameraIn(BaseModel):
 
 
 class ProbeIn(BaseModel):
-    """Probe payload — tests an RTSP URL before it is saved as a camera."""
+    """Probe payload — tests an RTSP URL before it is saved as a stream."""
 
     rtsp_url: str
     username: str = ""
@@ -84,9 +84,9 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "author": "OpenAVC",
-        "description": "Display H.264 and H.265 IP camera streams on the panel.",
+        "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
@@ -158,7 +158,7 @@ class VideoPanelPlugin:
         self._ffmpeg_bin = None
         self._auth_pass = ""
         self._config_path = None
-        self._cameras = []  # camera dicts that registered successfully with the sidecar
+        self._streams = []  # configured stream dicts (the source of truth)
 
     # ──── Lifecycle ────
 
@@ -210,14 +210,14 @@ class VideoPanelPlugin:
                 )
             await self.api.state_set("running", True)
             self.api.register_router(self._build_router())
-            await self._load_cameras()
+            await self._load_streams()
             await self._publish_streams()
             self.api.create_periodic_task(
                 self._poll_statuses, interval_seconds=_STATUS_POLL_SECONDS, name="status_poll"
             )
             self.api.log(
                 f"Video Panel started: MediaMTX {_MEDIAMTX_VERSION} on "
-                f"{_API_HOST}:{_API_PORT}, {len(self._cameras)} camera(s)"
+                f"{_API_HOST}:{_API_PORT}, {len(self._streams)} stream(s)"
             )
         except Exception:
             # Don't leave an orphaned sidecar if start() fails partway.
@@ -249,34 +249,34 @@ class VideoPanelPlugin:
         await self.api.state_set("error", reason)
         await self.api.event_emit("error", {"reason": reason})
 
-    # ──── Cameras / streams ────
+    # ──── Streams ────
 
-    async def _load_cameras(self):
-        # self._cameras is the authored/configured list (the source of truth the
+    async def _load_streams(self):
+        # self._streams is the authored/configured list (the source of truth the
         # CRUD endpoints edit and persist). MediaMTX registration is attempted for
-        # each but a sidecar rejection doesn't drop the camera from the list —
-        # it's still configured, just not currently streamable, which the status
+        # each but a sidecar rejection doesn't drop the stream from the list —
+        # it's still configured, just not currently playable, which the status
         # poller reflects.
-        cams = self.api.config.get("cameras", [])
-        self._cameras = []
-        if not isinstance(cams, list):
+        configured = self.api.config.get("streams", [])
+        self._streams = []
+        if not isinstance(configured, list):
             return
-        for cam in cams:
-            if not isinstance(cam, dict):
+        for stream in configured:
+            if not isinstance(stream, dict):
                 continue
-            stream_id = (cam.get("stream_id") or "").strip()
+            stream_id = (stream.get("stream_id") or "").strip()
             if not stream_id:
                 continue
-            self._cameras.append(cam)
-            await self._sync_path_add(cam)
+            self._streams.append(stream)
+            await self._sync_path_add(stream)
 
-    async def _sync_path_add(self, cam):
-        """Register (or re-register) a camera's path with the running sidecar."""
-        stream_id = cam["stream_id"]
-        source = self._camera_source_url(cam)
+    async def _sync_path_add(self, stream):
+        """Register (or re-register) a stream's path with the running sidecar."""
+        stream_id = stream["stream_id"]
+        source = self._stream_source_url(stream)
         if not source:
             self.api.log(
-                f"camera '{stream_id}' has no usable rtsp_url; not registered with sidecar",
+                f"stream '{stream_id}' has no usable rtsp_url; not registered with sidecar",
                 "warning",
             )
             return False
@@ -286,32 +286,32 @@ class VideoPanelPlugin:
         )
         if not ok:
             self.api.log(
-                f"sidecar rejected camera '{stream_id}'; check the RTSP URL",
+                f"sidecar rejected stream '{stream_id}'; check the source URL",
                 "warning",
             )
         return ok
 
     async def _sync_path_delete(self, stream_id):
-        """Remove a camera's path from the running sidecar (idempotent)."""
+        """Remove a stream's path from the running sidecar (idempotent)."""
         return await self._api_delete(f"/v3/config/paths/delete/{stream_id}")
 
-    async def _persist_cameras(self):
-        """Write the current camera list back to the project file via the platform."""
+    async def _persist_streams(self):
+        """Write the current stream list back to the project file via the platform."""
         cfg = self.api.config  # a copy; safe to mutate
-        cfg["cameras"] = self._cameras
+        cfg["streams"] = self._streams
         await self.api.save_config(cfg)
 
-    def _find_camera(self, stream_id):
-        for c in self._cameras:
-            if c.get("stream_id") == stream_id:
-                return c
+    def _find_stream(self, stream_id):
+        for s in self._streams:
+            if s.get("stream_id") == stream_id:
+                return s
         return None
 
     def _unique_stream_id(self, name):
         base = self._slugify(name)
         sid = base
         n = 2
-        while self._find_camera(sid):
+        while self._find_stream(sid):
             sid = f"{base}_{n}"
             n += 1
         return sid
@@ -319,19 +319,19 @@ class VideoPanelPlugin:
     @staticmethod
     def _slugify(name):
         slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
-        return slug or "camera"
+        return slug or "stream"
 
     @staticmethod
-    def _entry_from_input(cam, stream_id):
+    def _entry_from_input(data, stream_id):
         return {
             "stream_id": stream_id,
-            "name": (cam.name or "").strip() or stream_id,
-            "rtsp_url": (cam.rtsp_url or "").strip(),
-            "username": cam.username or "",
-            "password": cam.password or "",
-            "codec_hint": cam.codec_hint or "auto",
-            "transcode": cam.transcode or "auto",
-            "hardware_accel": cam.hardware_accel or "auto",
+            "name": (data.name or "").strip() or stream_id,
+            "rtsp_url": (data.rtsp_url or "").strip(),
+            "username": data.username or "",
+            "password": data.password or "",
+            "codec_hint": data.codec_hint or "auto",
+            "transcode": data.transcode or "auto",
+            "hardware_accel": data.hardware_accel or "auto",
         }
 
     async def _live_status_map(self):
@@ -346,17 +346,17 @@ class VideoPanelPlugin:
         return live
 
     @staticmethod
-    def _camera_view(cam, live):
-        return {**cam, "status": "streaming" if live.get(cam["stream_id"]) else "idle"}
+    def _stream_view(stream, live):
+        return {**stream, "status": "streaming" if live.get(stream["stream_id"]) else "idle"}
 
     async def _publish_streams(self):
         listing = [
-            {"value": c["stream_id"], "label": c.get("name") or c["stream_id"]}
-            for c in self._cameras
+            {"value": s["stream_id"], "label": s.get("name") or s["stream_id"]}
+            for s in self._streams
         ]
         await self.api.state_set("stream_ids", json.dumps(listing))
-        for c in self._cameras:
-            await self.api.state_set(f"streams.{c['stream_id']}", "idle")
+        for s in self._streams:
+            await self.api.state_set(f"streams.{s['stream_id']}", "idle")
 
     async def _poll_statuses(self):
         data = await self._api_get("/v3/paths/list")
@@ -371,16 +371,16 @@ class VideoPanelPlugin:
                 # `ready` is deprecated in MediaMTX 1.18.x in favour of
                 # `available`; prefer the new field, fall back for older builds.
                 live[name] = bool(item.get("available", item.get("ready", False)))
-        for c in self._cameras:
-            stream_id = c["stream_id"]
+        for s in self._streams:
+            stream_id = s["stream_id"]
             await self.api.state_set(
                 f"streams.{stream_id}", "streaming" if live.get(stream_id) else "idle"
             )
 
     @staticmethod
-    def _camera_source_url(cam):
+    def _stream_source_url(stream):
         return VideoPanelPlugin._source_url(
-            cam.get("rtsp_url") or "", cam.get("username") or "", cam.get("password") or ""
+            stream.get("rtsp_url") or "", stream.get("username") or "", stream.get("password") or ""
         )
 
     @staticmethod
@@ -408,57 +408,57 @@ class VideoPanelPlugin:
             return {
                 "running": bool(self._supervisor and self._supervisor.running),
                 "mediamtx_version": _MEDIAMTX_VERSION,
-                "stream_ids": [c["stream_id"] for c in self._cameras],
+                "stream_ids": [s["stream_id"] for s in self._streams],
             }
 
         @router.get("/streams")
         async def list_streams():
             live = await self._live_status_map()
-            return [self._camera_view(c, live) for c in self._cameras]
+            return [self._stream_view(s, live) for s in self._streams]
 
         @router.post("/streams")
-        async def add_stream(cam: CameraIn):
-            self._validate_url(cam.rtsp_url)
-            stream_id = (cam.stream_id or "").strip() or self._unique_stream_id(cam.name)
+        async def add_stream(data: StreamIn):
+            self._validate_url(data.rtsp_url)
+            stream_id = (data.stream_id or "").strip() or self._unique_stream_id(data.name)
             self._validate_stream_id(stream_id)
-            if self._find_camera(stream_id):
-                raise HTTPException(409, f"A camera with id '{stream_id}' already exists.")
-            entry = self._entry_from_input(cam, stream_id)
-            self._cameras.append(entry)
-            await self._persist_cameras()
+            if self._find_stream(stream_id):
+                raise HTTPException(409, f"A stream with id '{stream_id}' already exists.")
+            entry = self._entry_from_input(data, stream_id)
+            self._streams.append(entry)
+            await self._persist_streams()
             await self._sync_path_add(entry)
             await self._publish_streams()
             live = await self._live_status_map()
-            return self._camera_view(entry, live)
+            return self._stream_view(entry, live)
 
         @router.put("/streams/{stream_id}")
-        async def edit_stream(stream_id: str, cam: CameraIn):
-            existing = self._find_camera(stream_id)
+        async def edit_stream(stream_id: str, data: StreamIn):
+            existing = self._find_stream(stream_id)
             if not existing:
-                raise HTTPException(404, f"No camera with id '{stream_id}'.")
-            self._validate_url(cam.rtsp_url)
-            new_id = (cam.stream_id or "").strip() or stream_id
+                raise HTTPException(404, f"No stream with id '{stream_id}'.")
+            self._validate_url(data.rtsp_url)
+            new_id = (data.stream_id or "").strip() or stream_id
             self._validate_stream_id(new_id)
-            if new_id != stream_id and self._find_camera(new_id):
-                raise HTTPException(409, f"A camera with id '{new_id}' already exists.")
-            entry = self._entry_from_input(cam, new_id)
-            self._cameras[self._cameras.index(existing)] = entry
-            await self._persist_cameras()
+            if new_id != stream_id and self._find_stream(new_id):
+                raise HTTPException(409, f"A stream with id '{new_id}' already exists.")
+            entry = self._entry_from_input(data, new_id)
+            self._streams[self._streams.index(existing)] = entry
+            await self._persist_streams()
             # save_config does not restart the plugin, so the MediaMTX path must be
             # re-synced live. Delete-then-add covers both source edits and renames.
             await self._sync_path_delete(stream_id)
             await self._sync_path_add(entry)
             await self._publish_streams()
             live = await self._live_status_map()
-            return self._camera_view(entry, live)
+            return self._stream_view(entry, live)
 
         @router.delete("/streams/{stream_id}")
         async def delete_stream(stream_id: str):
-            existing = self._find_camera(stream_id)
+            existing = self._find_stream(stream_id)
             if not existing:
-                raise HTTPException(404, f"No camera with id '{stream_id}'.")
-            self._cameras.remove(existing)
-            await self._persist_cameras()
+                raise HTTPException(404, f"No stream with id '{stream_id}'.")
+            self._streams.remove(existing)
+            await self._persist_streams()
             await self._sync_path_delete(stream_id)
             await self.api.state_set(f"streams.{stream_id}", None)
             await self._publish_streams()
@@ -478,14 +478,14 @@ class VideoPanelPlugin:
 
         @router.get("/streams/{stream_id}/snapshot.jpg")
         async def snapshot(stream_id: str):
-            cam = self._find_camera(stream_id)
-            if not cam:
-                raise HTTPException(404, f"No camera with id '{stream_id}'.")
+            stream = self._find_stream(stream_id)
+            if not stream:
+                raise HTTPException(404, f"No stream with id '{stream_id}'.")
             if not self._ffmpeg_bin:
                 raise HTTPException(503, "ffmpeg is not available.")
-            data = await self._snapshot_rtsp(self._camera_source_url(cam))
+            data = await self._snapshot_rtsp(self._stream_source_url(stream))
             if not data:
-                raise HTTPException(502, "Could not capture a frame from the camera.")
+                raise HTTPException(502, "Could not capture a frame from the stream.")
             return Response(
                 content=data,
                 media_type="image/jpeg",
@@ -497,7 +497,7 @@ class VideoPanelPlugin:
     @staticmethod
     def _validate_url(url):
         if not url or "://" not in url:
-            raise HTTPException(422, "RTSP URL must be a full URL, e.g. rtsp://host:554/stream.")
+            raise HTTPException(422, "Source URL must be a full URL, e.g. rtsp://host:554/stream.")
 
     @staticmethod
     def _validate_stream_id(stream_id):
@@ -570,8 +570,8 @@ class VideoPanelPlugin:
             await proc.wait()
             return {
                 "ok": False,
-                "message": "Timed out connecting to the camera. Check the URL, "
-                "credentials, and that the camera is reachable on the network.",
+                "message": "Timed out connecting to the source. Check the URL, "
+                "credentials, and that the device is reachable on the network.",
             }
         return self._parse_probe(stderr.decode("utf-8", "replace"))
 
@@ -586,7 +586,7 @@ class VideoPanelPlugin:
             if "401 unauthorized" in lowered or "authorization failed" in lowered:
                 return {"ok": False, "message": "Authentication failed. Check the username and password."}
             if any(s in lowered for s in ("connection refused", "no route to host", "timed out", "timeout")):
-                return {"ok": False, "message": "Could not reach the camera. Check the URL and that the device is online."}
+                return {"ok": False, "message": "Could not reach the source. Check the URL and that the device is online."}
             return {"ok": False, "message": "No video stream was found at that URL."}
         m = re.search(r"Video:\s*([A-Za-z0-9_]+)(?:\s*\(([^)]*)\))?", vid_line)
         codec = m.group(1).lower() if m else ""
@@ -610,7 +610,7 @@ class VideoPanelPlugin:
         if codec in ("hevc", "h265"):
             return {
                 "transcode_recommended": True,
-                "advice": "This camera streams H.265/HEVC, which most browsers can't play. "
+                "advice": "This source streams H.265/HEVC, which most browsers can't play. "
                 "It will be transcoded to H.264 for the panel.",
             }
         if codec == "h264":

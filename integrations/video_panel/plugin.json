@@ -1,9 +1,9 @@
 {
     "id": "video_panel",
     "name": "Video Panel",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "author": "OpenAVC",
-    "description": "Display H.264 and H.265 IP camera streams on the panel.",
+    "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
     "category": "integration",
     "license": "MIT",
     "platforms": ["win_x64", "linux_x64", "linux_arm64"],

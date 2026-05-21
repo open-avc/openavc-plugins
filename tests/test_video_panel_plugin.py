@@ -129,8 +129,8 @@ async def test_supervisor_circuit_breaks_on_crash_loop(monkeypatch):
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
-def test_camera_source_url_injects_credentials():
-    f = VideoPanelPlugin._camera_source_url
+def test_stream_source_url_injects_credentials():
+    f = VideoPanelPlugin._stream_source_url
     assert (
         f({"rtsp_url": "rtsp://cam/stream1", "username": "admin", "password": "p@ss/word"})
         == "rtsp://admin:p%40ss%2Fword@cam/stream1"
@@ -243,7 +243,7 @@ def test_parse_probe_surfaces_auth_and_unreachable_errors():
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_slugify_and_entry_shaping():
     assert VideoPanelPlugin._slugify("Front Door Cam!") == "front_door_cam"
-    assert VideoPanelPlugin._slugify("   ") == "camera"
+    assert VideoPanelPlugin._slugify("   ") == "stream"
 
     class _In:  # mimic CameraIn attribute access
         name = "  Lobby  "
@@ -297,7 +297,7 @@ def _crud_client(monkeypatch, config=None):
     plugin = VideoPanelPlugin()
     plugin.api = _FakeApi(config)
     plugin._ffmpeg_bin = None
-    plugin._cameras = list((config or {}).get("cameras", []))
+    plugin._streams = list((config or {}).get("streams", []))
     added, deleted = [], []
 
     async def fake_post(path, body):
@@ -331,9 +331,9 @@ def test_crud_add_list_edit_delete(monkeypatch):
     assert body["stream_id"] == "front_door" and body["status"] == "idle"
     assert added[-1][0] == "/v3/config/paths/add/front_door"
     assert added[-1][1] == {"source": "rtsp://cam/1", "sourceOnDemand": True}
-    assert plugin.api.saved[-1]["cameras"][0]["stream_id"] == "front_door"
+    assert plugin.api.saved[-1]["streams"][0]["stream_id"] == "front_door"
 
-    # A second camera with the same name gets a unique id.
+    # A second stream with the same name gets a unique id.
     r = client.post("/streams", json={"name": "Front Door", "rtsp_url": "rtsp://cam/2"})
     assert r.json()["stream_id"] == "front_door_2"
 
@@ -352,7 +352,7 @@ def test_crud_add_list_edit_delete(monkeypatch):
     r = client.delete("/streams/front_door")
     assert r.status_code == 200 and r.json()["ok"] is True
     assert "/v3/config/paths/delete/front_door" in deleted
-    assert [c["stream_id"] for c in plugin.api.saved[-1]["cameras"]] == ["front_door_2"]
+    assert [c["stream_id"] for c in plugin.api.saved[-1]["streams"]] == ["front_door_2"]
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
@@ -365,7 +365,7 @@ def test_crud_validation_and_conflicts(monkeypatch):
     client.post("/streams", json={"name": "A", "rtsp_url": "rtsp://cam/1", "stream_id": "cam_a"})
     dup = client.post("/streams", json={"name": "B", "rtsp_url": "rtsp://cam/2", "stream_id": "cam_a"})
     assert dup.status_code == 409
-    # Editing a missing camera is a 404.
+    # Editing a missing stream is a 404.
     assert client.put("/streams/nope", json={"name": "N", "rtsp_url": "rtsp://cam/3"}).status_code == 404
     # Bad stream-id characters are rejected.
     bad = client.post("/streams", json={"name": "C", "rtsp_url": "rtsp://cam/4", "stream_id": "bad id!"})
