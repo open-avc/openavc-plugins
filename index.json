@@ -1,6 +1,6 @@
 {
     "schema_version": "1.0.0",
-    "updated": "2026-05-03",
+    "updated": "2026-05-21",
     "plugins": [
         {
             "id": "streamdeck",
@@ -50,6 +50,22 @@
             "has_native_dependencies": false,
             "verified": false,
             "description": "Audio routing via Dante Domain Manager or Dante Director Professional."
+        },
+        {
+            "id": "video_panel",
+            "name": "Video Panel",
+            "file": "integrations/video_panel",
+            "format": "directory",
+            "category": "integration",
+            "version": "0.4.0",
+            "author": "OpenAVC",
+            "license": "MIT",
+            "platforms": ["win_x64", "linux_x64", "linux_arm64"],
+            "min_openavc_version": "0.13.0",
+            "capabilities": ["state_read", "state_write", "event_emit", "network_listen", "http_endpoints"],
+            "has_native_dependencies": true,
+            "verified": false,
+            "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel."
         },
         {
             "id": "audio_player",
