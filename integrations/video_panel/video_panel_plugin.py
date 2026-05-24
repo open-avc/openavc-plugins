@@ -36,6 +36,11 @@ try:
 except ImportError:  # pragma: no cover - exercised only via package-path import
     from .sidecar import SidecarSupervisor
 
+try:
+    import transcode
+except ImportError:  # pragma: no cover - exercised only via package-path import
+    from . import transcode
+
 # MediaMTX listeners. Everything is on localhost except the WebRTC media UDP
 # port, which the browser connects to directly for low-latency LAN playback.
 _API_HOST = "127.0.0.1"
@@ -43,6 +48,16 @@ _API_PORT = 9997
 _WEBRTC_HOST = "127.0.0.1"
 _WEBRTC_PORT = 8889
 _WEBRTC_UDP_PORT = 8189
+# Internal RTSP listener used only for the transcode pipeline: ffmpeg reads the
+# raw source path and republishes the H.264 result here, then WHEP serves it.
+# Localhost + TCP-only (no UDP RTP/RTCP ports opened), on a non-standard port so
+# it can't collide with another MediaMTX on the box (e.g. a dev test source).
+_RTSP_HOST = "127.0.0.1"
+_RTSP_PORT = 8556
+_INTERNAL_RTSP = f"rtsp://{_RTSP_HOST}:{_RTSP_PORT}"
+# Publish-back muxer for transcode. RTSP forced to TCP is the canonical pattern;
+# "rtmp" is the proven fallback if RTSP-TCP publish ever stalls on a platform.
+_TRANSCODE_PUBLISH = "rtsp"
 _READY_TIMEOUT = 10.0
 _STATUS_POLL_SECONDS = 5.0
 
@@ -88,7 +103,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -212,6 +227,7 @@ class VideoPanelPlugin:
         self._auth_pass = ""
         self._config_path = None
         self._streams = []  # configured stream dicts (the source of truth)
+        self._encoder_cache = {}  # hardware_accel value -> resolved ffmpeg encoder
 
     # ──── Lifecycle ────
 
@@ -324,7 +340,13 @@ class VideoPanelPlugin:
             await self._sync_path_add(stream)
 
     async def _sync_path_add(self, stream):
-        """Register (or re-register) a stream's path with the running sidecar."""
+        """Register (or re-register) a stream's path(s) with the running sidecar.
+
+        Passthrough streams get one path that pulls the source directly.
+        Transcode streams get two: ``<id>__src`` pulls the raw source (the
+        camera credentials live here, handled natively by MediaMTX), and
+        ``<id>`` runs ffmpeg on demand to re-encode to H.264 and republish.
+        """
         stream_id = stream["stream_id"]
         source = self._stream_source_url(stream)
         if not source:
@@ -333,6 +355,20 @@ class VideoPanelPlugin:
                 "warning",
             )
             return False
+
+        want_transcode = self._should_transcode(stream)
+        if want_transcode and not self._ffmpeg_bin:
+            self.api.log(
+                f"stream '{stream_id}' needs transcoding but ffmpeg is unavailable; "
+                "serving the source as-is (it may not play in browsers). Reinstall "
+                "the Video Panel plugin to fetch ffmpeg.",
+                "warning",
+            )
+            want_transcode = False
+
+        if want_transcode:
+            return await self._sync_transcode_paths(stream, source)
+
         ok = await self._api_post(
             f"/v3/config/paths/add/{stream_id}",
             {"source": source, "sourceOnDemand": True},
@@ -344,9 +380,75 @@ class VideoPanelPlugin:
             )
         return ok
 
+    async def _sync_transcode_paths(self, stream, source):
+        """Add the raw-source path + the on-demand ffmpeg transcode path."""
+        stream_id = stream["stream_id"]
+        src_name = self._src_path(stream_id)
+        ok_src = await self._api_post(
+            f"/v3/config/paths/add/{src_name}",
+            {"source": source, "sourceOnDemand": True},
+        )
+        encoder = await self._resolve_encoder(stream.get("hardware_accel") or "auto")
+        command = transcode.build_transcode_command(
+            str(self._ffmpeg_bin),
+            encoder,
+            f"{_INTERNAL_RTSP}/{src_name}",
+            f"{_INTERNAL_RTSP}/{stream_id}",
+            publish=_TRANSCODE_PUBLISH,
+        )
+        ok_main = await self._api_post(
+            f"/v3/config/paths/add/{stream_id}",
+            {
+                "runOnDemand": command,
+                "runOnDemandRestart": True,
+                # Generous start window: ffmpeg must connect to the raw path,
+                # which in turn pulls the (possibly slow) camera on demand.
+                "runOnDemandStartTimeout": "15s",
+                "runOnDemandCloseAfter": "10s",
+            },
+        )
+        if not (ok_src and ok_main):
+            self.api.log(
+                f"sidecar rejected transcode setup for '{stream_id}'; check the source URL",
+                "warning",
+            )
+        return ok_src and ok_main
+
     async def _sync_path_delete(self, stream_id):
-        """Remove a stream's path from the running sidecar (idempotent)."""
-        return await self._api_delete(f"/v3/config/paths/delete/{stream_id}")
+        """Remove a stream's path(s) from the running sidecar (idempotent).
+
+        Deletes both the main path and any transcode raw-source sibling, so a
+        passthrough<->transcode switch on edit can't leave a stale path behind.
+        """
+        ok = await self._api_delete(f"/v3/config/paths/delete/{stream_id}")
+        await self._api_delete(f"/v3/config/paths/delete/{self._src_path(stream_id)}")
+        return ok
+
+    @staticmethod
+    def _src_path(stream_id):
+        """The raw-source path name for a transcode stream."""
+        return f"{stream_id}__src"
+
+    @staticmethod
+    def _should_transcode(stream):
+        """Whether a stream's settings call for HEVC->H.264 transcoding."""
+        mode = (stream.get("transcode") or "auto").strip().lower()
+        if mode == "never":
+            return False
+        if mode == "always":
+            return True
+        # auto: transcode only when the codec is known to be HEVC (set by the
+        # add/edit probe or by the user). Unknown/H.264 stays passthrough.
+        return (stream.get("codec_hint") or "auto").strip().lower() in ("h265", "hevc")
+
+    async def _resolve_encoder(self, hardware_accel):
+        """Pick (and cache) the ffmpeg H.264 encoder for a hardware_accel value."""
+        ha = (hardware_accel or "auto").strip().lower()
+        if ha not in self._encoder_cache:
+            self._encoder_cache[ha] = await transcode.select_encoder(
+                str(self._ffmpeg_bin), ha, self.api.log
+            )
+        return self._encoder_cache[ha]
 
     async def _persist_streams(self):
         """Write the current stream list back to the project file via the platform."""
@@ -771,7 +873,12 @@ class VideoPanelPlugin:
             "api: true\n"
             f"apiAddress: {_API_HOST}:{_API_PORT}\n"
             "\n"
-            "rtsp: false\n"
+            # RTSP is on, but only as a localhost TCP loopback for the transcode
+            # pipeline (ffmpeg republishes H.264 here). TCP-only suppresses the
+            # UDP RTP/RTCP listeners, so nothing extra is exposed.
+            "rtsp: true\n"
+            f"rtspAddress: {_RTSP_HOST}:{_RTSP_PORT}\n"
+            "rtspTransports: [tcp]\n"
             "rtmp: false\n"
             "hls: false\n"
             "srt: false\n"
@@ -797,6 +904,12 @@ class VideoPanelPlugin:
             "  ips: ['127.0.0.1', '::1']\n"
             "  permissions:\n"
             "  - action: api\n"
+            # read + publish let the transcode ffmpeg (spawned by MediaMTX on
+            # localhost) read the raw source path and publish the H.264 result
+            # with no credentials in the command line. Localhost-only, same
+            # trust level as the api permission above.
+            "  - action: read\n"
+            "  - action: publish\n"
             "\n"
             "paths: {}\n"
         )

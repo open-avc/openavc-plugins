@@ -153,8 +153,12 @@ def test_render_config_is_valid_and_locked_down():
     assert cfg["api"] is True and cfg["apiAddress"] == "127.0.0.1:9997"
     assert cfg["webrtc"] is True and cfg["webrtcAddress"] == "127.0.0.1:8889"
     assert cfg["webrtcLocalUDPAddress"] == ":8189"
-    # Every protocol we don't use is disabled.
-    assert cfg["rtsp"] is False
+    # RTSP is on, but only as a localhost TCP loopback for the transcode
+    # pipeline; TCP-only keeps the UDP RTP/RTCP listeners closed.
+    assert cfg["rtsp"] is True
+    assert cfg["rtspAddress"] == "127.0.0.1:8556"
+    assert cfg["rtspTransports"] == ["tcp"]
+    # Other protocols we don't use stay disabled.
     assert cfg["rtmp"] is False
     assert cfg["hls"] is False
     assert cfg["srt"] is False
@@ -163,10 +167,11 @@ def test_render_config_is_valid_and_locked_down():
     assert users[0]["user"] == "openavc"
     assert users[0]["pass"] == "a1b2c3d4e5f6"
     assert {p["action"] for p in users[0]["permissions"]} == {"publish", "read", "playback"}
-    # The API stays reachable from localhost without the stream password.
+    # The localhost "any" user covers the control API plus the transcode ffmpeg's
+    # credential-free read of the raw path and publish of the H.264 result.
     assert users[1]["user"] == "any"
     assert users[1]["ips"] == ["127.0.0.1", "::1"]
-    assert {p["action"] for p in users[1]["permissions"]} == {"api"}
+    assert {p["action"] for p in users[1]["permissions"]} == {"api", "read", "publish"}
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
@@ -385,6 +390,87 @@ def test_crud_validation_and_conflicts(monkeypatch):
     # Bad stream-id characters are rejected.
     bad = client.post("/streams", json={"name": "C", "rtsp_url": "rtsp://cam/4", "stream_id": "bad id!"})
     assert bad.status_code == 422
+
+
+# ──── Transcode path wiring ────
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_should_transcode_decision():
+    st = VideoPanelPlugin._should_transcode
+    assert st({"transcode": "never", "codec_hint": "h265"}) is False
+    assert st({"transcode": "always", "codec_hint": "h264"}) is True
+    assert st({"transcode": "auto", "codec_hint": "h265"}) is True
+    assert st({"transcode": "auto", "codec_hint": "hevc"}) is True
+    assert st({"transcode": "auto", "codec_hint": "h264"}) is False
+    # Unknown codec under auto stays passthrough; empty dict uses the defaults.
+    assert st({"transcode": "auto", "codec_hint": "auto"}) is False
+    assert st({}) is False
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_src_path_naming():
+    assert VideoPanelPlugin._src_path("front_door") == "front_door__src"
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_transcode_creates_paired_source_and_ondemand_paths(monkeypatch):
+    client, plugin, added, _deleted = _crud_client(monkeypatch)
+    plugin._ffmpeg_bin = "/opt/ffmpeg"
+
+    async def fake_resolve(_ha):
+        return "libopenh264"
+
+    monkeypatch.setattr(plugin, "_resolve_encoder", fake_resolve)
+
+    r = client.post("/streams", json={"name": "Cam", "rtsp_url": "rtsp://cam/1", "transcode": "always"})
+    assert r.status_code == 200, r.text
+    paths = dict(added)
+
+    # The raw source path holds the camera URL (creds handled natively here).
+    assert paths["/v3/config/paths/add/cam__src"] == {"source": "rtsp://cam/1", "sourceOnDemand": True}
+
+    # The main path runs ffmpeg on demand to transcode and republish.
+    main = paths["/v3/config/paths/add/cam"]
+    assert main["runOnDemandRestart"] is True
+    cmd = main["runOnDemand"]
+    assert "/opt/ffmpeg" in cmd
+    assert "rtsp://127.0.0.1:8556/cam__src" in cmd          # reads the raw path
+    assert cmd.rstrip().endswith("rtsp://127.0.0.1:8556/cam")  # republishes H.264
+    assert "libopenh264" in cmd
+    assert "-rtsp_transport tcp" in cmd                      # output forced to TCP
+    # The camera URL never appears in the runOnDemand command (it lives on __src).
+    assert "rtsp://cam/1" not in cmd
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_transcode_delete_removes_source_sibling(monkeypatch):
+    client, plugin, _added, deleted = _crud_client(monkeypatch)
+    plugin._ffmpeg_bin = "/opt/ffmpeg"
+
+    async def fake_resolve(_ha):
+        return "libopenh264"
+
+    monkeypatch.setattr(plugin, "_resolve_encoder", fake_resolve)
+
+    client.post("/streams", json={"name": "Cam", "rtsp_url": "rtsp://cam/1", "transcode": "always"})
+    deleted.clear()
+    r = client.delete("/streams/cam")
+    assert r.status_code == 200, r.text
+    assert "/v3/config/paths/delete/cam" in deleted
+    assert "/v3/config/paths/delete/cam__src" in deleted
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_transcode_requested_without_ffmpeg_falls_back_to_passthrough(monkeypatch):
+    # _crud_client leaves _ffmpeg_bin = None.
+    client, plugin, added, _deleted = _crud_client(monkeypatch)
+    r = client.post("/streams", json={"name": "Cam", "rtsp_url": "rtsp://cam/1", "transcode": "always"})
+    assert r.status_code == 200, r.text
+    paths = dict(added)
+    # A single passthrough path, no transcode sibling.
+    assert paths["/v3/config/paths/add/cam"] == {"source": "rtsp://cam/1", "sourceOnDemand": True}
+    assert "/v3/config/paths/add/cam__src" not in paths
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
