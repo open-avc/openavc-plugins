@@ -1,6 +1,6 @@
 {
     "schema_version": "1.0.0",
-    "updated": "2026-05-21",
+    "updated": "2026-05-25",
     "plugins": [
         {
             "id": "streamdeck",
@@ -9,7 +9,7 @@
             "format": "directory",
             "category": "control_surface",
             "manufacturer": "Elgato",
-            "version": "1.0.3",
+            "version": "1.1.0",
             "author": "OpenAVC",
             "license": "MIT",
             "platforms": ["win_x64", "linux_x64", "linux_arm64"],

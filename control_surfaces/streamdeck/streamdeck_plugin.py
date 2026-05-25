@@ -151,12 +151,125 @@ def _unwrap_binding(value):
     return None
 
 
+# ──── Condition Evaluation ────
+#
+# Self-contained copy of the platform's condition evaluator
+# (server/core/condition_eval.py). Vendored rather than imported so this
+# community plugin stays portable and doesn't couple to server internals.
+# Semantics are kept identical to the platform evaluator so a `visible_when`
+# or `auto_page` condition behaves the same here as in a macro skip_if or a
+# trigger guard.
+
+_CONDITION_OPERATOR_ALIASES = {
+    "equals": "eq", "not_equals": "ne", "==": "eq", "!=": "ne",
+    ">": "gt", "<": "lt", ">=": "gte", "<=": "lte",
+    "equal": "eq", "not_equal": "ne", "greater_than": "gt", "less_than": "lt",
+    "greater_or_equal": "gte", "less_or_equal": "lte",
+}
+
+
+def _coerce_numeric(value):
+    """Try to coerce a value to a number for comparison."""
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _coerce_bool(value):
+    """Normalize boolean-like values for comparison."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off"):
+            return False
+    return None
+
+
+def _eval_operator(op, actual, target):
+    """Evaluate a comparison operator with alias normalization and type coercion.
+
+    Raises ValueError on an unknown operator (callers treat that as no match).
+    """
+    op = _CONDITION_OPERATOR_ALIASES.get(op, op)
+
+    if op in ("eq", "ne"):
+        if isinstance(actual, bool) or isinstance(target, bool):
+            a_bool = _coerce_bool(actual)
+            t_bool = _coerce_bool(target)
+            if a_bool is not None and t_bool is not None:
+                return (a_bool == t_bool) if op == "eq" else (a_bool != t_bool)
+        if type(actual) is not type(target):
+            a_num = _coerce_numeric(actual)
+            t_num = _coerce_numeric(target)
+            if a_num is not None and t_num is not None:
+                return (a_num == t_num) if op == "eq" else (a_num != t_num)
+        return (actual == target) if op == "eq" else (actual != target)
+
+    if op in ("gt", "lt", "gte", "lte"):
+        if actual is None or target is None:
+            return False
+        a_num = _coerce_numeric(actual)
+        t_num = _coerce_numeric(target)
+        if a_num is not None and t_num is not None:
+            if op == "gt":
+                return a_num > t_num
+            if op == "lt":
+                return a_num < t_num
+            if op == "gte":
+                return a_num >= t_num
+            return a_num <= t_num
+        try:
+            if op == "gt":
+                return actual > target
+            if op == "lt":
+                return actual < target
+            if op == "gte":
+                return actual >= target
+            return actual <= target
+        except TypeError:
+            return False
+
+    if op == "truthy":
+        return bool(actual)
+    if op == "falsy":
+        return not bool(actual)
+    raise ValueError(f"Unknown condition operator: {op!r}")
+
+
+def _condition_state_keys(cond):
+    """Collect every state key referenced by a condition.
+
+    Handles a single ``{key, operator, value}`` condition plus the compound
+    ``{all: [...]}`` and ``{any: [...]}`` forms (recursively).
+    """
+    keys = []
+    if not isinstance(cond, dict):
+        return keys
+    for group in ("all", "any"):
+        sub = cond.get(group)
+        if isinstance(sub, list):
+            for child in sub:
+                keys.extend(_condition_state_keys(child))
+    key = cond.get("key")
+    if key:
+        keys.append(key)
+    return keys
+
+
 class StreamDeckPlugin:
 
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.0.3",
+        "version": "1.1.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -261,7 +374,17 @@ class StreamDeckPlugin:
         "Common AV icons: power, volume-2, volume-x, play, pause, square (stop), "
         "skip-back, skip-forward, mic, mic-off, monitor, tv, sun, moon, "
         "thermometer, fan, camera, video, airplay, cast. "
-        "Always set a label OR icon (or both) so the button isn't blank."
+        "Always set a label OR icon (or both) so the button isn't blank. "
+        "To hide a button based on state, add a 'visible_when' object to its "
+        "bindings (same shape as panel UI visible_when): "
+        "{\"key\": \"device.projector_1.power\", \"operator\": \"eq\", "
+        "\"value\": \"on\"} — operators eq/ne/gt/lt/gte/lte/truthy/falsy, plus "
+        "an 'any':[...] array for OR logic. A hidden button shows as a blank "
+        "black key and ignores presses. "
+        "To switch pages automatically, add a top-level 'auto_page' array to "
+        "the config (alongside 'buttons'): each entry is {\"page\": N, \"when\": "
+        "{condition}} using the same operator schema. Rules are evaluated in "
+        "order and the first match wins, so put more specific conditions first."
     )
 
     EXTENSIONS = {
@@ -318,6 +441,7 @@ class StreamDeckPlugin:
         self.deck = None
         self.current_page = 0
         self._feedback_subs = []
+        self._auto_page_keys = set()   # state keys watched by auto_page rules
         self._loop = None
         self._model_info = None
         self._hold_tasks = {}    # key_index -> periodic task ID for hold-repeat
@@ -427,8 +551,15 @@ class StreamDeckPlugin:
         self.api.log(f"Connected to {model} (S/N: {serial}, {key_count} keys)")
         await self.api.event_emit("connected", {"model": model, "serial": serial})
 
-        # Subscribe to state changes for feedback keys
+        # Subscribe to state changes for feedback, visibility, and auto-page keys
         await self._setup_feedback_subscriptions()
+
+        # Apply the initial auto-page selection before the first render so we
+        # don't briefly show page 0 and then immediately switch.
+        initial_page = await self._evaluate_auto_page()
+        if initial_page is not None:
+            self.current_page = initial_page
+            await self.api.state_set("current_page", initial_page)
 
         # Render all buttons for the current page
         await self._render_all_buttons()
@@ -459,6 +590,16 @@ class StreamDeckPlugin:
 
         assignment = self._get_button_assignment(page, key_index)
         if not assignment:
+            return
+
+        # A hidden button (visible_when false) is inert: fire no action. Also
+        # clear any in-flight hold/tap-hold state so a button that became
+        # hidden mid-press can't leak a periodic task or fire a stale action.
+        if not await self._is_button_visible(assignment):
+            task_id = self._hold_tasks.pop(key_index, None)
+            if task_id:
+                self.api.cancel_task(task_id)
+            self._press_times.pop(key_index, None)
             return
 
         # Get press binding (UI stores press as an array of actions)
@@ -532,7 +673,11 @@ class StreamDeckPlugin:
             if pressed:
                 self._press_times[key_index] = asyncio.get_event_loop().time()
             else:
-                press_time = self._press_times.pop(key_index, 0)
+                if key_index not in self._press_times:
+                    # Release with no recorded press (e.g. the press was
+                    # suppressed while the button was hidden) — fire nothing.
+                    return
+                press_time = self._press_times.pop(key_index)
                 held = asyncio.get_event_loop().time() - press_time
                 if held >= threshold and hold_action and isinstance(hold_action, dict):
                     await self._execute_action(hold_action, key_index)
@@ -619,6 +764,15 @@ class StreamDeckPlugin:
         text_color = global_text
 
         if assignment:
+            # Hidden by visible_when → blank black key; render nothing else.
+            bindings = assignment.get("bindings", {})
+            visible_when = bindings.get("visible_when") if isinstance(bindings, dict) else None
+            if visible_when is not None and not await self._eval_condition(visible_when):
+                self._apply_key_image(
+                    key_index, self._create_button_image("", "#000000", "#000000")
+                )
+                return
+
             label = assignment.get("label", "")
             icon = assignment.get("icon") or None
 
@@ -627,7 +781,6 @@ class StreamDeckPlugin:
             text_color = assignment.get("text_color") or global_text
 
             # Toggle mode: on_label/off_label override static label
-            bindings = assignment.get("bindings", {})
             press_binding = _unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
             if press_binding and isinstance(press_binding, dict) and press_binding.get("mode") == "toggle":
                 tk = press_binding.get("toggle_key", "")
@@ -695,10 +848,12 @@ class StreamDeckPlugin:
                             if style_inactive.get("icon"):
                                 icon = style_inactive["icon"]
 
-        # Generate the button image
+        # Generate the button image and set it on the deck
         image = self._create_button_image(label, bg_color, text_color, icon)
+        self._apply_key_image(key_index, image)
 
-        # Set it on the deck (thread-safe via context manager)
+    def _apply_key_image(self, key_index, image):
+        """Encode a PIL image and set it on a deck key (thread-safe)."""
         try:
             native_image = PILHelper.to_native_key_format(self.deck, image)
             with self.deck:
@@ -858,12 +1013,94 @@ class StreamDeckPlugin:
             self.api.log(f"Failed to load asset icon '{filename}': {e}", level="debug")
             return None
 
-    # ──── State Feedback ────
+    # ──── Conditions, Visibility & Auto-Page ────
+
+    async def _eval_condition(self, cond) -> bool:
+        """Evaluate a visible_when / auto_page condition against current state.
+
+        Supports a single ``{key, operator, value}`` condition, a compound
+        ``{all: [...]}`` (every sub-condition must be true) and ``{any: [...]}``
+        (at least one true) — matching the panel UI visible_when schema. An
+        empty ``all`` is vacuously true and an empty ``any`` is false. Operator
+        semantics mirror the platform condition evaluator.
+        """
+        if not isinstance(cond, dict):
+            return False
+
+        all_list = cond.get("all")
+        if isinstance(all_list, list):
+            for child in all_list:
+                if not await self._eval_condition(child):
+                    return False
+            return True
+
+        any_list = cond.get("any")
+        if isinstance(any_list, list):
+            for child in any_list:
+                if await self._eval_condition(child):
+                    return True
+            return False
+
+        key = cond.get("key")
+        if not key:
+            return False
+        actual = await self.api.state_get(key)
+        try:
+            return _eval_operator(cond.get("operator", "eq"), actual, cond.get("value"))
+        except ValueError:
+            self.api.log(
+                f"Ignoring unknown condition operator {cond.get('operator')!r}",
+                level="debug",
+            )
+            return False
+
+    async def _is_button_visible(self, assignment) -> bool:
+        """True unless the button's visible_when condition evaluates false."""
+        bindings = assignment.get("bindings", {})
+        if not isinstance(bindings, dict):
+            return True
+        visible_when = bindings.get("visible_when")
+        if visible_when is None:
+            return True
+        return await self._eval_condition(visible_when)
+
+    async def _evaluate_auto_page(self):
+        """Return the page of the first matching auto_page rule, or None.
+
+        Rules are evaluated in array order; the first whose ``when`` condition
+        is true wins. The page index is clamped to the valid range.
+        """
+        rules = self.api.config.get("auto_page", [])
+        if not isinstance(rules, list):
+            return None
+        max_pages = self.api.config.get("max_pages", 10)
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            when = rule.get("when")
+            page = rule.get("page")
+            if when is None or page is None:
+                continue
+            if await self._eval_condition(when):
+                try:
+                    target = int(page)
+                except (TypeError, ValueError):
+                    continue
+                return max(0, min(target, max_pages - 1))
+        return None
+
+    # ──── State Subscriptions ────
 
     async def _setup_feedback_subscriptions(self):
-        """Subscribe to state keys referenced by button feedback and toggle bindings."""
+        """Subscribe to every state key that can change a button or the page.
+
+        Covers feedback keys, toggle keys, visible_when condition keys, and
+        auto_page rule keys. Auto_page keys are also tracked separately so that
+        only an auto_page-watched change can drive automatic paging.
+        """
         buttons = self.api.config.get("buttons", [])
-        feedback_keys = set()
+        watch_keys = set()
+        self._auto_page_keys = set()
 
         for btn in buttons:
             if not isinstance(btn, dict):
@@ -873,25 +1110,44 @@ class StreamDeckPlugin:
                 # Feedback key
                 feedback = bindings.get("feedback", {})
                 if isinstance(feedback, dict) and feedback.get("key"):
-                    feedback_keys.add(feedback["key"])
+                    watch_keys.add(feedback["key"])
                 # Toggle key (for label/icon updates on toggle state change)
                 press = _unwrap_binding(bindings.get("press"))
                 if isinstance(press, dict) and press.get("toggle_key"):
-                    feedback_keys.add(press["toggle_key"])
+                    watch_keys.add(press["toggle_key"])
+                # Visibility condition keys
+                watch_keys.update(_condition_state_keys(bindings.get("visible_when")))
             # Legacy format
             fk = btn.get("feedback_key")
             if fk:
-                feedback_keys.add(fk)
+                watch_keys.add(fk)
 
-        for key in feedback_keys:
-            sub_id = await self.api.state_subscribe(key, self._on_feedback_state_change)
+        # Auto-page rule keys (tracked separately — only these drive paging)
+        auto_page = self.api.config.get("auto_page", [])
+        if isinstance(auto_page, list):
+            for rule in auto_page:
+                if isinstance(rule, dict):
+                    self._auto_page_keys.update(_condition_state_keys(rule.get("when")))
+        watch_keys |= self._auto_page_keys
+
+        for key in watch_keys:
+            sub_id = await self.api.state_subscribe(key, self._on_state_change)
             self._feedback_subs.append(sub_id)
 
-    async def _on_feedback_state_change(self, key, value, old_value):
-        """Re-render buttons that reference this state key as a feedback key."""
+    async def _on_state_change(self, key, value, old_value):
+        """React to a watched state change: auto-page switch and/or re-render."""
         if not self.deck or not self.deck.is_visual():
             return
 
+        # Auto-page: re-evaluate only when an auto_page-watched key changes, so
+        # an ordinary feedback/visibility change never overrides manual paging.
+        if key in self._auto_page_keys:
+            target = await self._evaluate_auto_page()
+            if target is not None and target != self.current_page:
+                await self._change_page(target)
+                return  # _change_page re-rendered the whole new page
+
+        # Re-render buttons on the current page that depend on this key
         buttons = self.api.config.get("buttons", [])
         for btn in buttons:
             if not isinstance(btn, dict):
@@ -899,7 +1155,6 @@ class StreamDeckPlugin:
             if btn.get("page", 0) != self.current_page:
                 continue
 
-            # Check new bindings format
             bindings = btn.get("bindings", {})
             matched = False
             if isinstance(bindings, dict):
@@ -908,6 +1163,8 @@ class StreamDeckPlugin:
                     matched = True
                 press = _unwrap_binding(bindings.get("press"))
                 if isinstance(press, dict) and press.get("toggle_key") == key:
+                    matched = True
+                if not matched and key in _condition_state_keys(bindings.get("visible_when")):
                     matched = True
             # Legacy
             if not matched and btn.get("feedback_key") == key:

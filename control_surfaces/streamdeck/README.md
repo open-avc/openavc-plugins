@@ -44,6 +44,7 @@ Use the **Surface Configurator** in the Programmer IDE:
    - **Button Mode** -- how the button behaves (see below)
    - **Press Action** -- what happens when pressed: run a macro, send a device command, set a variable, or navigate pages
    - **Visual Feedback** -- pick a state key, set a condition, choose active/inactive colors and labels
+   - **Visibility** -- optionally hide the button unless a state condition is met
 4. Use **page tabs** to set up multiple pages of buttons
 
 ### Button Modes
@@ -60,6 +61,20 @@ Use the **Surface Configurator** in the Programmer IDE:
 ### Visual Feedback
 
 Separate from button modes, the Visual Feedback section lets you set state-driven colors and conditional labels. Use it for color changes on any button mode. Toggle has its own label fields built in, so you don't need Visual Feedback just for label changes on toggle buttons.
+
+### Hiding Buttons
+
+Each button can be hidden based on system state. In the assignment panel, open **Visibility**, turn on "Show only when...", then pick a state key, operator, and value. When the condition is false the button shows as a blank black key and ignores presses; when true it renders and responds normally. Add more than one condition and combine them with AND / OR. Operators: equals, not equals, greater/less than (and or-equal), has a value, is empty or zero.
+
+Example: hide the source-select and volume buttons unless the projector is on (`device.projector_1.power` equals `on`).
+
+### Automatic Paging
+
+Below the button grid, the **Automatic Paging** section switches the deck to a page automatically when state changes. Add a rule, choose the target page, and set the condition (same operators as visibility, with AND / OR). Rules are checked top to bottom and the first match wins, so list the most specific conditions first. Reorder rules with the up/down arrows.
+
+Manual navigation (a button's Navigate action) still works immediately; the next state change that matches a rule takes over again.
+
+Example: switch to the full controls page when the projector turns on, and back to a simple "power on" page when it turns off.
 
 ## State Keys
 
