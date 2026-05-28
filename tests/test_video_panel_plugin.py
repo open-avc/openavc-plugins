@@ -402,10 +402,13 @@ def test_should_transcode_decision():
     assert st({"transcode": "always", "codec_hint": "h264"}) is True
     assert st({"transcode": "auto", "codec_hint": "h265"}) is True
     assert st({"transcode": "auto", "codec_hint": "hevc"}) is True
+    # auto passes through only for confirmed H.264.
     assert st({"transcode": "auto", "codec_hint": "h264"}) is False
-    # Unknown codec under auto stays passthrough; empty dict uses the defaults.
-    assert st({"transcode": "auto", "codec_hint": "auto"}) is False
-    assert st({}) is False
+    # Unknown/undetermined codec under auto transcodes (safe default), so an
+    # HEVC source the probe couldn't read still plays instead of going black.
+    assert st({"transcode": "auto", "codec_hint": "auto"}) is True
+    assert st({"transcode": "auto", "codec_hint": ""}) is True
+    assert st({}) is True
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")

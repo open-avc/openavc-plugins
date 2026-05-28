@@ -103,7 +103,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.5.0",
+        "version": "0.5.1",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -431,15 +431,21 @@ class VideoPanelPlugin:
 
     @staticmethod
     def _should_transcode(stream):
-        """Whether a stream's settings call for HEVC->H.264 transcoding."""
+        """Whether a stream's settings call for transcoding to H.264.
+
+        ``auto`` passes through only when the source is *confirmed* browser-
+        playable H.264; HEVC -- or a codec the probe couldn't determine --
+        transcodes. Defaulting the unknown case to transcode is the safe choice:
+        guessing passthrough for an undecodable source (e.g. an HEVC camera the
+        save-time probe couldn't reach in time) sends video the browser can't
+        play, which shows as a silent black tile rather than an error.
+        """
         mode = (stream.get("transcode") or "auto").strip().lower()
         if mode == "never":
             return False
         if mode == "always":
             return True
-        # auto: transcode only when the codec is known to be HEVC (set by the
-        # add/edit probe or by the user). Unknown/H.264 stays passthrough.
-        return (stream.get("codec_hint") or "auto").strip().lower() in ("h265", "hevc")
+        return (stream.get("codec_hint") or "auto").strip().lower() != "h264"
 
     async def _resolve_encoder(self, hardware_accel):
         """Pick (and cache) the ffmpeg H.264 encoder for a hardware_accel value."""
