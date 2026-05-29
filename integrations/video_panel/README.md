@@ -30,6 +30,8 @@ Streams are stored with the project. Each stream has:
 | Stream ID | Short unique identifier (lowercase, no spaces) |
 | Source URL | The stream address, e.g. `rtsp://192.168.1.50:554/stream1` |
 | Username / Password | Source login, if the stream is protected |
+| Transcode | Whether the source is re-encoded to H.264 (see Transcoding below) |
+| Hardware acceleration | Which video chip to use when transcoding (see below) |
 
 Credentials are sent to the source as part of the stream address; you do not
 need to embed them in the URL yourself. Use **Test** when adding a stream to
@@ -48,6 +50,52 @@ properties and pick the stream from the **Stream** list. Other options:
 
 The element shows a spinner while connecting and a Retry button if the stream
 goes offline. Playback is muted and starts on its own.
+
+## Transcoding and hardware acceleration
+
+Browsers reliably play H.264 but not H.265 / HEVC, so the plugin re-encodes
+non-H.264 sources to H.264 on the server before sending them to the panel. The
+**Transcode** setting on each stream controls when this happens:
+
+| Setting | Behavior |
+|---------|----------|
+| Auto (only when needed) | Default. Plays H.264 sources untouched; transcodes anything not confirmed to be H.264 (including H.265). |
+| Always transcode to H.264 | Forces re-encoding even for H.264, useful if a camera sends a profile the browser rejects. |
+| Never transcode | Sends the source through as-is. Only for an H.264 source on browsers you control. |
+
+Transcoding adds latency and uses the host's CPU or GPU:
+
+- With hardware acceleration: roughly 200 to 500 ms of added latency.
+- Software only: roughly 500 to 1500 ms, and noticeably more CPU.
+
+H.264 passthrough (no transcoding) is lowest latency, usually under half a second
+on a wired LAN.
+
+The **Hardware acceleration** setting picks how transcoding runs:
+
+| Option | When to use |
+|--------|-------------|
+| Auto-detect | Default. Tests the encoders available on this machine and uses the best one that works, falling back to software. |
+| Off (software) | Always use the CPU. Most compatible, most CPU-intensive. |
+| Intel QuickSync | Intel CPUs with integrated graphics (x86). |
+| NVIDIA NVENC | NVIDIA GPUs. |
+| VA-API | Linux on a supported Intel or AMD GPU (x86). |
+| V4L2 M2M (Raspberry Pi) | The Raspberry Pi hardware encoder. |
+
+Auto-detect is right on nearly every system. Available encoders vary by platform:
+QuickSync and VA-API are x86 only; Raspberry Pi uses V4L2 M2M; NVENC works wherever
+a supported NVIDIA GPU is present. An option that is not available on the machine
+is skipped automatically rather than failing.
+
+**Raspberry Pi 4 and H.265:** A Pi 4 has no hardware H.265 decoder and is too slow
+to decode H.265 in software (a few frames per second at 1080p). Use H.264 sources
+on a Pi 4, or a Pi 5 or x86 host for H.265.
+
+To confirm the panel is decoding on the GPU rather than the CPU, open
+`chrome://media-internals` in Chrome or Edge on the panel while a stream plays and
+check the decoder name. Hardware decode reads as `D3D11VideoDecoder` (Windows) or
+`VaapiVideoDecoder` (Linux); `FFmpegVideoDecoder` means the browser is decoding in
+software.
 
 ## State keys
 
