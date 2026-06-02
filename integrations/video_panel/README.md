@@ -51,6 +51,33 @@ properties and pick the stream from the **Stream** list. Other options:
 The element shows a spinner while connecting and a Retry button if the stream
 goes offline. Playback is muted and starts on its own.
 
+## Automatic stream discovery
+
+Some AV-over-IP encoders publish a built-in low-bandwidth preview stream. When a
+driver reports one, the encoder appears in the **Stream** list automatically. You
+don't add it by hand. Connect the controller (for example a TurtleAV Chazy
+controller) and each of its encoders shows up in the dropdown under its name,
+ready to drop onto a panel.
+
+Two kinds of preview are handled:
+
+- **MJPEG over HTTP** (such as the Chazy 4K secondary stream). Shown directly as a
+  live image, with no transcoding.
+- **RTSP**. Routed through the same WebRTC pipeline as a configured camera, and
+  transcoded to H.264 if the codec isn't browser-playable.
+
+Discovered sources are read-only. They appear only in the panel's Stream picker,
+not on the **Video Streams** management page, and they come and go as encoders go
+online and offline.
+
+**Reachability:** preview streams usually live on the AV/video network, which is
+often separate from the control network. The OpenAVC **server** fetches the
+preview and passes it through to the panel, so only the server needs a route to
+the video network. A server with a second network connection on the AV fabric is
+the common setup. The panel itself only ever talks to OpenAVC. If the server
+can't reach the encoder's video network, the element shows an error instead of a
+picture.
+
 ## Transcoding and hardware acceleration
 
 Browsers reliably play H.264 but not H.265 / HEVC, so the plugin re-encodes
@@ -104,7 +131,7 @@ software.
 | `plugin.video_panel.running` | boolean | Helper is up and responding |
 | `plugin.video_panel.sidecar` | string | Helper process state: `starting`, `running`, `restarting`, `failed` |
 | `plugin.video_panel.error` | string | Last fatal error message (empty when healthy) |
-| `plugin.video_panel.stream_ids` | string | JSON list of `{value, label}` for configured streams |
+| `plugin.video_panel.stream_ids` | string | JSON list of `{value, label, mode}` for configured and auto-discovered streams (`mode` is `webrtc` or `mjpeg`) |
 | `plugin.video_panel.streams.<stream_id>` | string | Per-stream state: `idle` or `streaming` |
 
 ## Events
@@ -123,6 +150,10 @@ software.
   `plugin.video_panel.streams.<stream_id>` in the State view.
 - **Video works locally but not from another device:** Make sure UDP port 8189 is
   open between the panel and the server.
+- **A discovered encoder shows an error instead of video:** The OpenAVC server
+  can't reach the encoder's preview stream. Confirm the server has a route to the
+  AV/video network (often a second network connection), since that's usually
+  separate from the control network the controller is on.
 - **High CPU use:** An H.265 source is being re-encoded. Switch the source to
   H.264 if possible, or reduce its resolution / frame rate.
 

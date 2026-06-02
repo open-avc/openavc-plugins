@@ -27,7 +27,8 @@ body {
   background: #000;
 }
 
-#video {
+#video,
+#mjpeg {
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -35,9 +36,13 @@ body {
   display: block;
 }
 
-#video.fit-cover {
+#video.fit-cover,
+#mjpeg.fit-cover {
   object-fit: cover;
 }
+
+#video[hidden],
+#mjpeg[hidden] { display: none; }
 
 .overlay-label {
   position: absolute;

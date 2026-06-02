@@ -18,6 +18,7 @@
 
 (() => {
   const videoEl = document.getElementById('video');
+  const imgEl = document.getElementById('mjpeg');
   const labelEl = document.getElementById('label');
   const overlayEl = document.getElementById('status');
   const spinnerEl = document.getElementById('spinner');
@@ -38,6 +39,7 @@
   let token; // undefined on an open instance
   let streamId = '';
   let streamLabel = '';
+  let streamMode = 'webrtc'; // 'webrtc' (WHEP <video>) or 'mjpeg' (<img>)
 
   let pc = null;
   let resourceUrl = null; // the WHEP session resource (PATCH/DELETE target)
@@ -63,7 +65,9 @@
     config = msg.config || {};
     token = msg.ext_token || undefined;
     applyTheme(msg.theme || {});
-    videoEl.classList.toggle('fit-cover', config.fit === 'cover');
+    const cover = config.fit === 'cover';
+    videoEl.classList.toggle('fit-cover', cover);
+    imgEl.classList.toggle('fit-cover', cover);
 
     const newId = (config.stream_id || '').trim();
     if (newId !== streamId) {
@@ -105,15 +109,56 @@
   }
 
   function updateLabelFromList(raw) {
+    let nextMode = streamMode;
     try {
       const list = JSON.parse(raw);
       const found = Array.isArray(list) && list.find((e) => e && e.value === streamId);
       streamLabel = found ? found.label || streamId : streamId;
+      if (found && found.mode) nextMode = found.mode;
     } catch {
       streamLabel = streamId;
     }
     labelEl.textContent = streamLabel || '';
     labelEl.hidden = !(config.show_label && streamLabel);
+    // A mode flip (the list arrived after init, or the source changed kind)
+    // means we'd be playing the wrong way — restart on the correct path.
+    if (nextMode !== streamMode) {
+      streamMode = nextMode;
+      if (active && streamId) {
+        teardown();
+        reconnectAttempts = 0;
+        start();
+      }
+    }
+  }
+
+  // ──── Playback dispatch ────
+
+  // Dispatch to the right playback path for the current stream's mode.
+  function start() {
+    if (!active || !streamId) return;
+    if (streamMode === 'mjpeg') startMjpeg();
+    else startWhep();
+  }
+
+  // ──── MJPEG client (<img> multipart over HTTP) ────
+
+  function mjpegUrl() {
+    let url = EXT_BASE + '/mjpeg/' + encodeURIComponent(streamId);
+    // An <img> can't set headers, so the plugin token rides the query string;
+    // the platform's ext-auth accepts it there.
+    if (token) url += '?_plugin_token=' + encodeURIComponent(token);
+    return url;
+  }
+
+  function startMjpeg() {
+    if (!active || !streamId) return;
+    videoEl.hidden = true;
+    imgEl.hidden = false;
+    showOverlay({ spinner: true, text: reconnectAttempts > 0 ? 'Reconnecting…' : 'Connecting…' });
+    // Setting src opens the multipart connection; `load` fires on the first
+    // frame, `error` if the encoder or the AV LAN is unreachable.
+    imgEl.src = mjpegUrl();
   }
 
   // ──── WHEP client ────
@@ -129,9 +174,11 @@
     return headers;
   }
 
-  async function start() {
+  async function startWhep() {
     if (starting || !active || !streamId || pc) return;
     starting = true;
+    videoEl.hidden = false;
+    imgEl.hidden = true;
     showOverlay({ spinner: true, text: reconnectAttempts > 0 ? 'Reconnecting…' : 'Connecting…' });
 
     const peer = new RTCPeerConnection({ iceServers: [] });
@@ -246,6 +293,10 @@
     pc = null;
     resourceUrl = null;
     if (videoEl.srcObject) videoEl.srcObject = null;
+    // MJPEG: drop the src to close the multipart connection. removeAttribute
+    // (not src = '') so the browser doesn't refetch the iframe's own URL.
+    if (imgEl.getAttribute('src')) imgEl.removeAttribute('src');
+    imgEl.hidden = true;
     if (peer) {
       try { peer.close(); } catch { /* already closed */ }
     }
@@ -314,6 +365,21 @@
     pausedByVisibility = false;
     reconnectAttempts = 0;
     start();
+  });
+
+  // MJPEG playback feedback: the first frame clears the overlay; a load error
+  // (encoder offline / no route to the AV LAN) drives the same reconnect path
+  // as WebRTC. The src-present guard ignores the error a teardown clear emits.
+  imgEl.addEventListener('load', () => {
+    if (streamMode === 'mjpeg' && active) {
+      reconnectAttempts = 0;
+      hideOverlay();
+    }
+  });
+  imgEl.addEventListener('error', () => {
+    if (streamMode === 'mjpeg' && active && imgEl.getAttribute('src')) {
+      scheduleReconnect();
+    }
   });
 
   // ──── Visibility: free the decoder when hidden, resume when shown ────

@@ -13,7 +13,9 @@ Run from the openavc-plugins root: pytest tests/test_video_panel_plugin.py -v
 """
 
 import asyncio
+import json
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
@@ -282,6 +284,7 @@ class _FakeApi:
         self._config = dict(config or {})
         self.saved = []
         self.state = {}
+        self.subscriptions = []  # (pattern, callback) from state_subscribe
         self.proxy_calls = []
         self.proxy_location = None  # canned WHEP Location for POST responses
 
@@ -295,6 +298,19 @@ class _FakeApi:
 
     async def state_set(self, key, value):
         self.state[key] = value
+
+    async def state_get(self, key):
+        return self.state.get(key)
+
+    async def state_get_pattern(self, pattern):
+        return {k: v for k, v in self.state.items() if fnmatch(k, pattern)}
+
+    async def state_subscribe(self, pattern, callback):
+        self.subscriptions.append((pattern, callback))
+        return f"sub-{len(self.subscriptions)}"
+
+    def create_task(self, coro, name=None):
+        return asyncio.ensure_future(coro)
 
     def log(self, message, level="info"):
         pass
@@ -582,3 +598,139 @@ def test_video_stream_panel_element_extension_shape():
     stream_field = next(f for f in el["config_schema"] if f["key"] == "stream_id")
     assert stream_field["type"] == "select"
     assert stream_field["options_source"] == "plugin.video_panel.stream_ids"
+
+
+# ──── Auto-discovered preview sources ────
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_discovered_stream_id_is_urlsafe_and_prefixed():
+    f = VideoPanelPlugin._discovered_stream_id
+    assert f("device.chazyctl.encoder.001") == "auto-chazyctl-encoder-001"
+    assert f("device.cam1") == "auto-cam1"
+    # Non-url-safe characters in an id collapse to hyphens, so the result stays
+    # a valid stream id / MediaMTX path name.
+    assert f("device.rm 2.encoder.01") == "auto-rm-2-encoder-01"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_rebuild_discovers_mjpeg_sources(monkeypatch):
+    client, plugin, _added, _deleted = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.chazy.encoder.001.preview_url": "http://169.254.10.1:8080/?action=stream",
+        "device.chazy.encoder.001.preview_format": "mjpeg",
+        "device.chazy.encoder.001.label": "Podium PC",
+        # Offline encoder: empty preview_url -> excluded from the list.
+        "device.chazy.encoder.002.preview_url": "",
+        "device.chazy.encoder.002.preview_format": "mjpeg",
+    })
+    await plugin._rebuild_discovered()
+
+    assert set(plugin._discovered) == {"auto-chazy-encoder-001"}
+    d = plugin._discovered["auto-chazy-encoder-001"]
+    assert d["url"].endswith("?action=stream") and d["format"] == "mjpeg"
+
+    listing = json.loads(api.state["stream_ids"])
+    entry = next(e for e in listing if e["value"] == "auto-chazy-encoder-001")
+    assert entry["label"] == "Podium PC" and entry["mode"] == "mjpeg"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_discovery_label_falls_back_to_name(monkeypatch):
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.chazy.encoder.003.preview_url": "http://x/?action=stream",
+        "device.chazy.encoder.003.name": "ENC 3",  # no user label set
+    })
+    await plugin._rebuild_discovered()
+    listing = json.loads(api.state["stream_ids"])
+    entry = next(e for e in listing if e["value"] == "auto-chazy-encoder-003")
+    assert entry["label"] == "ENC 3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_discovered_rtsp_registers_and_removes_mediamtx_path(monkeypatch):
+    client, plugin, added, deleted = _crud_client(monkeypatch)
+    plugin._ffmpeg_bin = None  # no transcode available -> passthrough path
+    api = plugin.api
+    api.state.update({
+        "device.gen1.encoder.001.preview_url": "rtsp://169.254.5.5:554/sub",
+        "device.gen1.encoder.001.preview_format": "rtsp",
+        "device.gen1.encoder.001.label": "Cam A",
+    })
+    await plugin._rebuild_discovered()
+
+    # An RTSP preview rides the MediaMTX -> WHEP pipeline: a path is registered,
+    # and it is listed as a webrtc-mode source.
+    assert (
+        "/v3/config/paths/add/auto-gen1-encoder-001",
+        {"source": "rtsp://169.254.5.5:554/sub", "sourceOnDemand": True},
+    ) in added
+    listing = json.loads(api.state["stream_ids"])
+    entry = next(e for e in listing if e["value"] == "auto-gen1-encoder-001")
+    assert entry["mode"] == "webrtc"
+
+    # When the source goes away, its sidecar path is torn down.
+    api.state["device.gen1.encoder.001.preview_url"] = ""
+    await plugin._rebuild_discovered()
+    assert "/v3/config/paths/delete/auto-gen1-encoder-001" in deleted
+    assert "auto-gen1-encoder-001" not in plugin._discovered
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_configured_stream_takes_precedence_over_discovered(monkeypatch):
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    # A configured stream whose id collides with a discovered source id.
+    plugin._streams = [{"stream_id": "auto-x-encoder-001", "name": "Manual"}]
+    api.state.update({
+        "device.x.encoder.001.preview_url": "http://x/?action=stream",
+        "device.x.encoder.001.preview_format": "mjpeg",
+    })
+    await plugin._rebuild_discovered()
+
+    listing = json.loads(api.state["stream_ids"])
+    matching = [e for e in listing if e["value"] == "auto-x-encoder-001"]
+    # Listed once, as the configured (webrtc) stream — not duplicated.
+    assert len(matching) == 1
+    assert matching[0]["label"] == "Manual" and matching[0]["mode"] == "webrtc"
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_resolve_mjpeg_url():
+    plugin = VideoPanelPlugin()
+    plugin._discovered = {
+        "auto-a": {"label": "A", "url": "http://x/?action=stream", "format": "mjpeg"},
+        "auto-b": {"label": "B", "url": "rtsp://y/s", "format": "rtsp"},
+    }
+    assert plugin._resolve_mjpeg_url("auto-a") == "http://x/?action=stream"
+    assert plugin._resolve_mjpeg_url("auto-b") is None  # rtsp is served via WHEP
+    assert plugin._resolve_mjpeg_url("nope") is None
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_mjpeg_route_resolves_known_and_404s_unknown(monkeypatch):
+    client, plugin, *_ = _crud_client(monkeypatch)
+    plugin._discovered = {
+        "auto-a": {"label": "A", "url": "http://enc/?action=stream", "format": "mjpeg"},
+    }
+    captured = {}
+
+    async def fake_stream(url):
+        from starlette.responses import Response as _Resp
+
+        captured["url"] = url
+        return _Resp(content=b"frame", media_type="multipart/x-mixed-replace")
+
+    monkeypatch.setattr(plugin, "_mjpeg_stream_response", fake_stream)
+
+    ok = client.get("/mjpeg/auto-a")
+    assert ok.status_code == 200 and captured["url"] == "http://enc/?action=stream"
+    # Unknown / non-MJPEG ids 404.
+    assert client.get("/mjpeg/auto-missing").status_code == 404

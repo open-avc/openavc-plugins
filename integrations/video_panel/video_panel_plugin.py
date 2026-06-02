@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # Sibling module. The plugin loader execs this file with the plugin directory on
@@ -76,6 +77,16 @@ _STREAM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 # before they're spliced into the proxied sidecar URL.
 _SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
 
+# Auto-discovered preview sources. Any driver that publishes the generic
+# preview-source convention — a `preview_url` (+ optional `preview_format`)
+# state key on a device or child entity — is surfaced as a selectable stream
+# in the UI Builder dropdown with no manual setup. Their stream ids carry this
+# prefix so they can never collide with a user-authored stream.
+_DISCOVER_PREFIX = "auto-"
+# Trailing debounce: coalesce a burst of preview-key changes (e.g. a controller
+# enumerating dozens of encoders at once) into a single rebuild.
+_DISCOVER_DEBOUNCE_SECONDS = 0.3
+
 
 class StreamIn(BaseModel):
     """Add/edit payload for a video stream. The IDE Video Streams form posts this."""
@@ -103,7 +114,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.5.2",
+        "version": "0.6.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -228,6 +239,12 @@ class VideoPanelPlugin:
         self._config_path = None
         self._streams = []  # configured stream dicts (the source of truth)
         self._encoder_cache = {}  # hardware_accel value -> resolved ffmpeg encoder
+        # Auto-discovered preview sources, keyed by derived stream id:
+        #   {stream_id: {"label": str, "url": str, "format": "mjpeg"|"rtsp"}}
+        self._discovered = {}
+        # Discovered RTSP previews we've registered a MediaMTX path for, sid->url.
+        self._discovered_rtsp = {}
+        self._rebuild_task = None  # debounce handle for discovery rebuilds
 
     # ──── Lifecycle ────
 
@@ -281,6 +298,7 @@ class VideoPanelPlugin:
             self.api.register_router(self._build_router())
             await self._load_streams()
             await self._publish_streams()
+            await self._setup_discovery()
             self.api.create_periodic_task(
                 self._poll_statuses, interval_seconds=_STATUS_POLL_SECONDS, name="status_poll"
             )
@@ -511,13 +529,33 @@ class VideoPanelPlugin:
         return {**stream, "status": "streaming" if live.get(stream["stream_id"]) else "idle"}
 
     async def _publish_streams(self):
-        listing = [
-            {"value": s["stream_id"], "label": s.get("name") or s["stream_id"]}
-            for s in self._streams
-        ]
-        await self.api.state_set("stream_ids", json.dumps(listing))
+        await self._publish_stream_list()
+        # Seed per-configured-stream status; the poller refreshes it from the
+        # sidecar. Only the configured streams have a managed status key.
         for s in self._streams:
             await self.api.state_set(f"streams.{s['stream_id']}", "idle")
+
+    async def _publish_stream_list(self):
+        # Configured streams play over WebRTC; auto-discovered sources carry a
+        # `mode` so the panel element knows whether to use the WHEP path or the
+        # MJPEG <img> path. The dropdown's option parser ignores unknown fields,
+        # so adding `mode` is backward-compatible. Kept separate from the status
+        # seeding above so a discovery rebuild doesn't flicker configured-stream
+        # status badges.
+        listing = [
+            {"value": s["stream_id"], "label": s.get("name") or s["stream_id"], "mode": "webrtc"}
+            for s in self._streams
+        ]
+        configured_ids = {s["stream_id"] for s in self._streams}
+        for sid, d in self._discovered.items():
+            if sid in configured_ids:
+                continue  # a configured stream with the same id takes precedence
+            listing.append({
+                "value": sid,
+                "label": d["label"],
+                "mode": "mjpeg" if d["format"] == "mjpeg" else "webrtc",
+            })
+        await self.api.state_set("stream_ids", json.dumps(listing))
 
     async def _poll_statuses(self):
         data = await self._api_get("/v3/paths/list")
@@ -537,6 +575,104 @@ class VideoPanelPlugin:
             await self.api.state_set(
                 f"streams.{stream_id}", "streaming" if live.get(stream_id) else "idle"
             )
+
+    # ──── Auto-discovered preview sources ────
+
+    async def _setup_discovery(self):
+        """Subscribe to the generic preview-source convention and seed the list.
+
+        Any driver that publishes ``preview_url`` (+ optional ``preview_format``)
+        on a device or child entity is surfaced as a selectable stream. fnmatch
+        ``*`` crosses dots, so one pattern per key covers both device-level
+        (``device.<id>.preview_url``) and child-level
+        (``device.<id>.<type>.<padded>.preview_url``) sources. ``label`` is
+        watched too so a user rename refreshes the dropdown text.
+        """
+        for pattern in (
+            "device.*.preview_url",
+            "device.*.preview_format",
+            "device.*.label",
+        ):
+            await self.api.state_subscribe(pattern, self._on_discovery_change)
+        await self._rebuild_discovered()
+
+    def _on_discovery_change(self, key, value, old_value):
+        """State callback: (re)schedule a debounced rebuild (trailing edge)."""
+        if self._rebuild_task and not self._rebuild_task.done():
+            self._rebuild_task.cancel()
+        self._rebuild_task = self.api.create_task(
+            self._debounced_rebuild(), name="discovery_rebuild"
+        )
+
+    async def _debounced_rebuild(self):
+        try:
+            await asyncio.sleep(_DISCOVER_DEBOUNCE_SECONDS)
+        except asyncio.CancelledError:
+            return  # superseded by a newer change; the later task rebuilds
+        await self._rebuild_discovered()
+
+    async def _rebuild_discovered(self):
+        """Rescan preview-source keys and republish the merged stream list."""
+        urls = await self.api.state_get_pattern("device.*.preview_url")
+        discovered = {}
+        for url_key, raw in urls.items():
+            url = raw.strip() if isinstance(raw, str) else ""
+            if not url:
+                continue
+            prefix = url_key[: -len(".preview_url")]  # device.<id>[.<type>.<pad>]
+            fmt = await self.api.state_get(f"{prefix}.preview_format")
+            fmt = fmt if fmt in ("mjpeg", "rtsp") else "mjpeg"
+            discovered[self._discovered_stream_id(prefix)] = {
+                "label": await self._discovery_label(prefix),
+                "url": url,
+                "format": fmt,
+            }
+        self._discovered = discovered
+        await self._sync_discovered_rtsp()
+        await self._publish_stream_list()
+
+    async def _discovery_label(self, prefix):
+        """Friendly name for a discovered source: user label, else device name."""
+        for key in (f"{prefix}.label", f"{prefix}.name"):
+            value = await self.api.state_get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return self._discovered_stream_id(prefix)
+
+    @staticmethod
+    def _discovered_stream_id(prefix):
+        """Stable, URL-safe stream id derived from a ``device.<id>...`` prefix."""
+        slug = re.sub(r"[^A-Za-z0-9_-]+", "-", prefix[len("device."):]).strip("-")
+        return f"{_DISCOVER_PREFIX}{slug or 'source'}"
+
+    async def _sync_discovered_rtsp(self):
+        """Register/unregister MediaMTX paths for discovered RTSP previews.
+
+        MJPEG previews are served by the plugin's own streaming proxy and need
+        no sidecar path. RTSP previews ride the existing MediaMTX->WHEP pipeline,
+        so each gets an on-demand path (transcoded if the codec isn't browser-
+        playable, matching configured-stream behavior).
+        """
+        want = {sid: d["url"] for sid, d in self._discovered.items() if d["format"] == "rtsp"}
+        for sid in set(self._discovered_rtsp) - set(want):
+            await self._sync_path_delete(sid)
+        for sid, url in want.items():
+            if self._discovered_rtsp.get(sid) == url:
+                continue  # already registered with this URL
+            await self._sync_path_add({
+                "stream_id": sid, "rtsp_url": url, "username": "", "password": "",
+                "codec_hint": "auto", "transcode": "auto", "hardware_accel": "auto",
+            })
+        self._discovered_rtsp = want
+
+    def _is_known_stream(self, stream_id):
+        """A stream the panel may play: configured or auto-discovered."""
+        return self._find_stream(stream_id) is not None or stream_id in self._discovered
+
+    def _resolve_mjpeg_url(self, stream_id):
+        """Upstream MJPEG URL for a discovered source, or None if not MJPEG."""
+        d = self._discovered.get(stream_id)
+        return d["url"] if d and d["format"] == "mjpeg" else None
 
     @staticmethod
     def _stream_source_url(stream):
@@ -653,6 +789,21 @@ class VideoPanelPlugin:
                 headers={"Cache-Control": "no-store"},
             )
 
+        # ── MJPEG (multipart-over-HTTP) reverse proxy ──
+        # Auto-discovered MJPEG previews (e.g. a Chazy encoder's ?action=stream
+        # secondary stream) are rendered by an <img> in the panel element. An
+        # <img> can't send the plugin-token header, so the panel presents it on
+        # the query string (?_plugin_token=...), which the platform's ext-auth
+        # already accepts. We stream the upstream multipart body straight back so
+        # only the OpenAVC host needs a route to the AV/video LAN.
+        @router.get("/mjpeg/{stream_id}")
+        async def mjpeg(stream_id: str):
+            self._validate_stream_id(stream_id)
+            url = self._resolve_mjpeg_url(stream_id)
+            if not url:
+                raise HTTPException(404, f"No MJPEG preview for '{stream_id}'.")
+            return await self._mjpeg_stream_response(url)
+
         # ── WHEP (WebRTC playback) reverse proxy ──
         # The panel iframe's WHEP client POSTs an SDP offer here; we forward it
         # to the sidecar's WebRTC server (localhost, Basic-authed via the URL
@@ -665,7 +816,7 @@ class VideoPanelPlugin:
         @router.post("/whep/{stream_id}")
         async def whep_offer(stream_id: str, request: Request):
             self._validate_stream_id(stream_id)
-            if not self._find_stream(stream_id):
+            if not self._is_known_stream(stream_id):
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
             resp = await self.api.proxy_to(self._whep_url(stream_id), request)
             location = resp.headers.get("location")
@@ -697,6 +848,41 @@ class VideoPanelPlugin:
         cred = f"{_SIDECAR_USER}:{self._auth_pass}@" if self._auth_pass else ""
         base = f"http://{cred}{_WEBRTC_HOST}:{_WEBRTC_PORT}/{stream_id}/whep"
         return f"{base}/{secret}" if secret else base
+
+    async def _mjpeg_stream_response(self, url):
+        """Stream an upstream multipart-MJPEG body back to the panel ``<img>``.
+
+        Opens the upstream with an unbounded read timeout (MJPEG is continuous)
+        and pumps raw chunks through a ``StreamingResponse``. The httpx client
+        and the upstream response are both closed when the panel disconnects
+        (Starlette closes the generator), so a closed tab can't leak the
+        connection to the AV-LAN encoder.
+        """
+        client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))
+        try:
+            request = client.build_request("GET", url)
+            upstream = await client.send(request, stream=True)
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise HTTPException(502, f"Could not reach the preview stream: {exc}")
+        if upstream.status_code != 200:
+            await upstream.aclose()
+            await client.aclose()
+            raise HTTPException(502, f"Preview stream returned HTTP {upstream.status_code}.")
+
+        media_type = upstream.headers.get("content-type", "multipart/x-mixed-replace")
+
+        async def _pump():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            _pump(), media_type=media_type, headers={"Cache-Control": "no-store"}
+        )
 
     @staticmethod
     def _validate_url(url):
