@@ -833,7 +833,7 @@ The iframe communicates with the panel via `postMessage`.
 | Type | When | Payload |
 |------|------|---------|
 | `openavc:init` | Once, on iframe load | `{config, theme, state, elementId}` — `state` is a snapshot of keys in this plugin's namespace (`plugin.<plugin_id>.*`); other namespaces are not included |
-| `openavc:state` | On every state change in the system | `{key, value}` |
+| `openavc:state` | When a key in this plugin's namespace changes | `{key, value}` — scoped to `plugin.<plugin_id>.*`, like the init snapshot; the iframe never sees other devices', variables', or plugins' state |
 
 Theme changes after the iframe loads are not pushed. Read theme variables from `openavc:init` and cache them.
 
@@ -847,7 +847,7 @@ All outbound messages use `type: "openavc:action"` (with an `action` field selec
 | `openavc:action` | `state.set` | Write a state value | `{key, value}` |
 | `openavc:navigate` | — | Navigate to a page | `{page}` |
 
-State writes from iframes are restricted to the `var.*` and `plugin.*` namespaces. Writes to `device.*`, `system.*`, `isc.*`, `ui.*`, or any other namespace are rejected by the server.
+`openavc:action` requests are gated by the plugin's declared `capabilities`, mirroring the server-side checks: `device.command` requires `device_command`; `state.set` to a `plugin.<plugin_id>.*` key requires `state_write`; `state.set` to a `var.*` key requires `variable_write`. Writes to `device.*`, `system.*`, `isc.*`, `ui.*`, another plugin's namespace, or any action whose capability the plugin didn't declare are dropped.
 
 **Example iframe JavaScript:**
 
