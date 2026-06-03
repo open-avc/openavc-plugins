@@ -42,6 +42,20 @@ VALID_CONFIG_TYPES = {
 
 VALID_PLATFORMS = {"all", "win_x64", "linux_x64", "linux_arm64"}
 
+# EXTENSIONS types the panel/IDE understand, and the field that uniquely
+# identifies an entry within each type (panel_elements are keyed by `type`,
+# every other type by `id`). Mirrors server/core/plugin_loader.py.
+VALID_EXTENSION_TYPES = {
+    "views", "device_panels", "status_cards", "context_actions", "panel_elements",
+}
+EXTENSION_ID_FIELD = {
+    "views": "id",
+    "device_panels": "id",
+    "status_cards": "id",
+    "context_actions": "id",
+    "panel_elements": "type",
+}
+
 PLUGIN_DIRS = ["control_surfaces", "integrations", "sensors", "utility"]
 
 
@@ -175,6 +189,64 @@ def validate_config_schema(config_schema, result):
             result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'mapping_list' but missing 'item_schema'")
 
 
+def validate_extensions_schema(extensions, result):
+    """Validate an EXTENSIONS dict (mirrors the runtime plugin loader).
+
+    Each type must be a known key holding a list of dicts, and every entry needs
+    its identifier field (``id``, or ``type`` for panel_elements) unique within
+    the type. The loader rejects a malformed EXTENSIONS at enable time, so a
+    contributor should catch it here first.
+    """
+    if not isinstance(extensions, dict):
+        result.error("EXTENSIONS must be a dict")
+        return
+
+    for ext_type, ext_list in extensions.items():
+        if ext_type not in VALID_EXTENSION_TYPES:
+            result.error(
+                f"EXTENSIONS has unknown type '{ext_type}': must be one of "
+                f"{sorted(VALID_EXTENSION_TYPES)}"
+            )
+            continue
+        if not isinstance(ext_list, list):
+            result.error(f"EXTENSIONS['{ext_type}'] must be a list")
+            continue
+
+        id_field = EXTENSION_ID_FIELD[ext_type]
+        seen = set()
+        for i, ext in enumerate(ext_list):
+            if not isinstance(ext, dict):
+                result.error(f"EXTENSIONS['{ext_type}'][{i}] must be a dict")
+                continue
+            ext_id = ext.get(id_field)
+            if not ext_id or not isinstance(ext_id, str):
+                result.error(
+                    f"EXTENSIONS['{ext_type}'][{i}] missing '{id_field}' (string)"
+                )
+                continue
+            if ext_id in seen:
+                result.error(
+                    f"EXTENSIONS['{ext_type}'] has duplicate {id_field} '{ext_id}'"
+                )
+            seen.add(ext_id)
+
+
+def _extract_class_attr(content, attr_name):
+    """Best-effort literal extraction of a class-level attribute via AST."""
+    try:
+        tree = ast.parse(content)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, ast.Assign):
+                        for target in item.targets:
+                            if isinstance(target, ast.Name) and target.id == attr_name:
+                                return ast.literal_eval(item.value)
+    except Exception:
+        pass
+    return None
+
+
 def validate_plugin_dir(plugin_path, result):
     """Validate a plugin directory."""
 
@@ -242,6 +314,13 @@ def validate_plugin_dir(plugin_path, result):
                                         pass
         except Exception:
             pass
+
+    # Check for EXTENSIONS (UI extensions). Best-effort: only literal dicts can
+    # be checked; ones built at runtime are skipped.
+    if "EXTENSIONS" in content:
+        extensions = _extract_class_attr(content, "EXTENSIONS")
+        if extensions is not None:
+            validate_extensions_schema(extensions, result)
 
     # Check for plugin.json
     plugin_json_path = plugin_path / "plugin.json"

@@ -64,6 +64,8 @@ category/
 
 **File naming:** The main Python file must end in `_plugin.py` (e.g., `mqtt_bridge_plugin.py`). The plugin loader scans for this pattern.
 
+**Splitting across files:** Each plugin is loaded inside its own package namespace, so import sibling modules with a **relative import** — `from . import helpers` or `from .helpers import Thing`. A bare `import helpers` will not resolve: the plugin's directory is not added to `sys.path` (that's what isolates your helper modules from another plugin shipping a file with the same name). Relative imports work both at module top level and lazily inside methods.
+
 ---
 
 ## 3. PLUGIN_INFO Manifest
@@ -482,6 +484,8 @@ Two things to avoid:
 ## 7. Extensions (UI Integration)
 
 Plugins can extend the Programmer IDE with UI elements by defining an `EXTENSIONS` class attribute.
+
+**Validation (enforced at enable time and by `validate.py`):** `EXTENSIONS` must be a dict. Each key must be one of `views`, `device_panels`, `status_cards`, `context_actions`, `panel_elements`, and each value must be a list of dicts. Every entry needs an identifier — `id` for all types except `panel_elements`, which uses `type` — and that identifier must be unique within its type. A malformed `EXTENSIONS` makes the plugin fail to enable (it won't silently break the extensions other plugins contribute).
 
 ### 7.1 Status Cards
 
