@@ -47,9 +47,35 @@ properties and pick the stream from the **Stream** list. Other options:
 | Fit | `contain` shows the whole picture with letterboxing; `cover` fills the element and crops the edges |
 | Show stream name overlay | Draws the stream's name along the bottom of the video |
 | Auto-reconnect when tab regains focus | Reconnects after the panel has been in the background (on by default) |
+| Source channel | Optional. Leave blank for a fixed source. Set a channel name to switch the source at runtime (see below) |
 
 The element shows a spinner while connecting and a Retry button if the stream
 goes offline. Playback is muted and starts on its own.
+
+## Switching the source at runtime
+
+By default a Video Stream element shows one fixed source. To let a button, macro,
+schedule, or script change which source it shows, give the element a **Source
+channel** name (for example `front`) in its properties. The element then follows
+the state key `plugin.video_panel.selection.<channel>` — set that key to a stream
+id and the element switches to it live, with no page reload.
+
+Set the selection from anywhere that can write state:
+
+- **A macro / button:** add a `state.set` step with key
+  `plugin.video_panel.selection.front` and value the stream id to show, such as
+  `auto-chazy-encoder-002`. Wire it to a button press, a trigger, or a schedule.
+- **A script:** `openavc.state.set("plugin.video_panel.selection.front", "auto-chazy-encoder-002")`.
+- **The API:** write the same state key.
+
+Stream ids come from the **Stream** list: a configured stream uses the id you gave
+it; a discovered encoder uses its auto-generated id (visible in the State view
+under `plugin.video_panel.stream_ids`). Setting the key to an empty value returns
+the element to the fixed **Stream** chosen in its properties, which acts as the
+default until a selection is made.
+
+Several elements can share a channel (they all switch together) or use different
+channel names for independent displays, so one room can drive multiple screens.
 
 ## Automatic stream discovery
 
@@ -133,6 +159,7 @@ software.
 | `plugin.video_panel.error` | string | Last fatal error message (empty when healthy) |
 | `plugin.video_panel.stream_ids` | string | JSON list of `{value, label, mode}` for configured and auto-discovered streams (`mode` is `webrtc` or `mjpeg`) |
 | `plugin.video_panel.streams.<stream_id>` | string | Per-stream state: `idle` or `streaming` |
+| `plugin.video_panel.selection.<channel>` | string | The stream id a channel currently shows. Set it (macro / script / API) to switch any Video Stream element bound to that channel. Empty falls back to the element's fixed Stream. |
 
 ## Events
 

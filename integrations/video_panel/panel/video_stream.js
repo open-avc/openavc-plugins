@@ -40,6 +40,13 @@
   let streamId = '';
   let streamLabel = '';
   let streamMode = 'webrtc'; // 'webrtc' (WHEP <video>) or 'mjpeg' (<img>)
+  // When the element is bound to a channel it follows the plugin-namespaced
+  // selection key instead of its static stream_id, so a macro/script/API can
+  // switch the source at runtime. streamListRaw caches the last stream list so
+  // a switch can re-resolve the new source's label + render mode.
+  let channel = '';
+  let selectionKey = ''; // plugin.video_panel.selection.<channel>, '' when unbound
+  let streamListRaw = null;
 
   let pc = null;
   let resourceUrl = null; // the WHEP session resource (PATCH/DELETE target)
@@ -69,16 +76,25 @@
     videoEl.classList.toggle('fit-cover', cover);
     imgEl.classList.toggle('fit-cover', cover);
 
-    const newId = (config.stream_id || '').trim();
+    channel = (config.channel || '').trim();
+    selectionKey = channel ? STATE_PREFIX + 'selection.' + channel : '';
+
+    const snapshot = msg.state || {};
+    if (snapshot[STATE_PREFIX + 'stream_ids']) {
+      streamListRaw = snapshot[STATE_PREFIX + 'stream_ids'];
+    }
+
+    // A channel selection (when set and non-empty) overrides the static stream;
+    // otherwise the element shows its configured stream_id.
+    let newId = (config.stream_id || '').trim();
+    if (selectionKey && typeof snapshot[selectionKey] === 'string' && snapshot[selectionKey].trim()) {
+      newId = snapshot[selectionKey].trim();
+    }
     if (newId !== streamId) {
       streamId = newId;
       stop();
     }
-
-    const snapshot = msg.state || {};
-    if (snapshot[STATE_PREFIX + 'stream_ids']) {
-      updateLabelFromList(snapshot[STATE_PREFIX + 'stream_ids']);
-    }
+    streamMode = resolveMeta();
 
     if (!streamId) {
       showOverlay({ spinner: false, text: 'No stream selected' });
@@ -92,6 +108,15 @@
   function onState(key, value) {
     if (key === STATE_PREFIX + 'stream_ids') {
       updateLabelFromList(value);
+      return;
+    }
+    if (selectionKey && key === selectionKey) {
+      // A macro / script / API changed this channel's selection. An empty value
+      // falls back to the element's configured stream_id (or "no stream").
+      const next = (typeof value === 'string' && value.trim())
+        ? value.trim()
+        : (config.stream_id || '').trim();
+      selectStream(next);
       return;
     }
     if (streamId && key === STATE_PREFIX + 'streams.' + streamId && value === null) {
@@ -108,18 +133,32 @@
     }
   }
 
-  function updateLabelFromList(raw) {
-    let nextMode = streamMode;
-    try {
-      const list = JSON.parse(raw);
-      const found = Array.isArray(list) && list.find((e) => e && e.value === streamId);
-      streamLabel = found ? found.label || streamId : streamId;
-      if (found && found.mode) nextMode = found.mode;
-    } catch {
-      streamLabel = streamId;
+  // Resolve the current stream's label + render mode from the cached list and
+  // update the on-screen label. Returns the mode so callers decide whether a
+  // change warrants a restart. Defaults gracefully when the id isn't listed yet.
+  function resolveMeta() {
+    let mode = streamMode;
+    streamLabel = streamId;
+    if (streamListRaw) {
+      try {
+        const list = JSON.parse(streamListRaw);
+        const found = Array.isArray(list) && list.find((e) => e && e.value === streamId);
+        if (found) {
+          streamLabel = found.label || streamId;
+          if (found.mode) mode = found.mode;
+        }
+      } catch {
+        // keep streamLabel = streamId
+      }
     }
     labelEl.textContent = streamLabel || '';
     labelEl.hidden = !(config.show_label && streamLabel);
+    return mode;
+  }
+
+  function updateLabelFromList(raw) {
+    streamListRaw = raw;
+    const nextMode = resolveMeta();
     // A mode flip (the list arrived after init, or the source changed kind)
     // means we'd be playing the wrong way — restart on the correct path.
     if (nextMode !== streamMode) {
@@ -130,6 +169,25 @@
         start();
       }
     }
+  }
+
+  // Switch to a different source at runtime (the channel selection changed).
+  // Tears down the current playback, re-resolves the new source's label + mode,
+  // and starts it — or shows "no stream" when the selection is cleared.
+  function selectStream(newId) {
+    newId = (newId || '').trim();
+    if (newId === streamId) return;
+    teardown();
+    streamId = newId;
+    streamMode = resolveMeta();
+    if (!streamId) {
+      active = false;
+      showOverlay({ spinner: false, text: 'No stream selected' });
+      return;
+    }
+    active = true;
+    reconnectAttempts = 0;
+    start();
   }
 
   // ──── Playback dispatch ────

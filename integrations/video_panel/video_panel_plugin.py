@@ -114,7 +114,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.6.0",
+        "version": "0.7.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -205,6 +205,18 @@ class VideoPanelPlugin:
                         "label": "Stream",
                         "type": "select",
                         "options_source": "plugin.video_panel.stream_ids",
+                    },
+                    {
+                        # Optional. Leave blank to always show the stream above.
+                        # Set a channel name (e.g. "front") and the element
+                        # instead follows the state key
+                        # plugin.video_panel.selection.<channel> — set that from
+                        # a macro, script, or the API to switch the source at
+                        # runtime. The stream above becomes the fallback shown
+                        # until (and whenever) the selection is empty.
+                        "key": "channel",
+                        "label": "Source channel (optional)",
+                        "type": "text",
                     },
                     {
                         "key": "fit",
@@ -585,13 +597,17 @@ class VideoPanelPlugin:
         on a device or child entity is surfaced as a selectable stream. fnmatch
         ``*`` crosses dots, so one pattern per key covers both device-level
         (``device.<id>.preview_url``) and child-level
-        (``device.<id>.<type>.<padded>.preview_url``) sources. ``label`` is
-        watched too so a user rename refreshes the dropdown text.
+        (``device.<id>.<type>.<padded>.preview_url``) sources. ``label`` and
+        ``name`` are watched too so a rename refreshes the dropdown text —
+        ``_discovery_label`` falls back from ``label`` to ``name``, so both must
+        trigger a rebuild (a device-reported ``name`` change is the common case
+        when no user label is set).
         """
         for pattern in (
             "device.*.preview_url",
             "device.*.preview_format",
             "device.*.label",
+            "device.*.name",
         ):
             await self.api.state_subscribe(pattern, self._on_discovery_change)
         await self._rebuild_discovered()

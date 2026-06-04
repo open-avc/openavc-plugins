@@ -194,6 +194,21 @@ def test_plugin_info_manifest_shape():
             assert entry["extract"]
 
 
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_video_stream_element_exposes_channel_field():
+    # Runtime source switching: the Video Stream element must offer a `channel`
+    # config field so an integrator can bind it to a selection key. The panel JS
+    # then follows plugin.video_panel.selection.<channel> at runtime. A free-text
+    # type (not select) is required — the channel name is author-defined.
+    element = next(
+        e for e in VideoPanelPlugin.EXTENSIONS["panel_elements"]
+        if e["type"] == "video_stream"
+    )
+    fields = {f["key"]: f for f in element["config_schema"]}
+    assert "stream_id" in fields  # static source still present (the fallback)
+    assert fields["channel"]["type"] == "text"
+
+
 # ──── Probe parsing (pure) ────
 
 _PROBE_HEVC = (
@@ -650,6 +665,39 @@ async def test_discovery_label_falls_back_to_name(monkeypatch):
     listing = json.loads(api.state["stream_ids"])
     entry = next(e for e in listing if e["value"] == "auto-chazy-encoder-003")
     assert entry["label"] == "ENC 3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_name_change_refreshes_discovered_label(monkeypatch):
+    # Regression: the dropdown label falls back to `name` when no user label is
+    # set, so a `name` change (the common case — a device-reported encoder
+    # rename) must trigger a rebuild. _setup_discovery has to subscribe to
+    # `device.*.name`, not just `device.*.label`.
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.chazy.encoder.001.preview_url": "http://x/?action=stream",
+        "device.chazy.encoder.001.name": "ENC 1",  # no user label set
+    })
+    await plugin._setup_discovery()
+
+    def _label():
+        listing = json.loads(api.state["stream_ids"])
+        return next(e["label"] for e in listing if e["value"] == "auto-chazy-encoder-001")
+
+    assert _label() == "ENC 1"
+
+    # The driver reports a new name; fire the matching subscription callback and
+    # let the debounced rebuild run.
+    name_cbs = [cb for pat, cb in api.subscriptions if pat == "device.*.name"]
+    assert name_cbs, "discovery must subscribe to device.*.name"
+    api.state["device.chazy.encoder.001.name"] = "Chazy ENC 1"
+    for cb in name_cbs:
+        cb("device.chazy.encoder.001.name", "Chazy ENC 1", "ENC 1")
+    await plugin._rebuild_task
+
+    assert _label() == "Chazy ENC 1"
 
 
 @pytest.mark.asyncio
