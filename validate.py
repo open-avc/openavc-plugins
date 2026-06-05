@@ -58,6 +58,28 @@ EXTENSION_ID_FIELD = {
 
 PLUGIN_DIRS = ["control_surfaces", "integrations", "sensors", "utility"]
 
+_VCS_PREFIXES = ("git+", "hg+", "svn+", "bzr+")
+
+
+def is_safe_requirement(req):
+    """A dependency must be a plain named pip requirement, not a pip option,
+    URL, VCS spec, or PEP 508 direct reference.
+
+    The installer rejects these shapes at install time -- a leading '-'
+    ('--index-url=...'), a 'git+'/URL install, or a 'name @ url' reference
+    could run install-time code from an attacker-chosen index/repo. Flag them
+    here so contributors learn at PR time. Extras ('pkg[extra]'), version
+    specifiers, and environment markers are allowed. Mirrors
+    server/core/plugin_installer.py:_is_safe_requirement.
+    """
+    s = str(req).strip()
+    if not s or s[0] in "-./\\":
+        return False
+    low = s.lower()
+    if "://" in low or "@" in s or any(p in low for p in _VCS_PREFIXES):
+        return False
+    return bool(re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*", s))
+
 
 class ValidationResult:
     def __init__(self, plugin_path):
@@ -148,11 +170,19 @@ def validate_plugin_info(plugin_info, result, source="PLUGIN_INFO"):
         if not re.match(r'^\d+\.\d+\.\d+', str(plugin_info["version"])):
             result.warn(f"{source}: version '{plugin_info['version']}' doesn't follow semver format (X.Y.Z)")
 
-    # Dependencies license check (just warn -- can't verify without installing)
+    # Dependencies: each must be a plain named requirement (the installer
+    # rejects URLs/VCS/pip-options), plus a license reminder.
     if "dependencies" in plugin_info:
         if not isinstance(plugin_info["dependencies"], list):
             result.error(f"{source}: dependencies must be a list")
         elif plugin_info["dependencies"]:
+            for dep in plugin_info["dependencies"]:
+                if not is_safe_requirement(dep):
+                    result.error(
+                        f"{source}: unsafe dependency {dep!r} -- must be a plain "
+                        "'package' or 'package>=x.y' requirement (no URLs, VCS, "
+                        "pip options, or '@' direct references)"
+                    )
             result.warn(f"{source}: has pip dependencies {plugin_info['dependencies']} -- ensure all are MIT-compatible")
 
 

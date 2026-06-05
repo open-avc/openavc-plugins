@@ -962,7 +962,9 @@ PLUGIN_INFO = {
 | `env_var` | Check if environment variable exists | `key: "VAR_NAME"` |
 | `file_exists` | Check if file exists | `path: "/path/to/file"` |
 
-**Pip dependencies** are listed in `"dependencies"` and installed automatically to `plugin_repo/.deps/`.
+**Pip dependencies** are listed in `"dependencies"` and installed automatically to `plugin_repo/.deps/`. Each entry must be a plain requirement — `package`, `package>=1.2`, `package[extra]`, optionally with an environment marker. URLs, VCS specs (`git+...`), `@ url` direct references, and pip options (anything starting with `-`) are rejected by `validate.py` and refused at install time, because they would let install-time code run from an attacker-chosen index or repo.
+
+**Native-dependency URLs** (`native_dependencies[].platforms.<plat>.url`) must use `https` and resolve to a public host; the installer refuses private/loopback/link-local addresses (SSRF guard) and caps download size.
 
 ---
 
