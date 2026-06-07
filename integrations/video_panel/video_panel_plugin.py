@@ -114,13 +114,13 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.7.0",
+        "version": "0.8.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        "min_openavc_version": "0.13.0",
+        "min_openavc_version": "0.15.0",
         "capabilities": [
             "state_read",
             "state_write",
@@ -834,7 +834,11 @@ class VideoPanelPlugin:
             self._validate_stream_id(stream_id)
             if not self._is_known_stream(stream_id):
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
-            resp = await self.api.proxy_to(self._whep_url(stream_id), request)
+            # allow_internal: the sidecar is on localhost; proxy_to refuses
+            # internal hosts by default (SSRF guard).
+            resp = await self.api.proxy_to(
+                self._whep_url(stream_id), request, allow_internal=True
+            )
             location = resp.headers.get("location")
             if location:
                 secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
@@ -845,13 +849,17 @@ class VideoPanelPlugin:
         async def whep_trickle(stream_id: str, secret: str, request: Request):
             self._validate_stream_id(stream_id)
             self._validate_secret(secret)
-            return await self.api.proxy_to(self._whep_url(stream_id, secret), request)
+            return await self.api.proxy_to(
+                self._whep_url(stream_id, secret), request, allow_internal=True
+            )
 
         @router.delete("/whep/{stream_id}/{secret}")
         async def whep_teardown(stream_id: str, secret: str, request: Request):
             self._validate_stream_id(stream_id)
             self._validate_secret(secret)
-            return await self.api.proxy_to(self._whep_url(stream_id, secret), request)
+            return await self.api.proxy_to(
+                self._whep_url(stream_id, secret), request, allow_internal=True
+            )
 
         return router
 

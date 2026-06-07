@@ -181,7 +181,7 @@ def test_plugin_info_manifest_shape():
     info = VideoPanelPlugin.PLUGIN_INFO
     assert info["id"] == "video_panel"
     assert info["category"] == "integration"
-    assert info["min_openavc_version"] == "0.13.0"
+    assert info["min_openavc_version"] == "0.15.0"
     assert info["platforms"] == ["win_x64", "linux_x64", "linux_arm64"]
     assert "http_endpoints" in info["capabilities"]
 
@@ -330,12 +330,16 @@ class _FakeApi:
     def log(self, message, level="info"):
         pass
 
-    async def proxy_to(self, url, request, *, timeout=30.0):
+    async def proxy_to(self, url, request, *, timeout=30.0, allow_internal=False):
         """Stand in for PluginAPI.proxy_to: record the upstream URL, return a
         canned response shaped like MediaMTX's WHEP replies."""
         from starlette.responses import Response as _Resp
 
-        self.proxy_calls.append({"url": url, "method": request.method})
+        self.proxy_calls.append({
+            "url": url,
+            "method": request.method,
+            "allow_internal": allow_internal,
+        })
         if request.method == "POST":
             headers = {"location": self.proxy_location} if self.proxy_location else {}
             return _Resp(content=b"v=0\r\n", status_code=201, headers=headers)
@@ -551,10 +555,13 @@ def test_whep_offer_proxies_to_sidecar_and_rewrites_location():
         headers={"Content-Type": "application/sdp"},
     )
     assert r.status_code == 201, r.text
-    # Forwarded to the localhost sidecar WHEP endpoint with read creds in userinfo.
+    # Forwarded to the localhost sidecar WHEP endpoint with read creds in
+    # userinfo. allow_internal=True opts past proxy_to's SSRF guard (the
+    # sidecar is on loopback, which is refused by default).
     assert api.proxy_calls[-1] == {
         "url": "http://openavc:sidecarpass@127.0.0.1:8889/front_door/whep",
         "method": "POST",
+        "allow_internal": True,
     }
     # MediaMTX's path-absolute Location is rewritten to live under this mount so
     # the browser's PATCH/DELETE come back through the authenticated proxy.
@@ -572,11 +579,15 @@ def test_whep_trickle_and_teardown_target_the_session():
         headers={"Content-Type": "application/trickle-ice-sdpfrag"},
     )
     assert pr.status_code == 204
-    assert api.proxy_calls[-1] == {"url": expected, "method": "PATCH"}
+    assert api.proxy_calls[-1] == {
+        "url": expected, "method": "PATCH", "allow_internal": True,
+    }
 
     dr = client.delete("/whep/front_door/abc-123-uuid")
     assert dr.status_code == 200
-    assert api.proxy_calls[-1] == {"url": expected, "method": "DELETE"}
+    assert api.proxy_calls[-1] == {
+        "url": expected, "method": "DELETE", "allow_internal": True,
+    }
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")

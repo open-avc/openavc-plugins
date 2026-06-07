@@ -136,9 +136,9 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | `device_command` | `device_command()` |
 | `network_listen` | Plugin may open network ports |
 | `usb_access` | Plugin may access USB devices |
-| `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*` |
+| `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*`; also gates `proxy_to()` (outbound requests) |
 
-`state_write` and `variable_write` are independent. `state_write` lets a plugin write its own namespaced state (e.g., `plugin.my_plugin.connected`). `variable_write` lets a plugin write user variables (`var.*`) — shared room-logic state. Most plugins need only `state_write`. Declare `variable_write` only when the plugin explicitly contributes to user-variable state, e.g., a sensor reporting occupancy into `var.room_occupied` or a bridge mirroring an external system.
+`state_write` and `variable_write` are independent. `state_write` lets a plugin write its own namespaced state (e.g., `plugin.my_plugin.connected`). `variable_write` lets a plugin write user variables (`var.*`) — shared room-logic state. Most plugins need only `state_write`. Declare `variable_write` only when the plugin explicitly contributes to user-variable state, e.g., a sensor reporting occupancy into `var.room_occupied` or a bridge mirroring an external system. A `var.*` key the plugin *creates* (one that didn't already exist) is removed on stop/uninstall; writing to a variable already declared in the project leaves it intact.
 
 Calling a method without the required capability raises `PluginPermissionError`.
 
@@ -389,6 +389,9 @@ broker = api.config.get("broker_host", "localhost")
 
 # Save updated configuration to project file
 # Triggers plugin restart if the plugin is running
+# Must be JSON-serializable (a non-serializable/cyclic value raises
+# PluginPermissionError instead of corrupting the project). On a save failure
+# the in-memory config reverts so api.config never reports an unsaved value.
 await api.save_config({"broker_host": "new-broker.example.com", "broker_port": 1883})
 ```
 
