@@ -657,3 +657,67 @@ async def test_watchdog_skips_while_opening(monkeypatch):
     plugin._opening = True
     await plugin._watchdog()
     assert plugin.deck is None  # guard short-circuited the open
+
+
+# ──── Bundled text font + button image rendering ────
+
+
+def test_text_font_path_resolves():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    assert plugin._text_font_path is not None
+    assert plugin._text_font_path.endswith("DejaVuSans.ttf")
+    assert Path(plugin._text_font_path).exists()
+
+
+def test_create_button_image_sizes_and_wraps(monkeypatch):
+    # Rendering needs PIL; wire it the way _lazy_import() would. Skips cleanly
+    # if Pillow isn't installed so the suite still runs without it.
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+
+    class _VisualDeck:
+        def key_image_format(self):
+            return {"size": (72, 72)}
+
+    plugin.deck = _VisualDeck()
+
+    # Short and long labels both yield a correctly-sized image without raising.
+    for label in ["OK", "Presentation Mode",
+                  "A really long multi word button label that must wrap"]:
+        img = plugin._create_button_image(label, "#1a1a2e", "#e0e0e0")
+        assert img.size == (72, 72)
+        assert img.mode == "RGB"
+
+    # Rendered labels are cached (text caching, like icons).
+    assert len(plugin._label_cache) >= 1
+
+    # Icon + label path also renders to the right size.
+    plugin._load_icon_font()
+    img = plugin._create_button_image("Power", "#1a1a2e", "#e0e0e0", icon_name="power")
+    assert img.size == (72, 72)
+
+
+def test_wrap_greedy_packs_and_breaks(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    layer = img_mod.new("RGBA", (60, 60), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    font = plugin._text_font(12)
+    # Empty string -> no lines; a multi-word phrase wraps onto >1 line at a
+    # narrow width.
+    assert plugin._wrap_greedy(draw, "", font, 60) == []
+    wrapped = plugin._wrap_greedy(draw, "one two three four five six", font, 40)
+    assert len(wrapped) >= 2

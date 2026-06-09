@@ -269,7 +269,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.5.0",
+        "version": "1.6.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -453,6 +453,9 @@ class StreamDeckPlugin:
         self._icon_font = None   # Loaded Lucide TTF font for icon rendering
         self._icon_map = {}      # icon-name -> unicode code point
         self._icon_cache = {}    # (icon_name, size, color_hex) -> PIL Image
+        self._text_font_path = None  # Bundled label font (legible on Linux/Pi)
+        self._font_cache = {}    # size -> ImageFont
+        self._label_cache = {}   # (label, w, h, color, max_font, max_lines) -> RGBA
 
     async def start(self, api):
         """Initialize and connect to the Stream Deck."""
@@ -472,6 +475,8 @@ class StreamDeckPlugin:
 
         # Load Lucide icon font for button icon rendering
         self._load_icon_font()
+        # Load the bundled text font for legible labels on every platform
+        self._load_text_font()
 
         # Set initial state
         await self.api.state_set("connected", False)
@@ -975,35 +980,30 @@ class StreamDeckPlugin:
             self.api.log(f"Error setting key {key_index} image: {e}", level="debug")
 
     def _create_button_image(self, label, bg_color, text_color, icon_name=None):
-        """Create a PIL image for a button with optional icon and label."""
+        """Create a PIL image for a button with optional icon and wrapped label."""
         image_format = self.deck.key_image_format()
         width = image_format["size"][0]
         height = image_format["size"][1]
 
         img = Image.new("RGB", (width, height), bg_color)
-        draw = ImageDraw.Draw(img)
 
         # Load icon image if specified
         icon_img = self._render_icon(icon_name, text_color, width) if icon_name else None
 
         if icon_img and label:
-            # Icon above label
+            # Icon in the upper area, wrapped label below it.
             icon_size = min(width, height) // 2
             icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
             icon_x = (width - icon_size) // 2
             icon_y = max(4, (height // 2) - icon_size + 4)
             img.paste(icon_img, (icon_x, icon_y), icon_img)
 
-            # Label below icon
-            try:
-                font = ImageFont.truetype("arial.ttf", 12)
-            except (IOError, OSError):
-                font = ImageFont.load_default()
-            bbox = draw.textbbox((0, 0), label, font=font)
-            text_w = bbox[2] - bbox[0]
-            text_x = (width - text_w) // 2
-            text_y = icon_y + icon_size + 2
-            draw.text((text_x, text_y), label, fill=text_color, font=font)
+            text_top = icon_y + icon_size + 2
+            self._paste_label(
+                img, label, text_color,
+                (2, text_top, width - 4, max(0, height - text_top - 2)),
+                max_font=14, max_lines=2,
+            )
 
         elif icon_img:
             # Icon only, centered
@@ -1014,19 +1014,123 @@ class StreamDeckPlugin:
             img.paste(icon_img, (icon_x, icon_y), icon_img)
 
         elif label:
-            # Label only, centered
-            try:
-                font = ImageFont.truetype("arial.ttf", 14)
-            except (IOError, OSError):
-                font = ImageFont.load_default()
-            bbox = draw.textbbox((0, 0), label, font=font)
-            text_w = bbox[2] - bbox[0]
-            text_h = bbox[3] - bbox[1]
-            x = (width - text_w) // 2
-            y = (height - text_h) // 2
-            draw.text((x, y), label, fill=text_color, font=font)
+            # Label only — wrapped and shrunk to fill the key.
+            pad = max(2, width // 12)
+            self._paste_label(
+                img, label, text_color,
+                (pad, pad, width - 2 * pad, height - 2 * pad),
+                max_font=max(14, height // 4), max_lines=3,
+            )
 
         return img
+
+    # ──── Text Rendering (bundled font, word-wrap + shrink-to-fit) ────
+
+    def _load_text_font(self):
+        """Resolve the bundled text-font path used for button labels.
+
+        ``arial.ttf`` exists only on Windows, so a bundled font keeps labels
+        legible on Linux and the Pi. ``_text_font`` falls back to arial.ttf
+        then PIL's bitmap default if this file is somehow missing.
+        """
+        text_ttf = Path(__file__).parent / "fonts" / "DejaVuSans.ttf"
+        self._text_font_path = str(text_ttf) if text_ttf.exists() else None
+        if self._text_font_path is None:
+            self.api.log(
+                "Bundled text font not found; labels will use a small default font",
+                level="warning",
+            )
+
+    def _text_font(self, size):
+        """Return a cached text font at ``size`` (bundled font, then fallbacks)."""
+        font = self._font_cache.get(size)
+        if font is not None:
+            return font
+        font = None
+        if self._text_font_path:
+            try:
+                font = ImageFont.truetype(self._text_font_path, size)
+            except (IOError, OSError):
+                font = None
+        if font is None:
+            try:
+                font = ImageFont.truetype("arial.ttf", size)
+            except (IOError, OSError):
+                font = ImageFont.load_default()
+        self._font_cache[size] = font
+        return font
+
+    @staticmethod
+    def _wrap_greedy(draw, text, font, max_width):
+        """Greedy word-wrap: pack words onto lines no wider than ``max_width``.
+
+        A single word longer than ``max_width`` keeps its own (overflowing)
+        line — there's nothing to break it on; shrink-to-fit handles the rest.
+        """
+        words = text.split()
+        if not words:
+            return []
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            trial = f"{current} {word}"
+            if draw.textlength(trial, font=font) <= max_width:
+                current = trial
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
+    def _paste_label(self, img, label, color, box, max_font, max_lines):
+        """Draw ``label`` centered in ``box``=(x, y, w, h), wrapped + shrunk."""
+        bx, by, bw, bh = box
+        if not label or bw <= 0 or bh <= 0:
+            return
+        layer = self._render_label_layer(label, color, bw, bh, max_font, max_lines)
+        img.paste(layer, (bx, by), layer)
+
+    def _render_label_layer(self, label, color, w, h, max_font, max_lines):
+        """Render ``label`` to an RGBA layer of size (w, h), wrapped and shrunk
+        to fit in at most ``max_lines`` lines. Cached like rendered icons."""
+        cache_key = (label, w, h, color, max_font, max_lines)
+        cached = self._label_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+
+        # Shrink the font from max_font down to an 8px floor until the wrapped
+        # text fits the box in both dimensions and the line count.
+        min_font = 8
+        font = self._text_font(min_font)
+        lines = self._wrap_greedy(draw, label, font, w)
+        for size in range(max_font, min_font - 1, -1):
+            candidate = self._text_font(size)
+            wrapped = self._wrap_greedy(draw, label, candidate, w)
+            if len(wrapped) > max_lines:
+                continue
+            ascent, descent = candidate.getmetrics()
+            line_h = ascent + descent
+            widest = max((draw.textlength(ln, font=candidate) for ln in wrapped), default=0)
+            if line_h * len(wrapped) <= h and widest <= w:
+                font, lines = candidate, wrapped
+                break
+
+        lines = lines[:max_lines]
+        ascent, descent = font.getmetrics()
+        line_h = ascent + descent
+        total_h = line_h * len(lines)
+        y = max(0, (h - total_h) // 2)
+        for line in lines:
+            line_w = draw.textlength(line, font=font)
+            x = max(0, int((w - line_w) // 2))
+            draw.text((x, y), line, fill=color, font=font)
+            y += line_h
+
+        self._label_cache[cache_key] = layer.copy()
+        return layer
 
     # ──── Icon Rendering ────
 
