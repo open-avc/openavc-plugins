@@ -1010,6 +1010,228 @@ async def test_watchdog_skips_while_opening(monkeypatch):
     assert plugin.deck is None  # guard short-circuited the open
 
 
+# ──── Neo: touch keys (color-only) + info strip ────
+
+
+class _FakeNeoDeck(_FakeDeck):
+    """Neo-shaped fake: 8 LCD keys (2x4), 2 color-only touch keys, an info
+    screen. is_visual() is True; image/color setters are recorders. Touch-key
+    rendering goes through set_key_color, which needs no PIL."""
+
+    def __init__(self, serial="NEO01"):
+        super().__init__(serial)
+        self.key_images = {}
+        self.key_colors = {}
+        self.screen_image = None
+
+    def deck_type(self):
+        return "Stream Deck Neo"
+
+    def key_count(self):
+        return 8
+
+    def key_layout(self):
+        return (2, 4)
+
+    def touch_key_count(self):
+        return 2
+
+    def is_visual(self):
+        return True
+
+    def screen_image_format(self):
+        return {"size": (248, 58), "format": "JPEG"}
+
+    def key_image_format(self):
+        return {"size": (96, 96), "format": "JPEG"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def set_key_image(self, key, image):
+        self.key_images[key] = image
+
+    def set_key_color(self, key, r, g, b):
+        self.key_colors[key] = (r, g, b)
+
+    def set_screen_image(self, image):
+        self.screen_image = image
+
+
+def test_hex_color_parsing():
+    assert StreamDeckPlugin._hex_to_rgb("#ff0000") == (255, 0, 0)
+    assert StreamDeckPlugin._hex_to_rgb("00ff00") == (0, 255, 0)
+    assert StreamDeckPlugin._hex_to_rgb("#0f0") == (0, 255, 0)
+    assert StreamDeckPlugin._hex_to_rgb("junk") == (0, 0, 0)
+    assert StreamDeckPlugin._hex_to_rgb(None) == (0, 0, 0)
+    assert StreamDeckPlugin._lighten_hex("#000000", 0.25) == "#3f3f3f"
+
+
+@pytest.mark.asyncio
+async def test_touch_key_renders_color_not_image():
+    config = {"buttons": [{"index": 8, "page": 0, "bg_color": "#ff0000",
+                           "bindings": {"press": [{"action": "macro", "macro": "m"}]}}]}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakeNeoDeck()
+    await plugin._render_button(8)
+    assert plugin.deck.key_colors[8] == (255, 0, 0)
+    assert 8 not in plugin.deck.key_images
+
+
+@pytest.mark.asyncio
+async def test_touch_key_unassigned_goes_dark():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin.deck = _FakeNeoDeck()
+    await plugin._render_button(9)
+    assert plugin.deck.key_colors[9] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_touch_key_hidden_goes_dark():
+    config = {"buttons": [{"index": 8, "page": 0, "bg_color": "#ff0000", "bindings": {
+        "visible_when": {"key": "var.show", "operator": "truthy"},
+    }}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakeNeoDeck()
+    state.set("var.show", "", source="test")
+    await plugin._render_button(8)
+    assert plugin.deck.key_colors[8] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_touch_key_feedback_drives_color():
+    config = {"buttons": [{"index": 9, "page": 0, "bg_color": "#111111", "bindings": {
+        "feedback": {
+            "key": "var.mute",
+            "condition": {"equals": "1"},
+            "style_active": {"bg_color": "#00ff00"},
+        },
+    }}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakeNeoDeck()
+    state.set("var.mute", "1", source="test")
+    await plugin._render_button(9)
+    assert plugin.deck.key_colors[9] == (0, 255, 0)
+    state.set("var.mute", "0", source="test")
+    await plugin._render_button(9)
+    assert plugin.deck.key_colors[9] == (17, 17, 17)
+
+
+@pytest.mark.asyncio
+async def test_touch_key_press_fires_actions_and_highlights():
+    config = {"buttons": [{"index": 8, "page": 0, "bg_color": "#000000",
+                           "bindings": {"press": [{"action": "macro", "macro": "m"}]}}]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakeNeoDeck()
+    await plugin._on_key_change(None, 8, True)
+    assert macros.executed == ["m"]
+    # While held, the key color is brightened toward white.
+    assert plugin.deck.key_colors[8] == (63, 63, 63)
+    await plugin._on_key_change(None, 8, False)
+    assert plugin.deck.key_colors[8] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_open_deck_publishes_info_screen_and_touch_keys(monkeypatch):
+    class _NonVisualNeo(_FakeNeoDeck):
+        def is_visual(self):
+            return False  # skip rendering -> no PIL needed
+
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([_NonVisualNeo()]))
+    await plugin._watchdog()
+    assert state.get("plugin.streamdeck.touch_key_count") == 2
+    assert state.get("plugin.streamdeck.has_info_screen") is True
+
+
+@pytest.mark.asyncio
+async def test_render_all_buttons_covers_touch_keys(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+
+    class _FakePILHelper:
+        @staticmethod
+        def to_native_key_format(deck, img):
+            return b"native-key"
+
+    monkeypatch.setattr(sd_module, "PILHelper", _FakePILHelper)
+
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    plugin.deck = _FakeNeoDeck()
+    await plugin._render_all_buttons()
+    # 8 LCD keys get images, 2 touch keys get colors.
+    assert sorted(plugin.deck.key_images) == list(range(8))
+    assert sorted(plugin.deck.key_colors) == [8, 9]
+
+
+@pytest.mark.asyncio
+async def test_info_strip_renders_state_value(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+
+    sent = {}
+
+    class _FakePILHelper:
+        @staticmethod
+        def to_native_screen_format(deck, img):
+            sent["size"] = img.size
+            return b"native-screen"
+
+    monkeypatch.setattr(sd_module, "PILHelper", _FakePILHelper)
+
+    config = {"info_strip": {"source": "state", "key": "var.temp", "label": "Temp"}}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    state.set("var.temp", 72, source="test")
+    plugin.deck = _FakeNeoDeck()
+
+    await plugin._render_info_strip()
+    assert plugin.deck.screen_image == b"native-screen"
+    assert sent["size"] == (248, 58)
+
+
+@pytest.mark.asyncio
+async def test_info_strip_skipped_on_deck_without_screen(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+
+    class _NoScreenDeck(_FakeNeoDeck):
+        def screen_image_format(self):
+            return {"size": (0, 0), "format": ""}
+
+    plugin, _state, _m, _d = _make_plugin_with_recorders(
+        {"info_strip": {"source": "text", "text": "hi"}}
+    )
+    plugin.deck = _NoScreenDeck()
+    await plugin._render_info_strip()
+    assert plugin.deck.screen_image is None
+
+
+@pytest.mark.asyncio
+async def test_info_strip_state_key_is_watched():
+    config = {"info_strip": {"source": "state", "key": "var.temp"}}
+    plugin, _state = _make_plugin(config)
+    await plugin._setup_feedback_subscriptions()
+    assert plugin._info_strip_keys == {"var.temp"}
+    assert len(plugin._feedback_subs) == 1
+
+    # A static-text strip watches nothing.
+    plugin2, _s2 = _make_plugin({"info_strip": {"source": "text", "text": "Room A"}})
+    await plugin2._setup_feedback_subscriptions()
+    assert plugin2._info_strip_keys == set()
+    assert plugin2._feedback_subs == []
+
+
 # ──── Bundled text font + button image rendering ────
 
 

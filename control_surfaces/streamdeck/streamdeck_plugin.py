@@ -200,7 +200,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.9.0",
+        "version": "1.10.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -295,12 +295,22 @@ class StreamDeckPlugin:
     AI_GUIDE = (
         "The default SURFACE_LAYOUT is for the Neo (2x4). The actual hardware "
         "is detected at runtime and published to state: plugin.streamdeck.model, "
-        "rows, columns, key_count, dial_count, touch_key_count, and "
-        "has_touchscreen. Read these keys to learn what the connected deck "
-        "offers before configuring it — dials and a touchscreen exist only on "
-        "the Stream Deck + (dial_count 4, has_touchscreen true), and side touch "
-        "keys only on the Neo (touch_key_count 2). When connected is false, no "
-        "deck is attached and the geometry keys are stale or zero. "
+        "rows, columns, key_count, dial_count, touch_key_count, "
+        "has_touchscreen, and has_info_screen. Read these keys to learn what "
+        "the connected deck offers before configuring it — dials and a "
+        "touchscreen exist only on the Stream Deck + (dial_count 4, "
+        "has_touchscreen true); side touch keys and the info screen only on "
+        "the Neo (touch_key_count 2, has_info_screen true). When connected is "
+        "false, no deck is attached and the geometry keys are stale or zero. "
+        "Touch keys are configured as ordinary 'buttons' entries at the "
+        "indices after the LCD keys (Neo: 8 and 9). They have no display — "
+        "only their bg_color (and feedback bg colors) show, as an RGB glow; "
+        "label and icon are ignored. "
+        "When has_info_screen is true, a top-level 'info_strip' object renders "
+        "the small info screen: {\"source\": \"state\", \"key\": "
+        "\"var.room_temp\", \"label\": \"Temp\"} shows the key's live value "
+        "under the label, or {\"source\": \"text\", \"text\": \"Room A\"} "
+        "shows static text. "
         "Button indices go left-to-right, "
         "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
         "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
@@ -403,6 +413,7 @@ class StreamDeckPlugin:
         self._feedback_subs = []
         self._auto_page_keys = set()   # state keys watched by auto_page rules
         self._touch_strip_keys = set()  # state keys shown on the touchscreen strip
+        self._info_strip_keys = set()   # state keys shown on the info strip
         self._loop = None
         self._model_info = None
         self._opening = False    # re-entrancy guard while a deck is being opened
@@ -450,6 +461,7 @@ class StreamDeckPlugin:
         await self.api.state_set("dial_count", 0)
         await self.api.state_set("touch_key_count", 0)
         await self.api.state_set("has_touchscreen", False)
+        await self.api.state_set("has_info_screen", False)
 
         # Validate HIDAPI is loadable now, so a missing native library fails
         # the plugin with a clear message instead of silently looping in the
@@ -509,6 +521,11 @@ class StreamDeckPlugin:
         dial_count = deck.dial_count()
         touch_key_count = deck.touch_key_count()
         has_touchscreen = deck.is_touch()
+        try:
+            # A secondary info screen reports a non-zero size (e.g. Neo 248x58)
+            has_info_screen = deck.screen_image_format()["size"][0] > 0
+        except Exception:
+            has_info_screen = False
 
         self.deck = deck
         self._model_info = model
@@ -540,6 +557,7 @@ class StreamDeckPlugin:
         await self.api.state_set("dial_count", dial_count)
         await self.api.state_set("touch_key_count", touch_key_count)
         await self.api.state_set("has_touchscreen", has_touchscreen)
+        await self.api.state_set("has_info_screen", has_info_screen)
         await self.api.state_set("current_page", 0)
         self.current_page = 0
 
@@ -561,9 +579,10 @@ class StreamDeckPlugin:
             self.current_page = initial_page
             await self.api.state_set("current_page", initial_page)
 
-        # Render all buttons for the current page, then the touchscreen strip
+        # Render all buttons for the current page, then the secondary displays
         await self._render_all_buttons()
         await self._render_touchscreen()
+        await self._render_info_strip()
 
     async def _watchdog(self):
         """Keep a deck connected: open one if present, recover after unplug.
@@ -1073,6 +1092,61 @@ class StreamDeckPlugin:
         except Exception as e:
             self.api.log(f"Error setting touchscreen image: {e}", level="debug")
 
+    # ──── Info strip (decks with a secondary info screen) ────
+
+    async def _render_info_strip(self):
+        """Render the secondary info screen from the ``info_strip`` config.
+
+        Config shape: ``{"source": "state"|"text", "key": "<state key>",
+        "text": "<static text>", "label": "<small heading>"}``. A state
+        source shows the key's live value; re-rendered on change.
+        """
+        if not self.deck or not self.deck.is_visual():
+            return
+        try:
+            width, height = self.deck.screen_image_format()["size"]
+        except Exception:
+            return
+        if not width or not height:
+            return  # this deck has no info screen
+
+        bg = self.api.config.get("button_color", "#1a1a2e")
+        fg = self.api.config.get("text_color", "#e0e0e0")
+        img = Image.new("RGB", (width, height), bg)
+
+        cfg = self.api.config.get("info_strip")
+        if isinstance(cfg, dict):
+            label = cfg.get("label", "")
+            if cfg.get("source") == "text":
+                value = str(cfg.get("text", ""))
+            else:
+                key = cfg.get("key", "")
+                live = await self.api.state_get(key) if key else None
+                value = str(live) if live is not None else ""
+
+            if label and value:
+                self._paste_label(
+                    img, label, fg, (4, 2, width - 8, height // 3),
+                    max_font=14, max_lines=1,
+                )
+                self._paste_label(
+                    img, value, fg,
+                    (4, height // 3 + 2, width - 8, height - height // 3 - 4),
+                    max_font=24, max_lines=1,
+                )
+            elif label or value:
+                self._paste_label(
+                    img, label or value, fg, (4, 2, width - 8, height - 4),
+                    max_font=22, max_lines=2,
+                )
+
+        try:
+            native = PILHelper.to_native_screen_format(self.deck, img)
+            with self.deck:
+                self.deck.set_screen_image(native)
+        except Exception as e:
+            self.api.log(f"Error setting info strip image: {e}", level="debug")
+
     # ──── Page Navigation ────
 
     async def _change_page(self, new_page):
@@ -1094,20 +1168,33 @@ class StreamDeckPlugin:
     # ──── Button Rendering ────
 
     async def _render_all_buttons(self):
-        """Render all buttons on the deck for the current page."""
+        """Render every key for the current page (LCD keys + touch keys)."""
         if not self.deck or not self.deck.is_visual():
             return
 
-        key_count = self.deck.key_count()
+        key_count = self.deck.key_count() + self.deck.touch_key_count()
         for key_index in range(key_count):
             await self._render_button(key_index)
+
+    def _is_touch_key(self, key_index):
+        """True for the color-only touch keys indexed after the LCD keys."""
+        if not self.deck:
+            return False
+        key_count = self.deck.key_count()
+        return key_count <= key_index < key_count + self.deck.touch_key_count()
 
     async def _render_button(self, key_index):
         """Render a single button image based on its assignment and state."""
         if not self.deck or not self.deck.is_visual():
             return
 
+        is_touch_key = self._is_touch_key(key_index)
         assignment = self._get_button_assignment(self.current_page, key_index)
+
+        # Touch keys have no LCD — an unassigned one just goes dark.
+        if is_touch_key and not assignment:
+            self._apply_key_color(key_index, "#000000")
+            return
 
         global_bg = self.api.config.get("button_color", "#1a1a2e")
         global_text = self.api.config.get("text_color", "#e0e0e0")
@@ -1121,9 +1208,12 @@ class StreamDeckPlugin:
             bindings = assignment.get("bindings", {})
             visible_when = bindings.get("visible_when") if isinstance(bindings, dict) else None
             if visible_when is not None and not await self._eval_condition(visible_when):
-                self._apply_key_image(
-                    key_index, self._create_button_image("", "#000000", "#000000")
-                )
+                if is_touch_key:
+                    self._apply_key_color(key_index, "#000000")
+                else:
+                    self._apply_key_image(
+                        key_index, self._create_button_image("", "#000000", "#000000")
+                    )
                 return
 
             label = assignment.get("label", "")
@@ -1192,12 +1282,52 @@ class StreamDeckPlugin:
                             if style_inactive.get("icon"):
                                 icon = style_inactive["icon"]
 
+        # Touch keys show color only (no LCD): the effective background color
+        # after feedback/toggle evaluation, brightened while held.
+        if is_touch_key:
+            color = bg_color
+            if key_index in self._pressed_keys:
+                color = self._lighten_hex(color, 0.25)
+            self._apply_key_color(key_index, color)
+            return
+
         # Generate the button image and set it on the deck. While the key is
         # physically held, draw the momentary-press highlight on top.
         image = self._create_button_image(label, bg_color, text_color, icon)
         if key_index in self._pressed_keys:
             image = self._apply_press_highlight(image)
         self._apply_key_image(key_index, image)
+
+    @staticmethod
+    def _hex_to_rgb(color):
+        """Parse a #rrggbb (or #rgb) hex color to an (r, g, b) tuple."""
+        value = str(color or "").lstrip("#")
+        try:
+            if len(value) == 3:
+                return tuple(int(c * 2, 16) for c in value)
+            if len(value) == 6:
+                return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+        except ValueError:
+            pass
+        return (0, 0, 0)
+
+    @staticmethod
+    def _lighten_hex(color, amount):
+        """Blend a hex color toward white by ``amount`` (0..1), as hex."""
+        r, g, b = StreamDeckPlugin._hex_to_rgb(color)
+        r = int(r + (255 - r) * amount)
+        g = int(g + (255 - g) * amount)
+        b = int(b + (255 - b) * amount)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _apply_key_color(self, key_index, color):
+        """Set a touch key's RGB backlight from a hex color (thread-safe)."""
+        r, g, b = self._hex_to_rgb(color)
+        try:
+            with self.deck:
+                self.deck.set_key_color(key_index, r, g, b)
+        except Exception as e:
+            self.api.log(f"Error setting key {key_index} color: {e}", level="debug")
 
     def _apply_press_highlight(self, image):
         """Return a lightened, inset-bordered variant of a button image.
@@ -1609,6 +1739,17 @@ class StreamDeckPlugin:
                         self._touch_strip_keys.add(adjust["key"])
         watch_keys |= self._touch_strip_keys
 
+        # Info-strip key (tracked separately — a change re-renders the strip)
+        self._info_strip_keys = set()
+        info_strip = self.api.config.get("info_strip")
+        if (
+            isinstance(info_strip, dict)
+            and info_strip.get("source", "state") == "state"
+            and info_strip.get("key")
+        ):
+            self._info_strip_keys.add(info_strip["key"])
+        watch_keys |= self._info_strip_keys
+
         for key in watch_keys:
             sub_id = await self.api.state_subscribe(key, self._on_state_change)
             self._feedback_subs.append(sub_id)
@@ -1629,6 +1770,10 @@ class StreamDeckPlugin:
         # Touchscreen strip shows live values — re-render it on change
         if key in self._touch_strip_keys:
             await self._render_touchscreen()
+
+        # Info strip shows a live value — re-render it on change
+        if key in self._info_strip_keys:
+            await self._render_info_strip()
 
         # Re-render buttons on the current page that depend on this key
         buttons = self.api.config.get("buttons", [])
@@ -1669,6 +1814,7 @@ class StreamDeckPlugin:
 
         self.api.log("Identifying Stream Deck (flashing all buttons)")
         key_count = self.deck.key_count()
+        touch_keys = range(key_count, key_count + self.deck.touch_key_count())
 
         # Flash white
         white_img = self._create_button_image("", "#ffffff", "#ffffff")
@@ -1678,11 +1824,15 @@ class StreamDeckPlugin:
             with self.deck:
                 for k in range(key_count):
                     self.deck.set_key_image(k, native_white)
+            for k in touch_keys:
+                self._apply_key_color(k, "#ffffff")
             await asyncio.sleep(0.3)
 
             with self.deck:
                 for k in range(key_count):
                     self.deck.set_key_image(k, b"\x00" * len(native_white))
+            for k in touch_keys:
+                self._apply_key_color(k, "#000000")
             await asyncio.sleep(0.3)
 
         # Restore current page

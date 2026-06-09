@@ -82,6 +82,12 @@ Dials keep their assignment on every button page.
 
 By default the touch strip shows one zone per dial with the dial's label and the live value of its adjusted variable -- no setup needed. To take over the strip, add custom zones in the **Touchscreen** section below the grid. Each zone can show a label (static or from a state key), a live state value, custom colors, and run actions when tapped. Zones split the strip evenly, or set explicit pixel positions.
 
+### Touch Keys and Info Screen (Neo)
+
+The Neo's two side touch keys appear below the button grid in the Surface Configurator. They work like regular buttons (press actions, modes, feedback, visibility, per-page assignment) but have no display -- each key glows with its background color, and feedback colors override it when active.
+
+The small info screen between the touch keys is configured in the **Info Screen** section: show a live state value (with an optional heading) or static text. State-driven values refresh automatically.
+
 ### Automatic Paging
 
 Below the button grid, the **Automatic Paging** section switches the deck to a page automatically when state changes. Add a rule, choose the target page, and set the condition (same operators as visibility, with AND / OR). Rules are checked top to bottom and the first match wins, so list the most specific conditions first. Reorder rules with the up/down arrows.
@@ -103,6 +109,7 @@ Example: switch to the full controls page when the projector turns on, and back 
 | `plugin.streamdeck.dial_count` | integer | Number of dials (Stream Deck +) |
 | `plugin.streamdeck.touch_key_count` | integer | Number of side touch keys (Neo) |
 | `plugin.streamdeck.has_touchscreen` | boolean | Whether the deck has a touchscreen strip (Stream Deck +) |
+| `plugin.streamdeck.has_info_screen` | boolean | Whether the deck has a secondary info screen (Neo) |
 | `plugin.streamdeck.current_page` | integer | Currently active page number |
 
 The hardware layout is detected when a deck connects, so the Surface Configurator always shows the deck that's actually plugged in. While no deck is connected it shows the default layout.
