@@ -269,7 +269,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -335,12 +335,6 @@ class StreamDeckPlugin:
             "label": "Default Button Color",
             "description": "Background color for buttons without a custom icon (hex).",
             "default": "#1a1a2e",
-        },
-        "active_color": {
-            "type": "string",
-            "label": "Active State Color",
-            "description": "Background color when a button's feedback key is active (hex).",
-            "default": "#0f3460",
         },
         "text_color": {
             "type": "string",
@@ -605,11 +599,6 @@ class StreamDeckPlugin:
         # Get press binding (UI stores press as an array of actions)
         bindings = assignment.get("bindings", {})
         press = _unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
-        feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
-
-        # Backward compat
-        if not press and assignment.get("macro_id"):
-            press = {"action": "macro", "macro": assignment["macro_id"]}
 
         if not press or not isinstance(press, dict):
             return
@@ -795,17 +784,8 @@ class StreamDeckPlugin:
                     elif not t_active and off_lbl:
                         label = off_lbl
 
-            # Read feedback from bindings (new) or legacy feedback_key
+            # Read feedback config from bindings
             feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
-
-            # Backward compat
-            if not feedback and assignment.get("feedback_key"):
-                feedback = {
-                    "source": "state", "key": assignment["feedback_key"],
-                    "condition": {"equals": True},
-                    "style_active": {"bg_color": self.api.config.get("active_color", "#0f3460")},
-                    "style_inactive": {},
-                }
 
             if feedback and isinstance(feedback, dict):
                 fk = feedback.get("key", "")
@@ -1117,10 +1097,6 @@ class StreamDeckPlugin:
                     watch_keys.add(press["toggle_key"])
                 # Visibility condition keys
                 watch_keys.update(_condition_state_keys(bindings.get("visible_when")))
-            # Legacy format
-            fk = btn.get("feedback_key")
-            if fk:
-                watch_keys.add(fk)
 
         # Auto-page rule keys (tracked separately — only these drive paging)
         auto_page = self.api.config.get("auto_page", [])
@@ -1166,9 +1142,6 @@ class StreamDeckPlugin:
                     matched = True
                 if not matched and key in _condition_state_keys(bindings.get("visible_when")):
                     matched = True
-            # Legacy
-            if not matched and btn.get("feedback_key") == key:
-                matched = True
 
             if matched:
                 key_index = btn.get("index")

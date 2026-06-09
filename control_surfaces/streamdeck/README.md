@@ -30,7 +30,6 @@ Use any Elgato Stream Deck as a physical control surface for OpenAVC. Assign mac
 |---------|------|---------|-------------|
 | Button Brightness | Integer | 70 | Screen brightness (0-100) |
 | Default Button Color | String | `#1a1a2e` | Background color for unassigned buttons |
-| Active State Color | String | `#0f3460` | Background color when feedback key is active |
 | Text Color | String | `#e0e0e0` | Button label text color |
 
 ## Configuring Buttons

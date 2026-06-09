@@ -316,7 +316,7 @@ async def test_subscriptions_collect_all_key_sources():
                     "visible_when": {"key": "device.a.online", "operator": "truthy"},
                 },
             },
-            {"index": 1, "page": 0, "feedback_key": "var.legacy"},
+            {"index": 1, "page": 0, "bindings": {"feedback": {"key": "var.status"}}},
         ],
         "auto_page": [
             {"page": 1, "when": {"any": [{"key": "device.b.power"}, {"key": "device.c.power"}]}},
@@ -329,7 +329,7 @@ async def test_subscriptions_collect_all_key_sources():
     assert plugin._auto_page_keys == {"device.b.power", "device.c.power"}
 
     # One subscription per unique watched key:
-    # feedback, toggle_key, visible_when, legacy feedback_key, 2 auto_page keys = 6
+    # feedback, toggle_key, visible_when, second feedback, 2 auto_page keys = 6
     assert len(plugin._feedback_subs) == 6
 
 
