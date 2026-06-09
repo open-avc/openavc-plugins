@@ -575,6 +575,15 @@ class _FakeDeck:
     def key_layout(self):
         return (1, 3)
 
+    def dial_count(self):
+        return 0
+
+    def touch_key_count(self):
+        return 0
+
+    def is_touch(self):
+        return False
+
     def set_brightness(self, b):
         self.brightness = b
 
@@ -638,6 +647,53 @@ async def test_watchdog_recovers_after_unplug(monkeypatch):
     assert plugin.deck is deck2
     assert state.get("plugin.streamdeck.connected") is True
     assert state.get("plugin.streamdeck.serial") == "XYZ789"
+
+
+# ──── Hardware detection: geometry published to state ────
+
+
+@pytest.mark.asyncio
+async def test_open_deck_publishes_detected_geometry(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([_FakeDeck()]))
+    await plugin._watchdog()
+    assert state.get("plugin.streamdeck.rows") == 1
+    assert state.get("plugin.streamdeck.columns") == 3
+    assert state.get("plugin.streamdeck.key_count") == 3
+    assert state.get("plugin.streamdeck.dial_count") == 0
+    assert state.get("plugin.streamdeck.touch_key_count") == 0
+    assert state.get("plugin.streamdeck.has_touchscreen") is False
+
+
+class _FakePlusDeck(_FakeDeck):
+    """Plus-shaped fake: 4x2 LCD keys, 4 dials, a touchscreen, no extras."""
+
+    def deck_type(self):
+        return "Stream Deck +"
+
+    def key_count(self):
+        return 8
+
+    def key_layout(self):
+        return (2, 4)
+
+    def dial_count(self):
+        return 4
+
+    def is_touch(self):
+        return True
+
+
+@pytest.mark.asyncio
+async def test_open_deck_publishes_dials_and_touchscreen(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([_FakePlusDeck()]))
+    await plugin._watchdog()
+    assert state.get("plugin.streamdeck.model") == "Stream Deck +"
+    assert state.get("plugin.streamdeck.rows") == 2
+    assert state.get("plugin.streamdeck.columns") == 4
+    assert state.get("plugin.streamdeck.dial_count") == 4
+    assert state.get("plugin.streamdeck.has_touchscreen") is True
 
 
 @pytest.mark.asyncio

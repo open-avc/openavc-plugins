@@ -83,7 +83,14 @@ Example: switch to the full controls page when the projector turns on, and back 
 | `plugin.streamdeck.model` | string | Connected model name |
 | `plugin.streamdeck.serial` | string | Device serial number |
 | `plugin.streamdeck.key_count` | integer | Number of keys on the connected deck |
+| `plugin.streamdeck.rows` | integer | Key rows on the connected deck |
+| `plugin.streamdeck.columns` | integer | Key columns on the connected deck |
+| `plugin.streamdeck.dial_count` | integer | Number of dials (Stream Deck +) |
+| `plugin.streamdeck.touch_key_count` | integer | Number of side touch keys (Neo) |
+| `plugin.streamdeck.has_touchscreen` | boolean | Whether the deck has a touchscreen strip (Stream Deck +) |
 | `plugin.streamdeck.current_page` | integer | Currently active page number |
+
+The hardware layout is detected when a deck connects, so the Surface Configurator always shows the deck that's actually plugged in. While no deck is connected it shows the default layout.
 
 ## Events
 

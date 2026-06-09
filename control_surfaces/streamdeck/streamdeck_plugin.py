@@ -68,75 +68,6 @@ def _patch_hidapi_search():
     LibUSBHIDAPI.Library._load_hidapi_library = _extended_load
 
 
-# ──── Model Definitions ────
-
-DECK_MODELS = {
-    "Stream Deck Neo": {
-        "layout_type": "grid",
-        "rows": 2,
-        "columns": 4,
-        "key_size_px": 72,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck Mini": {
-        "layout_type": "grid",
-        "rows": 2,
-        "columns": 3,
-        "key_size_px": 80,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck Mini MK.2": {
-        "layout_type": "grid",
-        "rows": 2,
-        "columns": 3,
-        "key_size_px": 80,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck Original": {
-        "layout_type": "grid",
-        "rows": 3,
-        "columns": 5,
-        "key_size_px": 72,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck Original V2": {
-        "layout_type": "grid",
-        "rows": 3,
-        "columns": 5,
-        "key_size_px": 72,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck MK.2": {
-        "layout_type": "grid",
-        "rows": 3,
-        "columns": 5,
-        "key_size_px": 72,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck XL": {
-        "layout_type": "grid",
-        "rows": 4,
-        "columns": 8,
-        "key_size_px": 96,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck XL V2": {
-        "layout_type": "grid",
-        "rows": 4,
-        "columns": 8,
-        "key_size_px": 96,
-        "key_spacing_px": 4,
-    },
-    "Stream Deck Pedal": {
-        "layout_type": "grid",
-        "rows": 1,
-        "columns": 3,
-        "key_size_px": 0,
-        "key_spacing_px": 0,
-    },
-}
-
-
 def _unwrap_binding(value):
     """Unwrap a binding value that may be a single dict or an array of dicts.
 
@@ -269,7 +200,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.7.0",
+        "version": "1.8.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -362,8 +293,15 @@ class StreamDeckPlugin:
     }
 
     AI_GUIDE = (
-        "The default SURFACE_LAYOUT is for the Neo (2x4). The actual layout is "
-        "detected from hardware at runtime. Button indices go left-to-right, "
+        "The default SURFACE_LAYOUT is for the Neo (2x4). The actual hardware "
+        "is detected at runtime and published to state: plugin.streamdeck.model, "
+        "rows, columns, key_count, dial_count, touch_key_count, and "
+        "has_touchscreen. Read these keys to learn what the connected deck "
+        "offers before configuring it — dials and a touchscreen exist only on "
+        "the Stream Deck + (dial_count 4, has_touchscreen true), and side touch "
+        "keys only on the Neo (touch_key_count 2). When connected is false, no "
+        "deck is attached and the geometry keys are stale or zero. "
+        "Button indices go left-to-right, "
         "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
         "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
         "A button's 'press' is an array of one or more actions, run in order. "
@@ -479,12 +417,19 @@ class StreamDeckPlugin:
         # Load the bundled text font for legible labels on every platform
         self._load_text_font()
 
-        # Set initial state
+        # Set initial state (geometry keys are filled in by _open_deck once a
+        # deck is detected; the Surface Configurator falls back to the static
+        # SURFACE_LAYOUT while connected is false)
         await self.api.state_set("connected", False)
         await self.api.state_set("model", "")
         await self.api.state_set("serial", "")
         await self.api.state_set("current_page", 0)
         await self.api.state_set("key_count", 0)
+        await self.api.state_set("rows", 0)
+        await self.api.state_set("columns", 0)
+        await self.api.state_set("dial_count", 0)
+        await self.api.state_set("touch_key_count", 0)
+        await self.api.state_set("has_touchscreen", False)
 
         # Validate HIDAPI is loadable now, so a missing native library fails
         # the plugin with a clear message instead of silently looping in the
@@ -537,6 +482,14 @@ class StreamDeckPlugin:
         serial = deck.get_serial_number() or "unknown"
         key_count = deck.key_count()
 
+        # Geometry comes from the live hardware, not a static model table, so
+        # any deck the library enumerates renders correctly — including models
+        # added after this plugin was written.
+        rows, columns = deck.key_layout()
+        dial_count = deck.dial_count()
+        touch_key_count = deck.touch_key_count()
+        has_touchscreen = deck.is_touch()
+
         self.deck = deck
         self._model_info = model
 
@@ -547,15 +500,27 @@ class StreamDeckPlugin:
         # Set up key callback (async variant — fires on our event loop)
         deck.set_key_callback_async(self._on_key_change, loop=self._loop)
 
-        # Update state
+        # Publish the detected hardware to state. The Surface Configurator
+        # prefers these keys over the static SURFACE_LAYOUT while connected,
+        # so the editor always draws the surface that's actually plugged in.
         await self.api.state_set("connected", True)
         await self.api.state_set("model", model)
         await self.api.state_set("serial", serial)
         await self.api.state_set("key_count", key_count)
+        await self.api.state_set("rows", rows)
+        await self.api.state_set("columns", columns)
+        await self.api.state_set("dial_count", dial_count)
+        await self.api.state_set("touch_key_count", touch_key_count)
+        await self.api.state_set("has_touchscreen", has_touchscreen)
         await self.api.state_set("current_page", 0)
         self.current_page = 0
 
-        self.api.log(f"Connected to {model} (S/N: {serial}, {key_count} keys)")
+        self.api.log(
+            f"Connected to {model} (S/N: {serial}, {key_count} keys, "
+            f"{rows}x{columns}, {dial_count} dials"
+            f"{', touchscreen' if has_touchscreen else ''}"
+            f"{f', {touch_key_count} touch keys' if touch_key_count else ''})"
+        )
         await self.api.event_emit("connected", {"model": model, "serial": serial})
 
         # Subscribe to state changes for feedback, visibility, and auto-page keys
