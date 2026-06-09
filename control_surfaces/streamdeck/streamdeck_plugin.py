@@ -200,7 +200,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.8.0",
+        "version": "1.9.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -325,7 +325,26 @@ class StreamDeckPlugin:
         "To switch pages automatically, add a top-level 'auto_page' array to "
         "the config (alongside 'buttons'): each entry is {\"page\": N, \"when\": "
         "{condition}} using the same operator schema. Rules are evaluated in "
-        "order and the first match wins, so put more specific conditions first."
+        "order and the first match wins, so put more specific conditions first. "
+        "When dial_count > 0, a top-level 'dials' array configures the rotary "
+        "encoders (not paged — dials keep their assignment on every page): "
+        "{\"index\": 0, \"label\": \"Volume\", \"adjust\": {\"key\": "
+        "\"var.volume\", \"step\": 2, \"min\": 0, \"max\": 100}, \"cw\": "
+        "[actions], \"ccw\": [actions], \"press\": [actions]}. 'adjust' "
+        "increments the key by step per detent turned (clamped to min/max) — "
+        "ideal for volume, mic gain, or camera pan/tilt speed; the key must be "
+        "a var.* variable or this plugin's own state, and a macro/trigger can "
+        "watch it to drive the device. 'cw'/'ccw' actions run on each "
+        "clockwise/counter-clockwise turn event, 'press' on dial push; all use "
+        "the same action format as button press arrays. "
+        "When has_touchscreen is true, the touch strip shows one zone per dial "
+        "by default (the dial's label and live adjust value — no config "
+        "needed). To customize, set a top-level 'touchscreen' object: "
+        "{\"zones\": [{\"label\": \"Mics\", \"value_source\": \"var.mic_gain\", "
+        "\"label_source\": \"(optional state key)\", \"touch\": [actions], "
+        "\"bg_color\": \"#1a1a2e\", \"text_color\": \"#e0e0e0\"}]}. Zones "
+        "split the strip evenly (or set explicit 'x'/'w' pixel bounds, strip "
+        "is 800x100); 'touch' actions run when the zone is tapped."
     )
 
     EXTENSIONS = {
@@ -383,6 +402,7 @@ class StreamDeckPlugin:
         self.current_page = 0
         self._feedback_subs = []
         self._auto_page_keys = set()   # state keys watched by auto_page rules
+        self._touch_strip_keys = set()  # state keys shown on the touchscreen strip
         self._loop = None
         self._model_info = None
         self._opening = False    # re-entrancy guard while a deck is being opened
@@ -500,6 +520,14 @@ class StreamDeckPlugin:
         # Set up key callback (async variant — fires on our event loop)
         deck.set_key_callback_async(self._on_key_change, loop=self._loop)
 
+        # Wire dials and the touchscreen when the hardware has them
+        if dial_count > 0:
+            deck.set_dial_callback_async(self._on_dial_event, loop=self._loop)
+        if has_touchscreen:
+            deck.set_touchscreen_callback_async(
+                self._on_touchscreen_event, loop=self._loop
+            )
+
         # Publish the detected hardware to state. The Surface Configurator
         # prefers these keys over the static SURFACE_LAYOUT while connected,
         # so the editor always draws the surface that's actually plugged in.
@@ -533,8 +561,9 @@ class StreamDeckPlugin:
             self.current_page = initial_page
             await self.api.state_set("current_page", initial_page)
 
-        # Render all buttons for the current page
+        # Render all buttons for the current page, then the touchscreen strip
         await self._render_all_buttons()
+        await self._render_touchscreen()
 
     async def _watchdog(self):
         """Keep a deck connected: open one if present, recover after unplug.
@@ -671,7 +700,7 @@ class StreamDeckPlugin:
                 # first iteration fires the action almost immediately.
                 interval = press.get("hold_repeat_ms", 200) / 1000.0
                 self._hold_tasks[key_index] = self.api.create_periodic_task(
-                    lambda: self._execute_action(press, key_index),
+                    lambda: self._execute_action(press, f"key {key_index}"),
                     interval_seconds=interval,
                     name=f"hold_repeat_{key_index}",
                 )
@@ -697,9 +726,9 @@ class StreamDeckPlugin:
                     is_active = bool(value)
 
             if is_active and off_action and isinstance(off_action, dict):
-                await self._execute_action(off_action, key_index)
+                await self._execute_action(off_action, f"key {key_index}")
             else:
-                await self._execute_action(press, key_index)
+                await self._execute_action(press, f"key {key_index}")
 
             # Update button label if on_label/off_label configured
             on_label = press.get("on_label", "")
@@ -723,14 +752,14 @@ class StreamDeckPlugin:
                 press_time = self._press_times.pop(key_index)
                 held = asyncio.get_event_loop().time() - press_time
                 if held >= threshold and hold_action and isinstance(hold_action, dict):
-                    await self._execute_action(hold_action, key_index)
+                    await self._execute_action(hold_action, f"key {key_index}")
                 else:
-                    await self._execute_action(press, key_index)
+                    await self._execute_action(press, f"key {key_index}")
             return
 
         # Default: tap mode — fire every configured action in order, on press
         if pressed:
-            await self._execute_actions(press_actions, key_index)
+            await self._execute_actions(press_actions, f"key {key_index}")
 
     @staticmethod
     def _press_actions(bindings):
@@ -749,18 +778,19 @@ class StreamDeckPlugin:
             return [press]
         return []
 
-    async def _execute_actions(self, actions, key_index):
+    async def _execute_actions(self, actions, source):
         """Execute a list of action bindings sequentially, in order."""
         for action in actions:
             if isinstance(action, dict):
-                await self._execute_action(action, key_index)
+                await self._execute_action(action, source)
 
-    async def _execute_action(self, action_binding, key_index):
+    async def _execute_action(self, action_binding, source):
         """Execute a single surface action binding.
 
         Supports the documented surface action set: ``macro``,
         ``device.command``, ``state.set`` (scoped like the panel plugin
         bridge), and ``navigate`` (deck page: next/previous or a page index).
+        ``source`` only labels log lines (e.g. ``key 3``, ``dial 0``).
         """
         action = action_binding.get("action", "")
 
@@ -782,7 +812,7 @@ class StreamDeckPlugin:
             if macro:
                 try:
                     await self.api.macro_execute(macro)
-                    self.api.log(f"Executed macro '{macro}' from key {key_index}", level="debug")
+                    self.api.log(f"Executed macro '{macro}' from {source}", level="debug")
                 except Exception as e:
                     self.api.log(f"Error executing macro '{macro}': {e}", level="error")
 
@@ -793,7 +823,7 @@ class StreamDeckPlugin:
             if device and command:
                 try:
                     await self.api.device_command(device, command, params if isinstance(params, dict) else None)
-                    self.api.log(f"Sent {command} to {device} from key {key_index}", level="debug")
+                    self.api.log(f"Sent {command} to {device} from {source}", level="debug")
                 except Exception as e:
                     self.api.log(f"Error sending command: {e}", level="error")
 
@@ -824,6 +854,224 @@ class StreamDeckPlugin:
                 f"its own {prefix}* state or a var.* user variable.",
                 level="warning",
             )
+
+    # ──── Dials (decks with rotary encoders) ────
+
+    @staticmethod
+    def _action_list(value):
+        """Normalize an action binding (single dict or list of dicts) to a list."""
+        if isinstance(value, list):
+            return [a for a in value if isinstance(a, dict)]
+        if isinstance(value, dict):
+            return [value]
+        return []
+
+    def _get_dial_config(self, index):
+        """Look up the dial config entry for a dial index."""
+        dials = self.api.config.get("dials", [])
+        if not isinstance(dials, list):
+            return None
+        for dial in dials:
+            if isinstance(dial, dict) and dial.get("index") == index:
+                return dial
+        return None
+
+    async def _on_dial_event(self, deck, dial, event, value):
+        """Handle a dial turn or push.
+
+        Event kinds are matched by enum name (``TURN``/``PUSH``) so this
+        module never needs the StreamDeck enums at import time (they only
+        exist after the lazy import, and tests run without the library).
+        """
+        kind = getattr(event, "name", None)
+        cfg = self._get_dial_config(dial)
+
+        if kind == "PUSH":
+            if not value:
+                return  # release
+            await self.api.event_emit("dial.press", {"dial": dial})
+            if cfg:
+                await self._execute_actions(
+                    self._action_list(cfg.get("press")), f"dial {dial}"
+                )
+            return
+
+        if kind == "TURN":
+            try:
+                detents = int(value)
+            except (TypeError, ValueError):
+                return
+            if detents == 0:
+                return
+            await self.api.event_emit("dial.turn", {"dial": dial, "amount": detents})
+            if not cfg:
+                return
+            adjust = cfg.get("adjust")
+            if isinstance(adjust, dict) and adjust.get("key"):
+                await self._apply_dial_adjust(adjust, detents)
+            actions = cfg.get("cw") if detents > 0 else cfg.get("ccw")
+            await self._execute_actions(self._action_list(actions), f"dial {dial}")
+
+    async def _apply_dial_adjust(self, adjust, detents):
+        """Increment a numeric state value by ``step * detents``, clamped.
+
+        The turn magnitude (detents moved since the last event) scales the
+        step, so spinning a dial fast moves the value proportionally faster.
+        Writes go through the same scope rule as state.set actions (own
+        ``plugin.<id>.*`` state or ``var.*`` user variables only).
+        """
+        key = adjust.get("key", "")
+        step = _coerce_numeric(adjust.get("step"))
+        if step is None:
+            step = 1
+        minimum = _coerce_numeric(adjust.get("min"))
+        maximum = _coerce_numeric(adjust.get("max"))
+
+        current = _coerce_numeric(await self.api.state_get(key))
+        if current is None:
+            current = minimum if minimum is not None else 0
+
+        new_value = current + step * detents
+        if minimum is not None:
+            new_value = max(minimum, new_value)
+        if maximum is not None:
+            new_value = min(maximum, new_value)
+        if float(new_value).is_integer():
+            new_value = int(new_value)
+        await self._apply_state_set(key, new_value)
+
+    # ──── Touchscreen strip (decks with a touch strip) ────
+
+    def _touch_zones(self):
+        """Return the effective touchscreen zones with resolved pixel bounds.
+
+        Explicit ``touchscreen.zones`` config wins; zones missing ``x``/``w``
+        are laid out by splitting the strip evenly. With no zones configured,
+        one zone is created per dial (aligned under it) showing the dial's
+        label and its adjust value — so a configured dial gets a live readout
+        with zero extra config.
+        """
+        if not self.deck:
+            return []
+        try:
+            width = self.deck.touchscreen_image_format()["size"][0]
+        except Exception:
+            width = 800
+
+        ts = self.api.config.get("touchscreen", {})
+        zones = ts.get("zones") if isinstance(ts, dict) else None
+        zones = [z for z in zones if isinstance(z, dict)] if isinstance(zones, list) else []
+
+        if not zones:
+            for i in range(self.deck.dial_count()):
+                cfg = self._get_dial_config(i) or {}
+                adjust = cfg.get("adjust")
+                adjust = adjust if isinstance(adjust, dict) else {}
+                zones.append({
+                    "label": cfg.get("label", ""),
+                    "value_source": adjust.get("key", ""),
+                })
+
+        if not zones:
+            return []
+
+        slot = width // len(zones)
+        resolved = []
+        for i, zone in enumerate(zones):
+            x = zone.get("x")
+            w = zone.get("w")
+            x = int(x) if isinstance(x, (int, float)) else i * slot
+            w = int(w) if isinstance(w, (int, float)) else slot
+            resolved.append({**zone, "x": x, "w": w})
+        return resolved
+
+    def _zone_at(self, x):
+        """Return the touchscreen zone containing pixel ``x``, or None."""
+        for zone in self._touch_zones():
+            if zone["x"] <= x < zone["x"] + zone["w"]:
+                return zone
+        return None
+
+    async def _on_touchscreen_event(self, deck, event, value):
+        """Handle a touchscreen tap: map the x position to a zone's actions."""
+        kind = getattr(event, "name", None)
+        if kind not in ("SHORT", "LONG"):
+            return  # DRAG is unused
+        x = value.get("x") if isinstance(value, dict) else None
+        if not isinstance(x, (int, float)):
+            return
+        await self.api.event_emit("touchscreen.touch", {"x": int(x)})
+        zone = self._zone_at(int(x))
+        if zone:
+            await self._execute_actions(
+                self._action_list(zone.get("touch")), "touchscreen"
+            )
+
+    async def _render_touchscreen(self):
+        """Render the touchscreen strip: one cell per zone (label + value)."""
+        if not self.deck or not self.deck.is_visual() or not self.deck.is_touch():
+            return
+        try:
+            width, height = self.deck.touchscreen_image_format()["size"]
+        except Exception:
+            return
+        zones = self._touch_zones()
+
+        bg = self.api.config.get("button_color", "#1a1a2e")
+        fg = self.api.config.get("text_color", "#e0e0e0")
+        img = Image.new("RGB", (width, height), bg)
+        draw = ImageDraw.Draw(img)
+
+        for zone in zones:
+            zx, zw = zone["x"], zone["w"]
+
+            label = zone.get("label", "")
+            label_source = zone.get("label_source", "")
+            if label_source:
+                live_label = await self.api.state_get(label_source)
+                if live_label is not None:
+                    label = str(live_label)
+
+            value_text = ""
+            value_source = zone.get("value_source", "")
+            if value_source:
+                live_value = await self.api.state_get(value_source)
+                if live_value is not None:
+                    value_text = str(live_value)
+
+            zone_fg = zone.get("text_color") or fg
+            if zone.get("bg_color"):
+                draw.rectangle(
+                    [zx, 0, zx + zw - 1, height - 1], fill=zone["bg_color"]
+                )
+
+            if label and value_text:
+                self._paste_label(
+                    img, label, zone_fg,
+                    (zx + 4, 4, zw - 8, height // 3),
+                    max_font=16, max_lines=1,
+                )
+                self._paste_label(
+                    img, value_text, zone_fg,
+                    (zx + 4, height // 3 + 4, zw - 8, height - height // 3 - 8),
+                    max_font=30, max_lines=1,
+                )
+            elif label or value_text:
+                self._paste_label(
+                    img, label or value_text, zone_fg,
+                    (zx + 4, 4, zw - 8, height - 8),
+                    max_font=24, max_lines=2,
+                )
+
+            if zx > 0:
+                draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)
+
+        try:
+            native = PILHelper.to_native_touchscreen_format(self.deck, img)
+            with self.deck:
+                self.deck.set_touchscreen_image(native, 0, 0, width, height)
+        except Exception as e:
+            self.api.log(f"Error setting touchscreen image: {e}", level="debug")
 
     # ──── Page Navigation ────
 
@@ -1340,6 +1588,27 @@ class StreamDeckPlugin:
                     self._auto_page_keys.update(_condition_state_keys(rule.get("when")))
         watch_keys |= self._auto_page_keys
 
+        # Touchscreen strip keys (tracked separately — a change re-renders the
+        # strip): explicit zone label/value sources, plus every dial adjust key
+        # since the default zones display those values.
+        self._touch_strip_keys = set()
+        touchscreen = self.api.config.get("touchscreen", {})
+        zones = touchscreen.get("zones") if isinstance(touchscreen, dict) else None
+        if isinstance(zones, list):
+            for zone in zones:
+                if isinstance(zone, dict):
+                    for field in ("label_source", "value_source"):
+                        if zone.get(field):
+                            self._touch_strip_keys.add(zone[field])
+        dials = self.api.config.get("dials", [])
+        if isinstance(dials, list):
+            for dial in dials:
+                if isinstance(dial, dict):
+                    adjust = dial.get("adjust")
+                    if isinstance(adjust, dict) and adjust.get("key"):
+                        self._touch_strip_keys.add(adjust["key"])
+        watch_keys |= self._touch_strip_keys
+
         for key in watch_keys:
             sub_id = await self.api.state_subscribe(key, self._on_state_change)
             self._feedback_subs.append(sub_id)
@@ -1356,6 +1625,10 @@ class StreamDeckPlugin:
             if target is not None and target != self.current_page:
                 await self._change_page(target)
                 return  # _change_page re-rendered the whole new page
+
+        # Touchscreen strip shows live values — re-render it on change
+        if key in self._touch_strip_keys:
+            await self._render_touchscreen()
 
         # Re-render buttons on the current page that depend on this key
         buttons = self.api.config.get("buttons", [])

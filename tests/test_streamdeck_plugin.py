@@ -666,7 +666,16 @@ async def test_open_deck_publishes_detected_geometry(monkeypatch):
 
 
 class _FakePlusDeck(_FakeDeck):
-    """Plus-shaped fake: 4x2 LCD keys, 4 dials, a touchscreen, no extras."""
+    """Plus-shaped fake: 4x2 LCD keys, 4 dials, a touchscreen.
+
+    is_visual() stays False (from _FakeDeck) so render paths skip PIL;
+    the strip-render test uses _VisualPlusDeck below.
+    """
+
+    def __init__(self, serial="PLUS01"):
+        super().__init__(serial)
+        self.dial_cb = None
+        self.touch_cb = None
 
     def deck_type(self):
         return "Stream Deck +"
@@ -683,6 +692,15 @@ class _FakePlusDeck(_FakeDeck):
     def is_touch(self):
         return True
 
+    def touchscreen_image_format(self):
+        return {"size": (800, 100), "format": "JPEG"}
+
+    def set_dial_callback_async(self, cb, loop=None):
+        self.dial_cb = cb
+
+    def set_touchscreen_callback_async(self, cb, loop=None):
+        self.touch_cb = cb
+
 
 @pytest.mark.asyncio
 async def test_open_deck_publishes_dials_and_touchscreen(monkeypatch):
@@ -694,6 +712,283 @@ async def test_open_deck_publishes_dials_and_touchscreen(monkeypatch):
     assert state.get("plugin.streamdeck.columns") == 4
     assert state.get("plugin.streamdeck.dial_count") == 4
     assert state.get("plugin.streamdeck.has_touchscreen") is True
+
+
+@pytest.mark.asyncio
+async def test_open_deck_wires_dial_and_touch_callbacks(monkeypatch):
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plus = _FakePlusDeck()
+    basic = _FakeDeck()
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([plus]))
+    await plugin._watchdog()
+    assert plus.dial_cb is not None
+    assert plus.touch_cb is not None
+    # A deck without dials/touch never gets those callbacks registered
+    # (the basic fake has no setter methods, so wiring it would raise).
+    plugin2, _s2, _m2, _d2 = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([basic]))
+    await plugin2._watchdog()
+    assert plugin2.deck is basic
+
+
+# ──── Dials: turn / push routing, adjust clamping ────
+
+
+class _Evt:
+    """Stand-in for the library's DialEventType/TouchscreenEventType members
+    (the plugin matches events by their .name, never by enum identity)."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+TURN = _Evt("TURN")
+PUSH = _Evt("PUSH")
+TOUCH_SHORT = _Evt("SHORT")
+TOUCH_DRAG = _Evt("DRAG")
+
+
+@pytest.mark.asyncio
+async def test_dial_turn_routes_cw_and_ccw():
+    config = {"dials": [{
+        "index": 0,
+        "cw": [{"action": "macro", "macro": "vol_up"}],
+        "ccw": [{"action": "macro", "macro": "vol_down"}],
+    }]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    await plugin._on_dial_event(None, 0, TURN, 1)
+    assert macros.executed == ["vol_up"]
+    await plugin._on_dial_event(None, 0, TURN, -2)
+    assert macros.executed == ["vol_up", "vol_down"]
+
+
+@pytest.mark.asyncio
+async def test_dial_push_fires_press_only_on_press():
+    config = {"dials": [{
+        "index": 1,
+        "press": [{"action": "macro", "macro": "mute"}],
+    }]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    await plugin._on_dial_event(None, 1, PUSH, False)  # release
+    assert macros.executed == []
+    await plugin._on_dial_event(None, 1, PUSH, True)
+    assert macros.executed == ["mute"]
+
+
+@pytest.mark.asyncio
+async def test_dial_unconfigured_or_zero_turn_is_ignored():
+    plugin, _state, macros, _d = _make_plugin_with_recorders({})
+    await plugin._on_dial_event(None, 0, TURN, 3)
+    await plugin._on_dial_event(None, 0, PUSH, True)
+    await plugin._on_dial_event(None, 0, TURN, 0)
+    assert macros.executed == []
+
+
+@pytest.mark.asyncio
+async def test_dial_adjust_steps_and_clamps():
+    config = {"dials": [{
+        "index": 0,
+        "adjust": {"key": "var.volume", "step": 2, "min": 0, "max": 10},
+    }]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    state.set("var.volume", 8, source="test")
+
+    await plugin._on_dial_event(None, 0, TURN, 1)
+    assert state.get("var.volume") == 10
+
+    # Already at max — clamped
+    await plugin._on_dial_event(None, 0, TURN, 3)
+    assert state.get("var.volume") == 10
+
+    await plugin._on_dial_event(None, 0, TURN, -1)
+    assert state.get("var.volume") == 8
+
+    # Big CCW spin clamps at min
+    await plugin._on_dial_event(None, 0, TURN, -50)
+    assert state.get("var.volume") == 0
+
+
+@pytest.mark.asyncio
+async def test_dial_adjust_turn_magnitude_scales_step():
+    config = {"dials": [{
+        "index": 0,
+        "adjust": {"key": "var.level", "step": 1},
+    }]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    state.set("var.level", 0, source="test")
+    # 5 detents in one event (fast spin) moves 5 steps.
+    await plugin._on_dial_event(None, 0, TURN, 5)
+    assert state.get("var.level") == 5
+
+
+@pytest.mark.asyncio
+async def test_dial_adjust_unset_value_starts_at_min():
+    config = {"dials": [{
+        "index": 0,
+        "adjust": {"key": "var.fresh", "step": 1, "min": 20, "max": 30},
+    }]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    await plugin._on_dial_event(None, 0, TURN, 1)
+    assert state.get("var.fresh") == 21
+
+
+@pytest.mark.asyncio
+async def test_dial_adjust_respects_state_scope_rule():
+    config = {"dials": [{
+        "index": 0,
+        "adjust": {"key": "device.proj.volume", "step": 1},
+    }]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    await plugin._on_dial_event(None, 0, TURN, 1)
+    # Foreign namespace write is dropped with a warning, like state.set.
+    assert state.get("device.proj.volume") is None
+    assert any(e["level"] == "warning" for e in plugin._test_logs)
+
+
+@pytest.mark.asyncio
+async def test_dial_adjust_float_step():
+    config = {"dials": [{
+        "index": 0,
+        "adjust": {"key": "var.gain", "step": 0.5},
+    }]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    state.set("var.gain", 0, source="test")
+    await plugin._on_dial_event(None, 0, TURN, 1)
+    assert state.get("var.gain") == 0.5
+    await plugin._on_dial_event(None, 0, TURN, 1)
+    # Whole numbers come back as ints so state stays clean.
+    assert state.get("var.gain") == 1
+
+
+# ──── Touchscreen: zones, hit-testing, touch routing ────
+
+
+@pytest.mark.asyncio
+async def test_default_zones_follow_dials():
+    config = {"dials": [
+        {"index": 0, "label": "Volume", "adjust": {"key": "var.volume"}},
+        {"index": 2, "label": "Mics", "adjust": {"key": "var.mic_gain"}},
+    ]}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakePlusDeck()
+    zones = plugin._touch_zones()
+    # One zone per dial (the Plus has 4), evenly split across 800px.
+    assert len(zones) == 4
+    assert [z["x"] for z in zones] == [0, 200, 400, 600]
+    assert all(z["w"] == 200 for z in zones)
+    assert zones[0]["label"] == "Volume"
+    assert zones[0]["value_source"] == "var.volume"
+    assert zones[2]["label"] == "Mics"
+    assert zones[1]["label"] == ""  # unconfigured dial -> empty zone
+
+
+@pytest.mark.asyncio
+async def test_explicit_zones_override_and_even_split():
+    config = {"touchscreen": {"zones": [
+        {"label": "A"}, {"label": "B"}, {"label": "C"},
+    ]}}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakePlusDeck()
+    zones = plugin._touch_zones()
+    assert len(zones) == 3
+    assert [z["x"] for z in zones] == [0, 266, 532]
+    # Explicit pixel bounds win over the even split.
+    config2 = {"touchscreen": {"zones": [
+        {"label": "Wide", "x": 0, "w": 600}, {"label": "Narrow", "x": 600, "w": 200},
+    ]}}
+    plugin2, _s2, _m2, _d2 = _make_plugin_with_recorders(config2)
+    plugin2.deck = _FakePlusDeck()
+    zones2 = plugin2._touch_zones()
+    assert zones2[0]["w"] == 600
+    assert zones2[1]["x"] == 600
+
+
+@pytest.mark.asyncio
+async def test_zone_hit_testing():
+    config = {"touchscreen": {"zones": [
+        {"label": "A"}, {"label": "B"}, {"label": "C"}, {"label": "D"},
+    ]}}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakePlusDeck()
+    assert plugin._zone_at(0)["label"] == "A"
+    assert plugin._zone_at(199)["label"] == "A"
+    assert plugin._zone_at(200)["label"] == "B"
+    assert plugin._zone_at(750)["label"] == "D"
+    assert plugin._zone_at(9999) is None
+
+
+@pytest.mark.asyncio
+async def test_touch_event_runs_zone_actions():
+    config = {"touchscreen": {"zones": [
+        {"label": "A", "touch": [{"action": "macro", "macro": "zone_a"}]},
+        {"label": "B", "touch": [{"action": "macro", "macro": "zone_b"}]},
+    ]}}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakePlusDeck()
+    await plugin._on_touchscreen_event(None, TOUCH_SHORT, {"x": 500, "y": 50})
+    assert macros.executed == ["zone_b"]
+    # Drag events and malformed payloads are ignored.
+    await plugin._on_touchscreen_event(None, TOUCH_DRAG, {"x": 100, "y": 50})
+    await plugin._on_touchscreen_event(None, TOUCH_SHORT, "junk")
+    assert macros.executed == ["zone_b"]
+
+
+@pytest.mark.asyncio
+async def test_subscriptions_include_touch_strip_keys():
+    config = {
+        "dials": [{"index": 0, "adjust": {"key": "var.volume"}}],
+        "touchscreen": {"zones": [
+            {"label_source": "var.zone_label", "value_source": "var.mic_gain"},
+        ]},
+    }
+    plugin, _state = _make_plugin(config)
+    await plugin._setup_feedback_subscriptions()
+    assert plugin._touch_strip_keys == {"var.volume", "var.zone_label", "var.mic_gain"}
+    assert len(plugin._feedback_subs) == 3
+
+
+@pytest.mark.asyncio
+async def test_render_touchscreen_draws_zones(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+
+    sent = {}
+
+    class _FakePILHelper:
+        @staticmethod
+        def to_native_touchscreen_format(deck, img):
+            sent["size"] = img.size
+            return b"native-strip"
+
+    monkeypatch.setattr(sd_module, "PILHelper", _FakePILHelper)
+
+    class _VisualPlusDeck(_FakePlusDeck):
+        def is_visual(self):
+            return True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def set_touchscreen_image(self, image, x=0, y=0, w=0, h=0):
+            sent["image"] = image
+            sent["rect"] = (x, y, w, h)
+
+    config = {"dials": [{"index": 0, "label": "Volume", "adjust": {"key": "var.volume"}}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    state.set("var.volume", 42, source="test")
+    plugin.deck = _VisualPlusDeck()
+
+    await plugin._render_touchscreen()
+    assert sent["image"] == b"native-strip"
+    assert sent["size"] == (800, 100)
+    assert sent["rect"] == (0, 0, 800, 100)
 
 
 @pytest.mark.asyncio

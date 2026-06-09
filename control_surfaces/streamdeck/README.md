@@ -67,6 +67,21 @@ Each button can be hidden based on system state. In the assignment panel, open *
 
 Example: hide the source-select and volume buttons unless the projector is on (`device.projector_1.power` equals `on`).
 
+### Dials (Stream Deck +)
+
+When a deck with dials is connected, a dial row appears under the button grid in the Surface Configurator. Click a dial to configure it:
+
+- **Label** -- shown on the touchscreen under the dial
+- **Turning Adjusts a Value** -- pick a variable; each detent adds or subtracts the step, clamped to min/max. Spin fast and the value moves proportionally faster. Have a macro or trigger watch the variable to drive a device (volume, mic gain, camera pan speed).
+- **Clockwise / Counter-Clockwise Turn Actions** -- actions that run on each turn event in that direction
+- **Press Actions** -- actions that run when the dial is pushed
+
+Dials keep their assignment on every button page.
+
+### Touchscreen (Stream Deck +)
+
+By default the touch strip shows one zone per dial with the dial's label and the live value of its adjusted variable -- no setup needed. To take over the strip, add custom zones in the **Touchscreen** section below the grid. Each zone can show a label (static or from a state key), a live state value, custom colors, and run actions when tapped. Zones split the strip evenly, or set explicit pixel positions.
+
 ### Automatic Paging
 
 Below the button grid, the **Automatic Paging** section switches the deck to a page automatically when state changes. Add a rule, choose the target page, and set the condition (same operators as visibility, with AND / OR). Rules are checked top to bottom and the first match wins, so list the most specific conditions first. Reorder rules with the up/down arrows.
@@ -99,6 +114,9 @@ The hardware layout is detected when a deck connects, so the Surface Configurato
 | `plugin.streamdeck.connected` | `{model, serial}` | Deck connected |
 | `plugin.streamdeck.button.press` | `{key, page}` | Button pressed |
 | `plugin.streamdeck.button.release` | `{key, page}` | Button released |
+| `plugin.streamdeck.dial.turn` | `{dial, amount}` | Dial turned (amount is signed detents) |
+| `plugin.streamdeck.dial.press` | `{dial}` | Dial pushed |
+| `plugin.streamdeck.touchscreen.touch` | `{x}` | Touchscreen tapped |
 
 ## Context Actions
 
