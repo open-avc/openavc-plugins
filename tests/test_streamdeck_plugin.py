@@ -721,3 +721,57 @@ def test_wrap_greedy_packs_and_breaks(monkeypatch):
     assert plugin._wrap_greedy(draw, "", font, 60) == []
     wrapped = plugin._wrap_greedy(draw, "one two three four five six", font, 40)
     assert len(wrapped) >= 2
+
+
+# ──── Momentary press highlight ────
+
+
+@pytest.mark.asyncio
+async def test_press_highlight_marker_set_and_cleared():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "m"}]}}]}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    await plugin._on_key_change(None, 0, True)
+    assert 0 in plugin._pressed_keys
+    await plugin._on_key_change(None, 0, False)
+    assert 0 not in plugin._pressed_keys
+
+
+@pytest.mark.asyncio
+async def test_press_highlight_not_set_for_hidden_button():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {
+        "press": [{"action": "macro", "macro": "m"}],
+        "visible_when": {"key": "var.show", "operator": "truthy"},
+    }}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    state.set("var.show", "", source="test")  # hidden
+    await plugin._on_key_change(None, 0, True)
+    assert 0 not in plugin._pressed_keys
+
+
+@pytest.mark.asyncio
+async def test_press_highlight_cleared_when_hidden_mid_press():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {
+        "press": [{"action": "macro", "macro": "m"}],
+        "visible_when": {"key": "var.show", "operator": "truthy"},
+    }}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    state.set("var.show", "1", source="test")
+    await plugin._on_key_change(None, 0, True)
+    assert 0 in plugin._pressed_keys
+    state.set("var.show", "", source="test")  # hidden before release
+    await plugin._on_key_change(None, 0, False)
+    assert 0 not in plugin._pressed_keys
+
+
+def test_press_highlight_image_same_size(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    base = img_mod.new("RGB", (72, 72), "#1a1a2e")
+    out = plugin._apply_press_highlight(base)
+    assert out.size == (72, 72)
+    assert out.mode == "RGB"

@@ -269,7 +269,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.6.0",
+        "version": "1.7.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -450,6 +450,7 @@ class StreamDeckPlugin:
         self._opening = False    # re-entrancy guard while a deck is being opened
         self._hold_tasks = {}    # key_index -> periodic task ID for hold-repeat
         self._press_times = {}   # key_index -> timestamp for tap/hold mode
+        self._pressed_keys = set()  # keys currently held (momentary highlight)
         self._icon_font = None   # Loaded Lucide TTF font for icon rendering
         self._icon_map = {}      # icon-name -> unicode code point
         self._icon_cache = {}    # (icon_name, size, color_hex) -> PIL Image
@@ -667,7 +668,19 @@ class StreamDeckPlugin:
             if task_id:
                 self.api.cancel_task(task_id)
             self._press_times.pop(key_index, None)
+            self._pressed_keys.discard(key_index)  # don't leak a press highlight
             return
+
+        # Momentary press highlight: mark the key as held and redraw. The mark
+        # lives in the render path so a feedback/toggle re-render keeps the
+        # highlight rather than fighting it; the redraw is a no-op without a
+        # visual deck.
+        if pressed:
+            self._pressed_keys.add(key_index)
+        else:
+            self._pressed_keys.discard(key_index)
+        if self.deck and self.deck.is_visual():
+            await self._render_button(key_index)
 
         # Get press binding. The UI stores press as an array of actions; mode
         # and toggle/hold config live on the first entry, while a default tap
@@ -966,9 +979,28 @@ class StreamDeckPlugin:
                             if style_inactive.get("icon"):
                                 icon = style_inactive["icon"]
 
-        # Generate the button image and set it on the deck
+        # Generate the button image and set it on the deck. While the key is
+        # physically held, draw the momentary-press highlight on top.
         image = self._create_button_image(label, bg_color, text_color, icon)
+        if key_index in self._pressed_keys:
+            image = self._apply_press_highlight(image)
         self._apply_key_image(key_index, image)
+
+    def _apply_press_highlight(self, image):
+        """Return a lightened, inset-bordered variant of a button image.
+
+        Used as brief tactile feedback while a key is physically held. Any
+        failure falls back to the original image so a press never blanks a key.
+        """
+        try:
+            overlay = Image.new("RGB", image.size, (255, 255, 255))
+            highlighted = Image.blend(image, overlay, 0.25)
+            draw = ImageDraw.Draw(highlighted)
+            w, h = image.size
+            draw.rectangle([1, 1, w - 2, h - 2], outline=(255, 255, 255), width=2)
+            return highlighted
+        except Exception:
+            return image
 
     def _apply_key_image(self, key_index, image):
         """Encode a PIL image and set it on a deck key (thread-safe)."""
