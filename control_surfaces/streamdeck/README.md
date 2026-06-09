@@ -96,6 +96,13 @@ Manual navigation (a button's Navigate action) still works immediately; the next
 
 Example: switch to the full controls page when the projector turns on, and back to a simple "power on" page when it turns off.
 
+### Automatic Brightness
+
+The **Brightness** section below the grid controls the deck's backlight automatically:
+
+- **Dim when idle** -- lower the brightness after a period with no key, dial, or touch input. Any press, turn, or tap wakes the deck and restores the normal level.
+- **Brightness rules** -- set a brightness level when a state condition holds (same condition editor as visibility and paging). Rules are checked in order, the first match wins, and with no match the base brightness from the plugin settings applies. Example: drop to 20% whenever the projector is running so the deck doesn't glow in a dark room.
+
 ## State Keys
 
 | Key | Type | Description |

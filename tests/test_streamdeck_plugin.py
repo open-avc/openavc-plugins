@@ -1232,6 +1232,118 @@ async def test_info_strip_state_key_is_watched():
     assert plugin2._feedback_subs == []
 
 
+# ──── Brightness: auto rules + idle dim ────
+
+
+@pytest.mark.asyncio
+async def test_brightness_rule_first_match_wins():
+    config = {
+        "brightness": 70,
+        "auto_brightness": [
+            {"level": 20, "when": {"key": "var.night", "operator": "truthy"}},
+            {"level": 90, "when": {"key": "var.night", "operator": "falsy"}},
+        ],
+    }
+    plugin, state = _make_plugin(config)
+    state.set("var.night", "1", source="test")
+    assert await plugin._current_brightness_level() == 20
+    state.set("var.night", "", source="test")
+    assert await plugin._current_brightness_level() == 90
+
+
+@pytest.mark.asyncio
+async def test_brightness_no_match_uses_base_and_clamps():
+    config = {"brightness": 70, "auto_brightness": [
+        {"level": 150, "when": {"key": "var.x", "operator": "truthy"}}]}
+    plugin, state = _make_plugin(config)
+    # No rule matches -> base brightness.
+    assert await plugin._current_brightness_level() == 70
+    # Match -> level clamped to 100.
+    state.set("var.x", "1", source="test")
+    assert await plugin._current_brightness_level() == 100
+    # Malformed rules are skipped (no when / not a dict).
+    plugin2, _ = _make_plugin({"auto_brightness": ["junk", {"level": 5}], "brightness": 40})
+    assert await plugin2._current_brightness_level() == 40
+
+
+@pytest.mark.asyncio
+async def test_brightness_rule_keys_watched_and_applied():
+    config = {"brightness": 70, "auto_brightness": [
+        {"level": 25, "when": {"key": "var.movie", "operator": "truthy"}}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    plugin.deck = _FakeNeoDeck()
+    await plugin._setup_feedback_subscriptions()
+    assert plugin._brightness_keys == {"var.movie"}
+
+    state.set("var.movie", "1", source="test")
+    await plugin._on_state_change("var.movie", "1", None)
+    assert plugin.deck.brightness == 25
+
+    state.set("var.movie", "", source="test")
+    await plugin._on_state_change("var.movie", "", "1")
+    assert plugin.deck.brightness == 70
+
+
+@pytest.mark.asyncio
+async def test_idle_dim_after_timeout_and_wake_on_input():
+    import asyncio as _a
+    config = {"brightness": 70, "idle_dim": {"after_seconds": 10, "level": 5}}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    deck = _FakeNeoDeck()
+    plugin.deck = deck
+    now = _a.get_event_loop().time()
+    plugin._last_input = now - 11
+
+    await plugin._check_idle_dim()
+    assert plugin._idle_dimmed is True
+    assert deck.brightness == 5
+
+    # Any input wakes the deck, restores brightness, resets the timer.
+    await plugin._on_key_change(None, 0, True)
+    assert plugin._idle_dimmed is False
+    assert deck.brightness == 70
+    assert plugin._last_input >= now
+
+
+@pytest.mark.asyncio
+async def test_idle_dim_waits_for_timeout():
+    import asyncio as _a
+    config = {"idle_dim": {"after_seconds": 1000, "level": 5}}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    deck = _FakeNeoDeck()
+    plugin.deck = deck
+    plugin._last_input = _a.get_event_loop().time()
+    await plugin._check_idle_dim()
+    assert plugin._idle_dimmed is False
+    assert deck.brightness is None  # untouched
+
+
+@pytest.mark.asyncio
+async def test_watchdog_tick_drives_idle_dim(monkeypatch):
+    config = {"idle_dim": {"after_seconds": 10, "level": 5}}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    deck = _FakeDeck()
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck]))
+    await plugin._watchdog()  # opens the deck, applies base brightness
+    assert deck.brightness == 70
+    plugin._last_input -= 11
+    await plugin._watchdog()  # healthy tick doubles as the idle clock
+    assert plugin._idle_dimmed is True
+    assert deck.brightness == 5
+
+
+@pytest.mark.asyncio
+async def test_dial_input_wakes_idle_dimmed_deck():
+    config = {"brightness": 60, "idle_dim": {"after_seconds": 10, "level": 0}}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    deck = _FakeNeoDeck()
+    plugin.deck = deck
+    plugin._idle_dimmed = True
+    await plugin._on_dial_event(None, 0, TURN, 1)
+    assert plugin._idle_dimmed is False
+    assert deck.brightness == 60
+
+
 # ──── Bundled text font + button image rendering ────
 
 

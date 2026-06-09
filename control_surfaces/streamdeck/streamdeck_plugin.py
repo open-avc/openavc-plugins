@@ -200,7 +200,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.10.0",
+        "version": "1.11.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -311,6 +311,14 @@ class StreamDeckPlugin:
         "\"var.room_temp\", \"label\": \"Temp\"} shows the key's live value "
         "under the label, or {\"source\": \"text\", \"text\": \"Room A\"} "
         "shows static text. "
+        "Brightness can follow state: a top-level 'auto_brightness' array of "
+        "{\"level\": 0-100, \"when\": {condition}} rules (same operator "
+        "schema; first match wins, no match falls back to the base "
+        "'brightness' config). A top-level 'idle_dim' object "
+        "{\"after_seconds\": N, \"level\": 0-100} dims the deck after N "
+        "seconds without any key/dial/touch input; any input wakes it. "
+        "Example: dim to 10 when device.projector_1.power is off, and "
+        "idle-dim to 5 after 600 seconds. "
         "Button indices go left-to-right, "
         "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
         "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
@@ -414,6 +422,9 @@ class StreamDeckPlugin:
         self._auto_page_keys = set()   # state keys watched by auto_page rules
         self._touch_strip_keys = set()  # state keys shown on the touchscreen strip
         self._info_strip_keys = set()   # state keys shown on the info strip
+        self._brightness_keys = set()   # state keys watched by auto_brightness rules
+        self._last_input = 0.0          # loop time of the last key/dial/touch input
+        self._idle_dimmed = False       # True while idle_dim has lowered brightness
         self._loop = None
         self._model_info = None
         self._opening = False    # re-entrancy guard while a deck is being opened
@@ -530,9 +541,11 @@ class StreamDeckPlugin:
         self.deck = deck
         self._model_info = model
 
-        # Apply brightness from config
-        brightness = self.api.config.get("brightness", 70)
-        deck.set_brightness(brightness)
+        # Apply brightness (base config level or the first matching
+        # auto_brightness rule), and start the idle timer fresh.
+        self._last_input = asyncio.get_event_loop().time()
+        self._idle_dimmed = False
+        deck.set_brightness(await self._current_brightness_level())
 
         # Set up key callback (async variant — fires on our event loop)
         deck.set_key_callback_async(self._on_key_change, loop=self._loop)
@@ -603,6 +616,8 @@ class StreamDeckPlugin:
             except Exception:
                 healthy = False
             if healthy:
+                # The watchdog tick doubles as the idle-dim clock.
+                await self._check_idle_dim()
                 return
             await self._handle_deck_lost()
 
@@ -654,6 +669,7 @@ class StreamDeckPlugin:
                 pass
 
         self._model_info = None
+        self._idle_dimmed = False
         await self.api.state_set("connected", False)
         await self.api.event_emit("disconnected", {})
 
@@ -661,6 +677,7 @@ class StreamDeckPlugin:
 
     async def _on_key_change(self, deck, key_index, pressed):
         """Handle a physical button press/release with mode support."""
+        await self._note_input()
         page = self.current_page
 
         event_type = "press" if pressed else "release"
@@ -902,6 +919,7 @@ class StreamDeckPlugin:
         module never needs the StreamDeck enums at import time (they only
         exist after the lazy import, and tests run without the library).
         """
+        await self._note_input()
         kind = getattr(event, "name", None)
         cfg = self._get_dial_config(dial)
 
@@ -1013,6 +1031,7 @@ class StreamDeckPlugin:
 
     async def _on_touchscreen_event(self, deck, event, value):
         """Handle a touchscreen tap: map the x position to a zone's actions."""
+        await self._note_input()
         kind = getattr(event, "name", None)
         if kind not in ("SHORT", "LONG"):
             return  # DRAG is unused
@@ -1146,6 +1165,65 @@ class StreamDeckPlugin:
                 self.deck.set_screen_image(native)
         except Exception as e:
             self.api.log(f"Error setting info strip image: {e}", level="debug")
+
+    # ──── Brightness (auto rules + idle dim) ────
+
+    async def _current_brightness_level(self):
+        """Return the active brightness: the first matching ``auto_brightness``
+        rule's level, else the base ``brightness`` config value. Clamped 0-100."""
+        rules = self.api.config.get("auto_brightness", [])
+        if isinstance(rules, list):
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                when = rule.get("when")
+                level = _coerce_numeric(rule.get("level"))
+                if when is None or level is None:
+                    continue
+                if await self._eval_condition(when):
+                    return max(0, min(100, int(level)))
+        base = _coerce_numeric(self.api.config.get("brightness", 70))
+        return max(0, min(100, int(base if base is not None else 70)))
+
+    def _set_deck_brightness(self, level):
+        """Apply a brightness level to the deck (best-effort)."""
+        if not self.deck:
+            return
+        try:
+            self.deck.set_brightness(level)
+        except Exception as e:
+            self.api.log(f"Error setting brightness: {e}", level="debug")
+
+    async def _apply_active_brightness(self):
+        """Re-apply the rule-or-base brightness (used on wake and rule change)."""
+        if not self.deck:
+            return
+        self._set_deck_brightness(await self._current_brightness_level())
+
+    async def _check_idle_dim(self):
+        """Dim the deck when no input has arrived for ``idle_dim.after_seconds``.
+
+        Runs on the watchdog tick. Any key/dial/touch input wakes the deck via
+        ``_note_input``.
+        """
+        cfg = self.api.config.get("idle_dim")
+        if not isinstance(cfg, dict) or self._idle_dimmed:
+            return
+        after = _coerce_numeric(cfg.get("after_seconds"))
+        level = _coerce_numeric(cfg.get("level"))
+        if after is None or after <= 0 or level is None:
+            return
+        now = asyncio.get_event_loop().time()
+        if now - self._last_input >= after:
+            self._idle_dimmed = True
+            self._set_deck_brightness(max(0, min(100, int(level))))
+
+    async def _note_input(self):
+        """Record user input: resets the idle timer and wakes a dimmed deck."""
+        self._last_input = asyncio.get_event_loop().time()
+        if self._idle_dimmed:
+            self._idle_dimmed = False
+            await self._apply_active_brightness()
 
     # ──── Page Navigation ────
 
@@ -1750,6 +1828,16 @@ class StreamDeckPlugin:
             self._info_strip_keys.add(info_strip["key"])
         watch_keys |= self._info_strip_keys
 
+        # Auto-brightness rule keys (tracked separately — a change re-applies
+        # the brightness level)
+        self._brightness_keys = set()
+        auto_brightness = self.api.config.get("auto_brightness", [])
+        if isinstance(auto_brightness, list):
+            for rule in auto_brightness:
+                if isinstance(rule, dict):
+                    self._brightness_keys.update(_condition_state_keys(rule.get("when")))
+        watch_keys |= self._brightness_keys
+
         for key in watch_keys:
             sub_id = await self.api.state_subscribe(key, self._on_state_change)
             self._feedback_subs.append(sub_id)
@@ -1774,6 +1862,11 @@ class StreamDeckPlugin:
         # Info strip shows a live value — re-render it on change
         if key in self._info_strip_keys:
             await self._render_info_strip()
+
+        # Auto-brightness rules — re-apply unless the deck is idle-dimmed
+        # (waking on input restores the rule level anyway)
+        if key in self._brightness_keys and not self._idle_dimmed:
+            await self._apply_active_brightness()
 
         # Re-render buttons on the current page that depend on this key
         buttons = self.api.config.get("buttons", [])
