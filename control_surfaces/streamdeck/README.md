@@ -31,6 +31,9 @@ Use any Elgato Stream Deck as a physical control surface for OpenAVC. Assign mac
 | Button Brightness | Integer | 70 | Screen brightness (0-100) |
 | Default Button Color | String | `#1a1a2e` | Background color for unassigned buttons |
 | Text Color | String | `#e0e0e0` | Button label text color |
+| Number of Pages | Integer | 10 | How many button pages are available (1-100, applies to every deck) |
+
+A deck that's been customized separately (see Multiple Decks below) can override Brightness and the two colors just for itself — the **This deck's settings** row appears above the grid; blank values inherit the main settings.
 
 ## Configuring Buttons
 

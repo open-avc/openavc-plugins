@@ -228,7 +228,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.12.0",
+        "version": "1.13.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -301,6 +301,14 @@ class StreamDeckPlugin:
             "label": "Text Color",
             "description": "Label text color (hex).",
             "default": "#e0e0e0",
+        },
+        "max_pages": {
+            "type": "integer",
+            "label": "Number of Pages",
+            "description": "How many button pages are available (applies to every deck).",
+            "default": 10,
+            "min": 1,
+            "max": 100,
         },
         "pages": {
             "type": "group",
@@ -383,6 +391,8 @@ class StreamDeckPlugin:
         "the config (alongside 'buttons'): each entry is {\"page\": N, \"when\": "
         "{condition}} using the same operator schema. Rules are evaluated in "
         "order and the first match wins, so put more specific conditions first. "
+        "The page count comes from the top-level 'max_pages' setting (default "
+        "10, global across decks). "
         "When dial_count > 0, a top-level 'dials' array configures the rotary "
         "encoders (not paged — dials keep their assignment on every page): "
         "{\"index\": 0, \"label\": \"Volume\", \"adjust\": {\"key\": "
