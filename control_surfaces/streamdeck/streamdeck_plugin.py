@@ -8,6 +8,7 @@ Supported models: Neo, Mini, MK.2/Original V2, XL, Plus, Pedal.
 """
 
 import asyncio
+import functools
 import json
 import os
 import platform as platform_mod
@@ -195,12 +196,39 @@ def _condition_state_keys(cond):
     return keys
 
 
+class _DeckSession:
+    """Per-deck runtime state for one connected Stream Deck.
+
+    The plugin holds one session per attached deck; every handler and render
+    method takes the session it acts on, so multiple decks run independently
+    (own page, own pressed keys, own subscriptions, own idle timer).
+    """
+
+    def __init__(self, deck):
+        self.deck = deck
+        self.device_id = None      # HID path — stable while attached
+        self.serial = "unknown"
+        self.model = ""
+        self.geometry = {}         # key_count/rows/columns/dials/touch/screens
+        self.current_page = 0
+        self.pressed_keys = set()  # keys currently held (momentary highlight)
+        self.hold_tasks = {}       # key_index -> periodic task ID (hold-repeat)
+        self.press_times = {}      # key_index -> timestamp (tap/hold mode)
+        self.feedback_subs = []    # state subscription IDs for this deck
+        self.auto_page_keys = set()
+        self.touch_strip_keys = set()
+        self.info_strip_keys = set()
+        self.brightness_keys = set()
+        self.last_input = 0.0      # loop time of the last key/dial/touch input
+        self.idle_dimmed = False   # True while idle_dim has lowered brightness
+
+
 class StreamDeckPlugin:
 
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.11.0",
+        "version": "1.12.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -319,6 +347,17 @@ class StreamDeckPlugin:
         "seconds without any key/dial/touch input; any input wakes it. "
         "Example: dim to 10 when device.projector_1.power is off, and "
         "idle-dim to 5 after 600 seconds. "
+        "Multiple decks: every connected deck is listed in "
+        "plugin.streamdeck.deck_serials (comma-separated) with per-deck state "
+        "at plugin.streamdeck.<serial>.* (connected, model, rows, columns, "
+        "key_count, dial_count, touch_key_count, has_touchscreen, "
+        "has_info_screen, current_page). The un-prefixed singleton keys track "
+        "the primary (earliest-connected) deck. By default every deck mirrors "
+        "the main config; to give a specific deck its own assignments, add a "
+        "top-level 'decks' map keyed by serial — the entry fully replaces the "
+        "per-deck sections (buttons, auto_page, dials, touchscreen, "
+        "info_strip, auto_brightness, idle_dim) for that deck: "
+        "{\"decks\": {\"ABC123\": {\"buttons\": [...]}}}. "
         "Button indices go left-to-right, "
         "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
         "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
@@ -416,21 +455,10 @@ class StreamDeckPlugin:
 
     def __init__(self):
         self.api = None
-        self.deck = None
-        self.current_page = 0
-        self._feedback_subs = []
-        self._auto_page_keys = set()   # state keys watched by auto_page rules
-        self._touch_strip_keys = set()  # state keys shown on the touchscreen strip
-        self._info_strip_keys = set()   # state keys shown on the info strip
-        self._brightness_keys = set()   # state keys watched by auto_brightness rules
-        self._last_input = 0.0          # loop time of the last key/dial/touch input
-        self._idle_dimmed = False       # True while idle_dim has lowered brightness
+        # device_id -> _DeckSession, in connect order (first = primary deck)
+        self._sessions = {}
         self._loop = None
-        self._model_info = None
-        self._opening = False    # re-entrancy guard while a deck is being opened
-        self._hold_tasks = {}    # key_index -> periodic task ID for hold-repeat
-        self._press_times = {}   # key_index -> timestamp for tap/hold mode
-        self._pressed_keys = set()  # keys currently held (momentary highlight)
+        self._opening = False    # re-entrancy guard while decks are being opened
         self._icon_font = None   # Loaded Lucide TTF font for icon rendering
         self._icon_map = {}      # icon-name -> unicode code point
         self._icon_cache = {}    # (icon_name, size, color_hex) -> PIL Image
@@ -473,6 +501,8 @@ class StreamDeckPlugin:
         await self.api.state_set("touch_key_count", 0)
         await self.api.state_set("has_touchscreen", False)
         await self.api.state_set("has_info_screen", False)
+        await self.api.state_set("deck_count", 0)
+        await self.api.state_set("deck_serials", "")
 
         # Validate HIDAPI is loadable now, so a missing native library fails
         # the plugin with a clear message instead of silently looping in the
@@ -490,203 +520,285 @@ class StreamDeckPlugin:
             "plugin.streamdeck.action.*", self._on_context_action
         )
 
-        # A single watchdog opens the deck if one is present now, recovers it
-        # after a mid-session unplug, and connects one that appears later. Its
+        # A single watchdog opens every deck present now, recovers decks after
+        # a mid-session unplug, and connects decks that appear later. Its
         # first iteration runs almost immediately.
         self.api.create_periodic_task(
             self._watchdog, interval_seconds=3, name="deck_watchdog"
         )
 
     async def stop(self):
-        """Release the Stream Deck."""
-        if self.deck:
+        """Release every connected Stream Deck."""
+        for session in list(self._sessions.values()):
             try:
-                self.deck.reset()
-                self.deck.close()
+                session.deck.reset()
+                session.deck.close()
             except Exception as e:
                 self.api.log(f"Error closing deck: {e}", level="warning")
-            self.deck = None
+        self._sessions.clear()
         self.api.log("Stream Deck plugin stopped")
 
     async def health_check(self):
         """Report deck connection health."""
-        if self.deck and self.deck.is_open():
-            return {"status": "ok", "message": f"Connected: {self._model_info or 'Unknown'}"}
+        connected = [
+            s for s in self._sessions.values()
+            if s.deck and s.deck.is_open()
+        ]
+        if connected:
+            models = ", ".join(f"{s.model} ({s.serial})" for s in connected)
+            return {"status": "ok", "message": f"Connected: {models}"}
         return {"status": "degraded", "message": "No Stream Deck connected"}
 
     # ──── Device Management ────
 
+    def _primary_session(self):
+        """The earliest-connected deck still attached (drives singleton keys)."""
+        return next(iter(self._sessions.values()), None)
+
+    def _deck_config(self, session):
+        """Per-deck config view.
+
+        A ``decks[serial]`` override fully replaces the per-deck sections
+        (buttons, auto_page, dials, touchscreen, info_strip, auto_brightness,
+        idle_dim) for that deck. Decks without an override mirror the flat
+        top-level config — so a single deck never deals with serials, and a
+        second deck shows the same controls until it's customized.
+        """
+        decks = self.api.config.get("decks")
+        if isinstance(decks, dict):
+            override = decks.get(session.serial)
+            if isinstance(override, dict):
+                return override
+        return self.api.config
+
+    def _deck_setting(self, session, key, default):
+        """A scalar setting from the deck's config view, falling back to the
+        flat config (so an override can omit e.g. colors and inherit them)."""
+        cfg = self._deck_config(session)
+        if isinstance(cfg, dict) and key in cfg:
+            return cfg[key]
+        return self.api.config.get(key, default)
+
+    async def _publish_deck_state(self):
+        """Publish per-deck state keys and the primary-deck singleton keys.
+
+        Every deck gets ``plugin.streamdeck.<serial>.*`` keys; the un-prefixed
+        singleton keys mirror the primary deck so the status card and simple
+        automations keep working unchanged with one deck.
+        """
+        sessions = list(self._sessions.values())
+        await self.api.state_set("deck_count", len(sessions))
+        await self.api.state_set("deck_serials", ",".join(s.serial for s in sessions))
+
+        primary = self._primary_session()
+        if primary is None:
+            await self.api.state_set("connected", False)
+        else:
+            await self.api.state_set("connected", True)
+            await self.api.state_set("model", primary.model)
+            await self.api.state_set("serial", primary.serial)
+            for key, value in primary.geometry.items():
+                await self.api.state_set(key, value)
+            await self.api.state_set("current_page", primary.current_page)
+
+        for session in sessions:
+            prefix = session.serial
+            await self.api.state_set(f"{prefix}.connected", True)
+            await self.api.state_set(f"{prefix}.model", session.model)
+            for key, value in session.geometry.items():
+                await self.api.state_set(f"{prefix}.{key}", value)
+            await self.api.state_set(f"{prefix}.current_page", session.current_page)
+
     async def _open_deck(self, deck):
-        """Open a deck, configure it, and set up callbacks."""
+        """Open a deck, configure it, and set up its callbacks."""
         deck.open()
         deck.reset()
 
-        model = deck.deck_type()
-        serial = deck.get_serial_number() or "unknown"
-        key_count = deck.key_count()
+        session = _DeckSession(deck)
+        try:
+            session.device_id = deck.id()
+        except Exception:
+            session.device_id = f"deck-{id(deck)}"
+        session.serial = deck.get_serial_number() or "unknown"
+        session.model = deck.deck_type()
 
         # Geometry comes from the live hardware, not a static model table, so
         # any deck the library enumerates renders correctly — including models
         # added after this plugin was written.
         rows, columns = deck.key_layout()
-        dial_count = deck.dial_count()
-        touch_key_count = deck.touch_key_count()
-        has_touchscreen = deck.is_touch()
         try:
             # A secondary info screen reports a non-zero size (e.g. Neo 248x58)
             has_info_screen = deck.screen_image_format()["size"][0] > 0
         except Exception:
             has_info_screen = False
+        session.geometry = {
+            "key_count": deck.key_count(),
+            "rows": rows,
+            "columns": columns,
+            "dial_count": deck.dial_count(),
+            "touch_key_count": deck.touch_key_count(),
+            "has_touchscreen": deck.is_touch(),
+            "has_info_screen": has_info_screen,
+        }
 
-        self.deck = deck
-        self._model_info = model
+        self._sessions[session.device_id] = session
 
         # Apply brightness (base config level or the first matching
         # auto_brightness rule), and start the idle timer fresh.
-        self._last_input = asyncio.get_event_loop().time()
-        self._idle_dimmed = False
-        deck.set_brightness(await self._current_brightness_level())
+        session.last_input = asyncio.get_event_loop().time()
+        deck.set_brightness(await self._current_brightness_level(session))
 
-        # Set up key callback (async variant — fires on our event loop)
-        deck.set_key_callback_async(self._on_key_change, loop=self._loop)
-
-        # Wire dials and the touchscreen when the hardware has them
-        if dial_count > 0:
-            deck.set_dial_callback_async(self._on_dial_event, loop=self._loop)
-        if has_touchscreen:
+        # Wire callbacks, each bound to this deck's session (async variants —
+        # they fire on our event loop)
+        deck.set_key_callback_async(
+            functools.partial(self._on_key_change, session), loop=self._loop
+        )
+        if session.geometry["dial_count"] > 0:
+            deck.set_dial_callback_async(
+                functools.partial(self._on_dial_event, session), loop=self._loop
+            )
+        if session.geometry["has_touchscreen"]:
             deck.set_touchscreen_callback_async(
-                self._on_touchscreen_event, loop=self._loop
+                functools.partial(self._on_touchscreen_event, session),
+                loop=self._loop,
             )
 
         # Publish the detected hardware to state. The Surface Configurator
         # prefers these keys over the static SURFACE_LAYOUT while connected,
         # so the editor always draws the surface that's actually plugged in.
-        await self.api.state_set("connected", True)
-        await self.api.state_set("model", model)
-        await self.api.state_set("serial", serial)
-        await self.api.state_set("key_count", key_count)
-        await self.api.state_set("rows", rows)
-        await self.api.state_set("columns", columns)
-        await self.api.state_set("dial_count", dial_count)
-        await self.api.state_set("touch_key_count", touch_key_count)
-        await self.api.state_set("has_touchscreen", has_touchscreen)
-        await self.api.state_set("has_info_screen", has_info_screen)
-        await self.api.state_set("current_page", 0)
-        self.current_page = 0
+        await self._publish_deck_state()
 
+        geometry = session.geometry
+        touch_keys = geometry["touch_key_count"]
+        extras = ", touchscreen" if geometry["has_touchscreen"] else ""
+        if touch_keys:
+            extras += f", {touch_keys} touch keys"
         self.api.log(
-            f"Connected to {model} (S/N: {serial}, {key_count} keys, "
-            f"{rows}x{columns}, {dial_count} dials"
-            f"{', touchscreen' if has_touchscreen else ''}"
-            f"{f', {touch_key_count} touch keys' if touch_key_count else ''})"
+            f"Connected to {session.model} (S/N: {session.serial}, "
+            f"{geometry['key_count']} keys, {rows}x{columns}, "
+            f"{geometry['dial_count']} dials{extras})"
         )
-        await self.api.event_emit("connected", {"model": model, "serial": serial})
+        await self.api.event_emit(
+            "connected", {"model": session.model, "serial": session.serial}
+        )
 
         # Subscribe to state changes for feedback, visibility, and auto-page keys
-        await self._setup_feedback_subscriptions()
+        await self._setup_feedback_subscriptions(session)
 
         # Apply the initial auto-page selection before the first render so we
         # don't briefly show page 0 and then immediately switch.
-        initial_page = await self._evaluate_auto_page()
+        initial_page = await self._evaluate_auto_page(session)
         if initial_page is not None:
-            self.current_page = initial_page
-            await self.api.state_set("current_page", initial_page)
+            session.current_page = initial_page
+            await self.api.state_set(f"{session.serial}.current_page", initial_page)
+            if self._primary_session() is session:
+                await self.api.state_set("current_page", initial_page)
 
         # Render all buttons for the current page, then the secondary displays
-        await self._render_all_buttons()
-        await self._render_touchscreen()
-        await self._render_info_strip()
+        await self._render_all_buttons(session)
+        await self._render_touchscreen(session)
+        await self._render_info_strip(session)
 
     async def _watchdog(self):
-        """Keep a deck connected: open one if present, recover after unplug.
+        """Keep every deck connected: open new ones, recover after unplug.
 
-        Runs on a single periodic task for the plugin's whole lifetime, so a
-        deck that is unplugged mid-session is detected and re-opened on the next
-        tick (the bundled library closes the deck object on a transport error
-        but never re-opens it). Periodic ticks never overlap, but an
-        ``_opening`` guard is kept so a slow open can't be re-entered.
+        Runs on a single periodic task for the plugin's whole lifetime. A deck
+        unplugged mid-session is detected by its dead session and torn down
+        (the bundled library closes the deck object on a transport error but
+        never re-opens it); newly attached decks are recognized by their HID
+        path and opened. Periodic ticks never overlap, but an ``_opening``
+        guard is kept so a slow open can't be re-entered.
         """
         if self._opening:
             return
 
-        # If we hold a deck, confirm it's still healthy; otherwise tear it down.
-        if self.deck is not None:
+        # Health-check the decks we hold; tear down any that went away. The
+        # healthy ticks double as each deck's idle-dim clock.
+        for session in list(self._sessions.values()):
             try:
-                healthy = self.deck.is_open() and self.deck.connected()
+                healthy = session.deck.is_open() and session.deck.connected()
             except Exception:
                 healthy = False
             if healthy:
-                # The watchdog tick doubles as the idle-dim clock.
-                await self._check_idle_dim()
-                return
-            await self._handle_deck_lost()
+                await self._check_idle_dim(session)
+            else:
+                await self._handle_deck_lost(session)
 
-        # No (healthy) deck — try to (re)connect to the first one present.
+        # Open any attached decks we don't hold yet (matched by HID path).
         try:
             decks = StreamDeck.DeviceManager().enumerate()
         except Exception:
             decks = []
-        if not decks:
+        new_decks = []
+        for deck in decks:
+            try:
+                device_id = deck.id()
+            except Exception:
+                device_id = None
+            if device_id is None or device_id not in self._sessions:
+                new_decks.append(deck)
+        if not new_decks:
             return
 
         self._opening = True
         try:
-            await self._open_deck(decks[0])
-        except Exception as e:
-            self.api.log(f"Failed to open Stream Deck: {e}", level="warning")
-            self.deck = None
+            for deck in new_decks:
+                try:
+                    await self._open_deck(deck)
+                except Exception as e:
+                    self.api.log(f"Failed to open Stream Deck: {e}", level="warning")
         finally:
             self._opening = False
 
-    async def _handle_deck_lost(self):
-        """Tear down a deck that has gone away so the watchdog can re-open it.
+    async def _handle_deck_lost(self, session):
+        """Tear down one deck that has gone away (others keep running).
 
-        Cancels in-flight hold-repeat tasks, drops the feedback subscriptions
-        (re-created on re-open), closes the stale deck object, and publishes the
-        disconnect. The context-action subscription is left intact — it lives
-        for the plugin's whole lifetime, not per-deck.
+        Cancels in-flight hold-repeat tasks, drops the deck's feedback
+        subscriptions (re-created on re-open), closes the stale deck object,
+        and publishes the disconnect. The context-action subscription is left
+        intact — it lives for the plugin's whole lifetime, not per-deck.
         """
-        self.api.log("Stream Deck disconnected", level="warning")
+        self.api.log(
+            f"Stream Deck disconnected ({session.model} S/N: {session.serial})",
+            level="warning",
+        )
 
-        for task_id in list(self._hold_tasks.values()):
+        for task_id in list(session.hold_tasks.values()):
             self.api.cancel_task(task_id)
-        self._hold_tasks.clear()
-        self._press_times.clear()
+        session.hold_tasks.clear()
+        session.press_times.clear()
 
-        for sub_id in self._feedback_subs:
+        for sub_id in session.feedback_subs:
             try:
                 await self.api.state_unsubscribe(sub_id)
             except Exception:
                 pass
-        self._feedback_subs = []
+        session.feedback_subs = []
 
-        old = self.deck
-        self.deck = None
-        if old is not None:
-            try:
-                old.close()
-            except Exception:
-                pass
+        self._sessions.pop(session.device_id, None)
+        try:
+            session.deck.close()
+        except Exception:
+            pass
 
-        self._model_info = None
-        self._idle_dimmed = False
-        await self.api.state_set("connected", False)
-        await self.api.event_emit("disconnected", {})
+        await self.api.state_set(f"{session.serial}.connected", False)
+        await self._publish_deck_state()
+        await self.api.event_emit("disconnected", {"serial": session.serial})
 
     # ──── Key Handling ────
 
-    async def _on_key_change(self, deck, key_index, pressed):
+    async def _on_key_change(self, session, deck, key_index, pressed):
         """Handle a physical button press/release with mode support."""
-        await self._note_input()
-        page = self.current_page
+        await self._note_input(session)
+        page = session.current_page
 
         event_type = "press" if pressed else "release"
         await self.api.event_emit(
             f"button.{event_type}",
-            {"key": key_index, "page": page},
+            {"key": key_index, "page": page, "serial": session.serial},
         )
 
-        assignment = self._get_button_assignment(page, key_index)
+        assignment = self._get_button_assignment(session, page, key_index)
         if not assignment:
             return
 
@@ -694,11 +806,11 @@ class StreamDeckPlugin:
         # clear any in-flight hold/tap-hold state so a button that became
         # hidden mid-press can't leak a periodic task or fire a stale action.
         if not await self._is_button_visible(assignment):
-            task_id = self._hold_tasks.pop(key_index, None)
+            task_id = session.hold_tasks.pop(key_index, None)
             if task_id:
                 self.api.cancel_task(task_id)
-            self._press_times.pop(key_index, None)
-            self._pressed_keys.discard(key_index)  # don't leak a press highlight
+            session.press_times.pop(key_index, None)
+            session.pressed_keys.discard(key_index)  # don't leak a press highlight
             return
 
         # Momentary press highlight: mark the key as held and redraw. The mark
@@ -706,11 +818,11 @@ class StreamDeckPlugin:
         # highlight rather than fighting it; the redraw is a no-op without a
         # visual deck.
         if pressed:
-            self._pressed_keys.add(key_index)
+            session.pressed_keys.add(key_index)
         else:
-            self._pressed_keys.discard(key_index)
-        if self.deck and self.deck.is_visual():
-            await self._render_button(key_index)
+            session.pressed_keys.discard(key_index)
+        if session.deck and session.deck.is_visual():
+            await self._render_button(session, key_index)
 
         # Get press binding. The UI stores press as an array of actions; mode
         # and toggle/hold config live on the first entry, while a default tap
@@ -727,7 +839,7 @@ class StreamDeckPlugin:
         if mode == "hold_repeat":
             if pressed:
                 # Cancel any existing hold task for this key first
-                old_task = self._hold_tasks.pop(key_index, None)
+                old_task = session.hold_tasks.pop(key_index, None)
                 if old_task:
                     self.api.cancel_task(old_task)
                 # Store task ID synchronously BEFORE any await to prevent
@@ -735,13 +847,13 @@ class StreamDeckPlugin:
                 # and can't find the task to cancel.  The periodic task's
                 # first iteration fires the action almost immediately.
                 interval = press.get("hold_repeat_ms", 200) / 1000.0
-                self._hold_tasks[key_index] = self.api.create_periodic_task(
-                    lambda: self._execute_action(press, f"key {key_index}"),
+                session.hold_tasks[key_index] = self.api.create_periodic_task(
+                    lambda: self._execute_action(session, press, f"key {key_index}"),
                     interval_seconds=interval,
-                    name=f"hold_repeat_{key_index}",
+                    name=f"hold_repeat_{session.serial}_{key_index}",
                 )
             else:
-                task_id = self._hold_tasks.pop(key_index, None)
+                task_id = session.hold_tasks.pop(key_index, None)
                 if task_id:
                     self.api.cancel_task(task_id)
             return
@@ -762,9 +874,9 @@ class StreamDeckPlugin:
                     is_active = bool(value)
 
             if is_active and off_action and isinstance(off_action, dict):
-                await self._execute_action(off_action, f"key {key_index}")
+                await self._execute_action(session, off_action, f"key {key_index}")
             else:
-                await self._execute_action(press, f"key {key_index}")
+                await self._execute_action(session, press, f"key {key_index}")
 
             # Update button label if on_label/off_label configured
             on_label = press.get("on_label", "")
@@ -772,30 +884,30 @@ class StreamDeckPlugin:
             if on_label or off_label:
                 # Re-render after action (state may have changed)
                 await asyncio.sleep(0.1)
-                await self._render_button(key_index)
+                await self._render_button(session, key_index)
             return
 
         if mode == "tap_hold":
             threshold = press.get("hold_threshold_ms", 500) / 1000.0
             hold_action = press.get("hold_action")
             if pressed:
-                self._press_times[key_index] = asyncio.get_event_loop().time()
+                session.press_times[key_index] = asyncio.get_event_loop().time()
             else:
-                if key_index not in self._press_times:
+                if key_index not in session.press_times:
                     # Release with no recorded press (e.g. the press was
                     # suppressed while the button was hidden) — fire nothing.
                     return
-                press_time = self._press_times.pop(key_index)
+                press_time = session.press_times.pop(key_index)
                 held = asyncio.get_event_loop().time() - press_time
                 if held >= threshold and hold_action and isinstance(hold_action, dict):
-                    await self._execute_action(hold_action, f"key {key_index}")
+                    await self._execute_action(session, hold_action, f"key {key_index}")
                 else:
-                    await self._execute_action(press, f"key {key_index}")
+                    await self._execute_action(session, press, f"key {key_index}")
             return
 
         # Default: tap mode — fire every configured action in order, on press
         if pressed:
-            await self._execute_actions(press_actions, f"key {key_index}")
+            await self._execute_actions(session, press_actions, f"key {key_index}")
 
     @staticmethod
     def _press_actions(bindings):
@@ -814,13 +926,13 @@ class StreamDeckPlugin:
             return [press]
         return []
 
-    async def _execute_actions(self, actions, source):
+    async def _execute_actions(self, session, actions, source):
         """Execute a list of action bindings sequentially, in order."""
         for action in actions:
             if isinstance(action, dict):
-                await self._execute_action(action, source)
+                await self._execute_action(session, action, source)
 
-    async def _execute_action(self, action_binding, source):
+    async def _execute_action(self, session, action_binding, source):
         """Execute a single surface action binding.
 
         Supports the documented surface action set: ``macro``,
@@ -833,13 +945,13 @@ class StreamDeckPlugin:
         if action == "navigate":
             page_id = action_binding.get("page", "")
             if page_id == "__next_page__":
-                await self._change_page(self.current_page + 1)
+                await self._change_page(session, session.current_page + 1)
             elif page_id == "__prev_page__":
-                await self._change_page(self.current_page - 1)
+                await self._change_page(session, session.current_page - 1)
             else:
                 # A specific page index (int or numeric string).
                 try:
-                    await self._change_page(int(page_id))
+                    await self._change_page(session, int(page_id))
                 except (TypeError, ValueError):
                     pass
 
@@ -902,9 +1014,9 @@ class StreamDeckPlugin:
             return [value]
         return []
 
-    def _get_dial_config(self, index):
+    def _get_dial_config(self, session, index):
         """Look up the dial config entry for a dial index."""
-        dials = self.api.config.get("dials", [])
+        dials = self._deck_config(session).get("dials", [])
         if not isinstance(dials, list):
             return None
         for dial in dials:
@@ -912,24 +1024,26 @@ class StreamDeckPlugin:
                 return dial
         return None
 
-    async def _on_dial_event(self, deck, dial, event, value):
+    async def _on_dial_event(self, session, deck, dial, event, value):
         """Handle a dial turn or push.
 
         Event kinds are matched by enum name (``TURN``/``PUSH``) so this
         module never needs the StreamDeck enums at import time (they only
         exist after the lazy import, and tests run without the library).
         """
-        await self._note_input()
+        await self._note_input(session)
         kind = getattr(event, "name", None)
-        cfg = self._get_dial_config(dial)
+        cfg = self._get_dial_config(session, dial)
 
         if kind == "PUSH":
             if not value:
                 return  # release
-            await self.api.event_emit("dial.press", {"dial": dial})
+            await self.api.event_emit(
+                "dial.press", {"dial": dial, "serial": session.serial}
+            )
             if cfg:
                 await self._execute_actions(
-                    self._action_list(cfg.get("press")), f"dial {dial}"
+                    session, self._action_list(cfg.get("press")), f"dial {dial}"
                 )
             return
 
@@ -940,14 +1054,19 @@ class StreamDeckPlugin:
                 return
             if detents == 0:
                 return
-            await self.api.event_emit("dial.turn", {"dial": dial, "amount": detents})
+            await self.api.event_emit(
+                "dial.turn",
+                {"dial": dial, "amount": detents, "serial": session.serial},
+            )
             if not cfg:
                 return
             adjust = cfg.get("adjust")
             if isinstance(adjust, dict) and adjust.get("key"):
                 await self._apply_dial_adjust(adjust, detents)
             actions = cfg.get("cw") if detents > 0 else cfg.get("ccw")
-            await self._execute_actions(self._action_list(actions), f"dial {dial}")
+            await self._execute_actions(
+                session, self._action_list(actions), f"dial {dial}"
+            )
 
     async def _apply_dial_adjust(self, adjust, detents):
         """Increment a numeric state value by ``step * detents``, clamped.
@@ -979,7 +1098,7 @@ class StreamDeckPlugin:
 
     # ──── Touchscreen strip (decks with a touch strip) ────
 
-    def _touch_zones(self):
+    def _touch_zones(self, session):
         """Return the effective touchscreen zones with resolved pixel bounds.
 
         Explicit ``touchscreen.zones`` config wins; zones missing ``x``/``w``
@@ -988,20 +1107,20 @@ class StreamDeckPlugin:
         label and its adjust value — so a configured dial gets a live readout
         with zero extra config.
         """
-        if not self.deck:
+        if not session.deck:
             return []
         try:
-            width = self.deck.touchscreen_image_format()["size"][0]
+            width = session.deck.touchscreen_image_format()["size"][0]
         except Exception:
             width = 800
 
-        ts = self.api.config.get("touchscreen", {})
+        ts = self._deck_config(session).get("touchscreen", {})
         zones = ts.get("zones") if isinstance(ts, dict) else None
         zones = [z for z in zones if isinstance(z, dict)] if isinstance(zones, list) else []
 
         if not zones:
-            for i in range(self.deck.dial_count()):
-                cfg = self._get_dial_config(i) or {}
+            for i in range(session.deck.dial_count()):
+                cfg = self._get_dial_config(session, i) or {}
                 adjust = cfg.get("adjust")
                 adjust = adjust if isinstance(adjust, dict) else {}
                 zones.append({
@@ -1022,41 +1141,44 @@ class StreamDeckPlugin:
             resolved.append({**zone, "x": x, "w": w})
         return resolved
 
-    def _zone_at(self, x):
+    def _zone_at(self, session, x):
         """Return the touchscreen zone containing pixel ``x``, or None."""
-        for zone in self._touch_zones():
+        for zone in self._touch_zones(session):
             if zone["x"] <= x < zone["x"] + zone["w"]:
                 return zone
         return None
 
-    async def _on_touchscreen_event(self, deck, event, value):
+    async def _on_touchscreen_event(self, session, deck, event, value):
         """Handle a touchscreen tap: map the x position to a zone's actions."""
-        await self._note_input()
+        await self._note_input(session)
         kind = getattr(event, "name", None)
         if kind not in ("SHORT", "LONG"):
             return  # DRAG is unused
         x = value.get("x") if isinstance(value, dict) else None
         if not isinstance(x, (int, float)):
             return
-        await self.api.event_emit("touchscreen.touch", {"x": int(x)})
-        zone = self._zone_at(int(x))
+        await self.api.event_emit(
+            "touchscreen.touch", {"x": int(x), "serial": session.serial}
+        )
+        zone = self._zone_at(session, int(x))
         if zone:
             await self._execute_actions(
-                self._action_list(zone.get("touch")), "touchscreen"
+                session, self._action_list(zone.get("touch")), "touchscreen"
             )
 
-    async def _render_touchscreen(self):
+    async def _render_touchscreen(self, session):
         """Render the touchscreen strip: one cell per zone (label + value)."""
-        if not self.deck or not self.deck.is_visual() or not self.deck.is_touch():
+        deck = session.deck
+        if not deck or not deck.is_visual() or not deck.is_touch():
             return
         try:
-            width, height = self.deck.touchscreen_image_format()["size"]
+            width, height = deck.touchscreen_image_format()["size"]
         except Exception:
             return
-        zones = self._touch_zones()
+        zones = self._touch_zones(session)
 
-        bg = self.api.config.get("button_color", "#1a1a2e")
-        fg = self.api.config.get("text_color", "#e0e0e0")
+        bg = self._deck_setting(session, "button_color", "#1a1a2e")
+        fg = self._deck_setting(session, "text_color", "#e0e0e0")
         img = Image.new("RGB", (width, height), bg)
         draw = ImageDraw.Draw(img)
 
@@ -1105,35 +1227,36 @@ class StreamDeckPlugin:
                 draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)
 
         try:
-            native = PILHelper.to_native_touchscreen_format(self.deck, img)
-            with self.deck:
-                self.deck.set_touchscreen_image(native, 0, 0, width, height)
+            native = PILHelper.to_native_touchscreen_format(deck, img)
+            with deck:
+                deck.set_touchscreen_image(native, 0, 0, width, height)
         except Exception as e:
             self.api.log(f"Error setting touchscreen image: {e}", level="debug")
 
     # ──── Info strip (decks with a secondary info screen) ────
 
-    async def _render_info_strip(self):
+    async def _render_info_strip(self, session):
         """Render the secondary info screen from the ``info_strip`` config.
 
         Config shape: ``{"source": "state"|"text", "key": "<state key>",
         "text": "<static text>", "label": "<small heading>"}``. A state
         source shows the key's live value; re-rendered on change.
         """
-        if not self.deck or not self.deck.is_visual():
+        deck = session.deck
+        if not deck or not deck.is_visual():
             return
         try:
-            width, height = self.deck.screen_image_format()["size"]
+            width, height = deck.screen_image_format()["size"]
         except Exception:
             return
         if not width or not height:
             return  # this deck has no info screen
 
-        bg = self.api.config.get("button_color", "#1a1a2e")
-        fg = self.api.config.get("text_color", "#e0e0e0")
+        bg = self._deck_setting(session, "button_color", "#1a1a2e")
+        fg = self._deck_setting(session, "text_color", "#e0e0e0")
         img = Image.new("RGB", (width, height), bg)
 
-        cfg = self.api.config.get("info_strip")
+        cfg = self._deck_config(session).get("info_strip")
         if isinstance(cfg, dict):
             label = cfg.get("label", "")
             if cfg.get("source") == "text":
@@ -1160,18 +1283,18 @@ class StreamDeckPlugin:
                 )
 
         try:
-            native = PILHelper.to_native_screen_format(self.deck, img)
-            with self.deck:
-                self.deck.set_screen_image(native)
+            native = PILHelper.to_native_screen_format(deck, img)
+            with deck:
+                deck.set_screen_image(native)
         except Exception as e:
             self.api.log(f"Error setting info strip image: {e}", level="debug")
 
     # ──── Brightness (auto rules + idle dim) ────
 
-    async def _current_brightness_level(self):
+    async def _current_brightness_level(self, session):
         """Return the active brightness: the first matching ``auto_brightness``
         rule's level, else the base ``brightness`` config value. Clamped 0-100."""
-        rules = self.api.config.get("auto_brightness", [])
+        rules = self._deck_config(session).get("auto_brightness", [])
         if isinstance(rules, list):
             for rule in rules:
                 if not isinstance(rule, dict):
@@ -1182,100 +1305,105 @@ class StreamDeckPlugin:
                     continue
                 if await self._eval_condition(when):
                     return max(0, min(100, int(level)))
-        base = _coerce_numeric(self.api.config.get("brightness", 70))
+        base = _coerce_numeric(self._deck_setting(session, "brightness", 70))
         return max(0, min(100, int(base if base is not None else 70)))
 
-    def _set_deck_brightness(self, level):
-        """Apply a brightness level to the deck (best-effort)."""
-        if not self.deck:
+    def _set_deck_brightness(self, session, level):
+        """Apply a brightness level to a deck (best-effort)."""
+        if not session.deck:
             return
         try:
-            self.deck.set_brightness(level)
+            session.deck.set_brightness(level)
         except Exception as e:
             self.api.log(f"Error setting brightness: {e}", level="debug")
 
-    async def _apply_active_brightness(self):
+    async def _apply_active_brightness(self, session):
         """Re-apply the rule-or-base brightness (used on wake and rule change)."""
-        if not self.deck:
+        if not session.deck:
             return
-        self._set_deck_brightness(await self._current_brightness_level())
+        self._set_deck_brightness(session, await self._current_brightness_level(session))
 
-    async def _check_idle_dim(self):
-        """Dim the deck when no input has arrived for ``idle_dim.after_seconds``.
+    async def _check_idle_dim(self, session):
+        """Dim a deck when no input has arrived for ``idle_dim.after_seconds``.
 
         Runs on the watchdog tick. Any key/dial/touch input wakes the deck via
         ``_note_input``.
         """
-        cfg = self.api.config.get("idle_dim")
-        if not isinstance(cfg, dict) or self._idle_dimmed:
+        cfg = self._deck_config(session).get("idle_dim")
+        if not isinstance(cfg, dict) or session.idle_dimmed:
             return
         after = _coerce_numeric(cfg.get("after_seconds"))
         level = _coerce_numeric(cfg.get("level"))
         if after is None or after <= 0 or level is None:
             return
         now = asyncio.get_event_loop().time()
-        if now - self._last_input >= after:
-            self._idle_dimmed = True
-            self._set_deck_brightness(max(0, min(100, int(level))))
+        if now - session.last_input >= after:
+            session.idle_dimmed = True
+            self._set_deck_brightness(session, max(0, min(100, int(level))))
 
-    async def _note_input(self):
+    async def _note_input(self, session):
         """Record user input: resets the idle timer and wakes a dimmed deck."""
-        self._last_input = asyncio.get_event_loop().time()
-        if self._idle_dimmed:
-            self._idle_dimmed = False
-            await self._apply_active_brightness()
+        session.last_input = asyncio.get_event_loop().time()
+        if session.idle_dimmed:
+            session.idle_dimmed = False
+            await self._apply_active_brightness(session)
 
     # ──── Page Navigation ────
 
-    async def _change_page(self, new_page):
-        """Switch to a different button page."""
+    async def _change_page(self, session, new_page):
+        """Switch a deck to a different button page."""
         max_pages = self.api.config.get("max_pages", 10)
         if new_page < 0:
             new_page = 0
         elif new_page >= max_pages:
             new_page = max_pages - 1
 
-        if new_page == self.current_page:
+        if new_page == session.current_page:
             return
 
-        self.current_page = new_page
-        await self.api.state_set("current_page", new_page)
-        await self._render_all_buttons()
+        session.current_page = new_page
+        await self.api.state_set(f"{session.serial}.current_page", new_page)
+        if self._primary_session() is session:
+            await self.api.state_set("current_page", new_page)
+        await self._render_all_buttons(session)
         self.api.log(f"Switched to page {new_page}", level="debug")
 
     # ──── Button Rendering ────
 
-    async def _render_all_buttons(self):
-        """Render every key for the current page (LCD keys + touch keys)."""
-        if not self.deck or not self.deck.is_visual():
+    async def _render_all_buttons(self, session):
+        """Render every key for a deck's current page (LCD keys + touch keys)."""
+        if not session.deck or not session.deck.is_visual():
             return
 
-        key_count = self.deck.key_count() + self.deck.touch_key_count()
+        key_count = session.deck.key_count() + session.deck.touch_key_count()
         for key_index in range(key_count):
-            await self._render_button(key_index)
+            await self._render_button(session, key_index)
 
-    def _is_touch_key(self, key_index):
+    @staticmethod
+    def _is_touch_key(session, key_index):
         """True for the color-only touch keys indexed after the LCD keys."""
-        if not self.deck:
+        if not session.deck:
             return False
-        key_count = self.deck.key_count()
-        return key_count <= key_index < key_count + self.deck.touch_key_count()
+        key_count = session.deck.key_count()
+        return key_count <= key_index < key_count + session.deck.touch_key_count()
 
-    async def _render_button(self, key_index):
+    async def _render_button(self, session, key_index):
         """Render a single button image based on its assignment and state."""
-        if not self.deck or not self.deck.is_visual():
+        if not session.deck or not session.deck.is_visual():
             return
 
-        is_touch_key = self._is_touch_key(key_index)
-        assignment = self._get_button_assignment(self.current_page, key_index)
+        is_touch_key = self._is_touch_key(session, key_index)
+        assignment = self._get_button_assignment(
+            session, session.current_page, key_index
+        )
 
         # Touch keys have no LCD — an unassigned one just goes dark.
         if is_touch_key and not assignment:
-            self._apply_key_color(key_index, "#000000")
+            self._apply_key_color(session, key_index, "#000000")
             return
 
-        global_bg = self.api.config.get("button_color", "#1a1a2e")
-        global_text = self.api.config.get("text_color", "#e0e0e0")
+        global_bg = self._deck_setting(session, "button_color", "#1a1a2e")
+        global_text = self._deck_setting(session, "text_color", "#e0e0e0")
         label = ""
         icon = None
         bg_color = global_bg
@@ -1287,10 +1415,11 @@ class StreamDeckPlugin:
             visible_when = bindings.get("visible_when") if isinstance(bindings, dict) else None
             if visible_when is not None and not await self._eval_condition(visible_when):
                 if is_touch_key:
-                    self._apply_key_color(key_index, "#000000")
+                    self._apply_key_color(session, key_index, "#000000")
                 else:
                     self._apply_key_image(
-                        key_index, self._create_button_image("", "#000000", "#000000")
+                        session, key_index,
+                        self._create_button_image(session, "", "#000000", "#000000"),
                     )
                 return
 
@@ -1364,17 +1493,17 @@ class StreamDeckPlugin:
         # after feedback/toggle evaluation, brightened while held.
         if is_touch_key:
             color = bg_color
-            if key_index in self._pressed_keys:
+            if key_index in session.pressed_keys:
                 color = self._lighten_hex(color, 0.25)
-            self._apply_key_color(key_index, color)
+            self._apply_key_color(session, key_index, color)
             return
 
         # Generate the button image and set it on the deck. While the key is
         # physically held, draw the momentary-press highlight on top.
-        image = self._create_button_image(label, bg_color, text_color, icon)
-        if key_index in self._pressed_keys:
+        image = self._create_button_image(session, label, bg_color, text_color, icon)
+        if key_index in session.pressed_keys:
             image = self._apply_press_highlight(image)
-        self._apply_key_image(key_index, image)
+        self._apply_key_image(session, key_index, image)
 
     @staticmethod
     def _hex_to_rgb(color):
@@ -1398,12 +1527,12 @@ class StreamDeckPlugin:
         b = int(b + (255 - b) * amount)
         return f"#{r:02x}{g:02x}{b:02x}"
 
-    def _apply_key_color(self, key_index, color):
+    def _apply_key_color(self, session, key_index, color):
         """Set a touch key's RGB backlight from a hex color (thread-safe)."""
         r, g, b = self._hex_to_rgb(color)
         try:
-            with self.deck:
-                self.deck.set_key_color(key_index, r, g, b)
+            with session.deck:
+                session.deck.set_key_color(key_index, r, g, b)
         except Exception as e:
             self.api.log(f"Error setting key {key_index} color: {e}", level="debug")
 
@@ -1423,18 +1552,18 @@ class StreamDeckPlugin:
         except Exception:
             return image
 
-    def _apply_key_image(self, key_index, image):
+    def _apply_key_image(self, session, key_index, image):
         """Encode a PIL image and set it on a deck key (thread-safe)."""
         try:
-            native_image = PILHelper.to_native_key_format(self.deck, image)
-            with self.deck:
-                self.deck.set_key_image(key_index, native_image)
+            native_image = PILHelper.to_native_key_format(session.deck, image)
+            with session.deck:
+                session.deck.set_key_image(key_index, native_image)
         except Exception as e:
             self.api.log(f"Error setting key {key_index} image: {e}", level="debug")
 
-    def _create_button_image(self, label, bg_color, text_color, icon_name=None):
+    def _create_button_image(self, session, label, bg_color, text_color, icon_name=None):
         """Create a PIL image for a button with optional icon and wrapped label."""
-        image_format = self.deck.key_image_format()
+        image_format = session.deck.key_image_format()
         width = image_format["size"][0]
         height = image_format["size"][1]
 
@@ -1734,13 +1863,13 @@ class StreamDeckPlugin:
             return True
         return await self._eval_condition(visible_when)
 
-    async def _evaluate_auto_page(self):
+    async def _evaluate_auto_page(self, session):
         """Return the page of the first matching auto_page rule, or None.
 
         Rules are evaluated in array order; the first whose ``when`` condition
         is true wins. The page index is clamped to the valid range.
         """
-        rules = self.api.config.get("auto_page", [])
+        rules = self._deck_config(session).get("auto_page", [])
         if not isinstance(rules, list):
             return None
         max_pages = self.api.config.get("max_pages", 10)
@@ -1761,18 +1890,21 @@ class StreamDeckPlugin:
 
     # ──── State Subscriptions ────
 
-    async def _setup_feedback_subscriptions(self):
-        """Subscribe to every state key that can change a button or the page.
+    async def _setup_feedback_subscriptions(self, session):
+        """Subscribe to every state key that can change a deck's buttons,
+        displays, brightness, or page.
 
         Covers feedback keys, toggle keys, visible_when condition keys, and
         auto_page rule keys. Auto_page keys are also tracked separately so that
-        only an auto_page-watched change can drive automatic paging.
+        only an auto_page-watched change can drive automatic paging. Each deck
+        subscribes independently against its own config view.
         """
-        buttons = self.api.config.get("buttons", [])
+        cfg = self._deck_config(session)
+        buttons = cfg.get("buttons", [])
         watch_keys = set()
-        self._auto_page_keys = set()
+        session.auto_page_keys = set()
 
-        for btn in buttons:
+        for btn in buttons if isinstance(buttons, list) else []:
             if not isinstance(btn, dict):
                 continue
             bindings = btn.get("bindings", {})
@@ -1789,91 +1921,92 @@ class StreamDeckPlugin:
                 watch_keys.update(_condition_state_keys(bindings.get("visible_when")))
 
         # Auto-page rule keys (tracked separately — only these drive paging)
-        auto_page = self.api.config.get("auto_page", [])
+        auto_page = cfg.get("auto_page", [])
         if isinstance(auto_page, list):
             for rule in auto_page:
                 if isinstance(rule, dict):
-                    self._auto_page_keys.update(_condition_state_keys(rule.get("when")))
-        watch_keys |= self._auto_page_keys
+                    session.auto_page_keys.update(_condition_state_keys(rule.get("when")))
+        watch_keys |= session.auto_page_keys
 
         # Touchscreen strip keys (tracked separately — a change re-renders the
         # strip): explicit zone label/value sources, plus every dial adjust key
         # since the default zones display those values.
-        self._touch_strip_keys = set()
-        touchscreen = self.api.config.get("touchscreen", {})
+        session.touch_strip_keys = set()
+        touchscreen = cfg.get("touchscreen", {})
         zones = touchscreen.get("zones") if isinstance(touchscreen, dict) else None
         if isinstance(zones, list):
             for zone in zones:
                 if isinstance(zone, dict):
                     for field in ("label_source", "value_source"):
                         if zone.get(field):
-                            self._touch_strip_keys.add(zone[field])
-        dials = self.api.config.get("dials", [])
+                            session.touch_strip_keys.add(zone[field])
+        dials = cfg.get("dials", [])
         if isinstance(dials, list):
             for dial in dials:
                 if isinstance(dial, dict):
                     adjust = dial.get("adjust")
                     if isinstance(adjust, dict) and adjust.get("key"):
-                        self._touch_strip_keys.add(adjust["key"])
-        watch_keys |= self._touch_strip_keys
+                        session.touch_strip_keys.add(adjust["key"])
+        watch_keys |= session.touch_strip_keys
 
         # Info-strip key (tracked separately — a change re-renders the strip)
-        self._info_strip_keys = set()
-        info_strip = self.api.config.get("info_strip")
+        session.info_strip_keys = set()
+        info_strip = cfg.get("info_strip")
         if (
             isinstance(info_strip, dict)
             and info_strip.get("source", "state") == "state"
             and info_strip.get("key")
         ):
-            self._info_strip_keys.add(info_strip["key"])
-        watch_keys |= self._info_strip_keys
+            session.info_strip_keys.add(info_strip["key"])
+        watch_keys |= session.info_strip_keys
 
         # Auto-brightness rule keys (tracked separately — a change re-applies
         # the brightness level)
-        self._brightness_keys = set()
-        auto_brightness = self.api.config.get("auto_brightness", [])
+        session.brightness_keys = set()
+        auto_brightness = cfg.get("auto_brightness", [])
         if isinstance(auto_brightness, list):
             for rule in auto_brightness:
                 if isinstance(rule, dict):
-                    self._brightness_keys.update(_condition_state_keys(rule.get("when")))
-        watch_keys |= self._brightness_keys
+                    session.brightness_keys.update(_condition_state_keys(rule.get("when")))
+        watch_keys |= session.brightness_keys
 
+        callback = functools.partial(self._on_state_change, session)
         for key in watch_keys:
-            sub_id = await self.api.state_subscribe(key, self._on_state_change)
-            self._feedback_subs.append(sub_id)
+            sub_id = await self.api.state_subscribe(key, callback)
+            session.feedback_subs.append(sub_id)
 
-    async def _on_state_change(self, key, value, old_value):
+    async def _on_state_change(self, session, key, value, old_value):
         """React to a watched state change: auto-page switch and/or re-render."""
-        if not self.deck or not self.deck.is_visual():
+        if not session.deck or not session.deck.is_visual():
             return
 
         # Auto-page: re-evaluate only when an auto_page-watched key changes, so
         # an ordinary feedback/visibility change never overrides manual paging.
-        if key in self._auto_page_keys:
-            target = await self._evaluate_auto_page()
-            if target is not None and target != self.current_page:
-                await self._change_page(target)
+        if key in session.auto_page_keys:
+            target = await self._evaluate_auto_page(session)
+            if target is not None and target != session.current_page:
+                await self._change_page(session, target)
                 return  # _change_page re-rendered the whole new page
 
         # Touchscreen strip shows live values — re-render it on change
-        if key in self._touch_strip_keys:
-            await self._render_touchscreen()
+        if key in session.touch_strip_keys:
+            await self._render_touchscreen(session)
 
         # Info strip shows a live value — re-render it on change
-        if key in self._info_strip_keys:
-            await self._render_info_strip()
+        if key in session.info_strip_keys:
+            await self._render_info_strip(session)
 
         # Auto-brightness rules — re-apply unless the deck is idle-dimmed
         # (waking on input restores the rule level anyway)
-        if key in self._brightness_keys and not self._idle_dimmed:
-            await self._apply_active_brightness()
+        if key in session.brightness_keys and not session.idle_dimmed:
+            await self._apply_active_brightness(session)
 
         # Re-render buttons on the current page that depend on this key
-        buttons = self.api.config.get("buttons", [])
-        for btn in buttons:
+        buttons = self._deck_config(session).get("buttons", [])
+        for btn in buttons if isinstance(buttons, list) else []:
             if not isinstance(btn, dict):
                 continue
-            if btn.get("page", 0) != self.current_page:
+            if btn.get("page", 0) != session.current_page:
                 continue
 
             bindings = btn.get("bindings", {})
@@ -1891,60 +2024,61 @@ class StreamDeckPlugin:
             if matched:
                 key_index = btn.get("index")
                 if key_index is not None:
-                    await self._render_button(key_index)
+                    await self._render_button(session, key_index)
 
     # ──── Context Actions ────
 
     async def _on_context_action(self, event_name, payload):
         """Handle context action events."""
         if "action.identify" in event_name:
-            await self._identify_deck()
+            # A serial in the payload identifies one specific deck (the deck
+            # picker's per-deck Identify); without one, flash every deck.
+            serial = payload.get("serial") if isinstance(payload, dict) else None
+            for session in list(self._sessions.values()):
+                if serial and session.serial != serial:
+                    continue
+                await self._identify_deck(session)
 
-    async def _identify_deck(self):
-        """Flash all buttons to identify which physical deck this is."""
-        if not self.deck or not self.deck.is_visual():
+    async def _identify_deck(self, session):
+        """Flash a deck's buttons to identify which physical deck it is."""
+        deck = session.deck
+        if not deck or not deck.is_visual():
             return
 
-        self.api.log("Identifying Stream Deck (flashing all buttons)")
-        key_count = self.deck.key_count()
-        touch_keys = range(key_count, key_count + self.deck.touch_key_count())
+        self.api.log(
+            f"Identifying Stream Deck {session.serial} (flashing all buttons)"
+        )
+        key_count = deck.key_count()
+        touch_keys = range(key_count, key_count + deck.touch_key_count())
 
         # Flash white
-        white_img = self._create_button_image("", "#ffffff", "#ffffff")
-        native_white = PILHelper.to_native_key_format(self.deck, white_img)
+        white_img = self._create_button_image(session, "", "#ffffff", "#ffffff")
+        native_white = PILHelper.to_native_key_format(deck, white_img)
 
         for flash in range(3):
-            with self.deck:
+            with deck:
                 for k in range(key_count):
-                    self.deck.set_key_image(k, native_white)
+                    deck.set_key_image(k, native_white)
             for k in touch_keys:
-                self._apply_key_color(k, "#ffffff")
+                self._apply_key_color(session, k, "#ffffff")
             await asyncio.sleep(0.3)
 
-            with self.deck:
+            with deck:
                 for k in range(key_count):
-                    self.deck.set_key_image(k, b"\x00" * len(native_white))
+                    deck.set_key_image(k, b"\x00" * len(native_white))
             for k in touch_keys:
-                self._apply_key_color(k, "#000000")
+                self._apply_key_color(session, k, "#000000")
             await asyncio.sleep(0.3)
 
         # Restore current page
-        await self._render_all_buttons()
+        await self._render_all_buttons(session)
 
     # ──── Helpers ────
 
-    def _get_columns(self):
-        """Get the number of columns for the connected deck."""
-        if self.deck:
-            layout = self.deck.key_layout()
-            if layout:
-                return layout[1]  # (rows, cols)
-        return 4  # default for Neo
-
-    def _get_button_assignment(self, page, key_index):
+    def _get_button_assignment(self, session, page, key_index):
         """Look up the button assignment for a specific page/key index."""
-        buttons = self.api.config.get("buttons", [])
-        for btn in buttons:
+        buttons = self._deck_config(session).get("buttons", [])
+        for btn in buttons if isinstance(buttons, list) else []:
             if not isinstance(btn, dict):
                 continue
             if btn.get("index") == key_index and btn.get("page", 0) == page:

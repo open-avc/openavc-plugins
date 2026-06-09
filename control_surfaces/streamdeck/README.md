@@ -96,6 +96,10 @@ Manual navigation (a button's Navigate action) still works immediately; the next
 
 Example: switch to the full controls page when the projector turns on, and back to a simple "power on" page when it turns off.
 
+### Multiple Decks
+
+Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. With more than one deck attached, a deck picker appears above the grid in the Surface Configurator. Every deck mirrors the main configuration by default (handy for identical panels on both sides of a space). To give a deck its own assignments, select it and click **Customize separately**; **Identify** flashes the selected deck's keys so you can tell the hardware apart. **Mirror main config** drops a deck's custom assignments again.
+
 ### Automatic Brightness
 
 The **Brightness** section below the grid controls the deck's backlight automatically:
@@ -118,8 +122,11 @@ The **Brightness** section below the grid controls the deck's backlight automati
 | `plugin.streamdeck.has_touchscreen` | boolean | Whether the deck has a touchscreen strip (Stream Deck +) |
 | `plugin.streamdeck.has_info_screen` | boolean | Whether the deck has a secondary info screen (Neo) |
 | `plugin.streamdeck.current_page` | integer | Currently active page number |
+| `plugin.streamdeck.deck_count` | integer | Number of connected decks |
+| `plugin.streamdeck.deck_serials` | string | Comma-separated serials of connected decks |
+| `plugin.streamdeck.<serial>.*` | mixed | Per-deck keys (connected, model, geometry, current_page) for every connected deck |
 
-The hardware layout is detected when a deck connects, so the Surface Configurator always shows the deck that's actually plugged in. While no deck is connected it shows the default layout.
+The hardware layout is detected when a deck connects, so the Surface Configurator always shows the deck that's actually plugged in. While no deck is connected it shows the default layout. With several decks attached, the un-prefixed keys above track the first-connected deck; use the per-serial keys to automate against a specific deck.
 
 ## Events
 
@@ -141,7 +148,7 @@ The hardware layout is detected when a deck connects, so the Surface Configurato
 - **No Stream Deck found:** Make sure the deck is connected via USB. On Linux, check that the udev rule is installed (see Requirements above).
 - **Plugin shows Error:** Check the System Log for details. The most common issue is a missing HIDAPI library.
 - **Buttons not updating:** Make sure the feedback key you chose actually changes value. Check the State view to verify.
-- **Multiple decks:** The plugin currently connects to the first detected deck. Multi-deck support is planned.
+- **Multiple decks:** All connected decks are used. If two decks show the same buttons, that's the default mirroring -- select one in the deck picker and click Customize separately.
 
 ## License
 

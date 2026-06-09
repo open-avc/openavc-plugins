@@ -8,6 +8,10 @@ libraries:
 - visible_when evaluation and the button-visibility helper
 - auto_page rule evaluation (first match wins, clamping, no match)
 - subscription key collection (feedback + toggle + visible_when + auto_page)
+- dial turn/push routing, adjust clamping, touchscreen zones
+- Neo touch keys (color-only) and the info strip
+- auto-brightness rules and idle dim
+- multi-deck sessions (per-serial config, state, and teardown)
 
 The plugin's start()/render paths need the StreamDeck + PIL libraries and a
 physical deck, so they aren't exercised here. These tests bind a PluginAPI
@@ -96,6 +100,23 @@ def _make_plugin(config=None):
     """
     plugin, state, _macros, _devices = _make_plugin_with_recorders(config)
     return plugin, state
+
+
+def _session_for(plugin, deck=None):
+    """Create and register a _DeckSession the way _open_deck would.
+
+    Most logic tests need a session but no hardware; with deck=None every
+    render path stays inert (the guards check session.deck).
+    """
+    session = sd_module._DeckSession(deck)
+    if deck is not None:
+        session.serial = deck.get_serial_number() or "unknown"
+        session.model = deck.deck_type()
+        session.device_id = deck.id() if hasattr(deck, "id") else f"fake-{id(deck)}"
+    else:
+        session.device_id = f"session-{id(session)}"
+    plugin._sessions[session.device_id] = session
+    return session
 
 
 # ──── Vendored operator evaluator ────
@@ -267,12 +288,13 @@ async def test_auto_page_first_match_wins():
         ]
     }
     plugin, state = _make_plugin(config)
+    session = _session_for(plugin)
 
     state.set("device.proj.power", "on", source="test")
-    assert await plugin._evaluate_auto_page() == 1
+    assert await plugin._evaluate_auto_page(session) == 1
 
     state.set("device.proj.power", "off", source="test")
-    assert await plugin._evaluate_auto_page() == 0
+    assert await plugin._evaluate_auto_page(session) == 0
 
 
 @pytest.mark.asyncio
@@ -285,16 +307,18 @@ async def test_auto_page_order_matters():
         ]
     }
     plugin, state = _make_plugin(config)
+    session = _session_for(plugin)
     state.set("var.x", "1", source="test")
-    assert await plugin._evaluate_auto_page() == 2
+    assert await plugin._evaluate_auto_page(session) == 2
 
 
 @pytest.mark.asyncio
 async def test_auto_page_no_match_returns_none():
     config = {"auto_page": [{"page": 1, "when": {"key": "var.x", "operator": "eq", "value": "yes"}}]}
     plugin, state = _make_plugin(config)
+    session = _session_for(plugin)
     state.set("var.x", "no", source="test")
-    assert await plugin._evaluate_auto_page() is None
+    assert await plugin._evaluate_auto_page(session) is None
 
 
 @pytest.mark.asyncio
@@ -302,19 +326,22 @@ async def test_auto_page_clamps_out_of_range_page():
     # max_pages defaults to 10; a rule asking for page 99 clamps to 9.
     config = {"auto_page": [{"page": 99, "when": {"key": "var.x", "operator": "truthy"}}]}
     plugin, state = _make_plugin(config)
+    session = _session_for(plugin)
     state.set("var.x", "1", source="test")
-    assert await plugin._evaluate_auto_page() == 9
+    assert await plugin._evaluate_auto_page(session) == 9
 
 
 @pytest.mark.asyncio
 async def test_auto_page_absent_or_malformed():
     plugin, _ = _make_plugin({})
-    assert await plugin._evaluate_auto_page() is None
+    session = _session_for(plugin)
+    assert await plugin._evaluate_auto_page(session) is None
 
     plugin2, state = _make_plugin({"auto_page": [{"page": 1}, {"when": {"key": "a"}}, "junk"]})
+    session2 = _session_for(plugin2)
     state.set("a", "1", source="test")
     # Entries missing page or when are skipped; nothing valid matches.
-    assert await plugin2._evaluate_auto_page() is None
+    assert await plugin2._evaluate_auto_page(session2) is None
 
 
 # ──── _setup_feedback_subscriptions key collection ────
@@ -340,22 +367,24 @@ async def test_subscriptions_collect_all_key_sources():
         ],
     }
     plugin, _ = _make_plugin(config)
-    await plugin._setup_feedback_subscriptions()
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
 
     # Auto-page keys tracked separately
-    assert plugin._auto_page_keys == {"device.b.power", "device.c.power"}
+    assert session.auto_page_keys == {"device.b.power", "device.c.power"}
 
     # One subscription per unique watched key:
     # feedback, toggle_key, visible_when, second feedback, 2 auto_page keys = 6
-    assert len(plugin._feedback_subs) == 6
+    assert len(session.feedback_subs) == 6
 
 
 @pytest.mark.asyncio
 async def test_subscriptions_empty_config():
     plugin, _ = _make_plugin({})
-    await plugin._setup_feedback_subscriptions()
-    assert plugin._auto_page_keys == set()
-    assert plugin._feedback_subs == []
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.auto_page_keys == set()
+    assert session.feedback_subs == []
 
 
 # ──── _press_actions normalization ────
@@ -393,7 +422,8 @@ async def test_tap_fires_all_actions_in_order():
         {"action": "macro", "macro": "second"},
     ]}}]}
     plugin, _state, macros, _devices = _make_plugin_with_recorders(config)
-    await plugin._on_key_change(None, 0, True)
+    session = _session_for(plugin)
+    await plugin._on_key_change(session, None, 0, True)
     assert macros.executed == ["first", "second"]
 
 
@@ -403,9 +433,10 @@ async def test_tap_fires_only_on_press_not_release():
         {"action": "macro", "macro": "m"},
     ]}}]}
     plugin, _state, macros, _devices = _make_plugin_with_recorders(config)
-    await plugin._on_key_change(None, 0, False)  # release
+    session = _session_for(plugin)
+    await plugin._on_key_change(session, None, 0, False)  # release
     assert macros.executed == []
-    await plugin._on_key_change(None, 0, True)   # press
+    await plugin._on_key_change(session, None, 0, True)   # press
     assert macros.executed == ["m"]
 
 
@@ -416,12 +447,13 @@ async def test_hidden_button_fires_nothing():
         "visible_when": {"key": "device.p.power", "operator": "eq", "value": "on"},
     }}]}
     plugin, state, macros, _devices = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
     state.set("device.p.power", "off", source="test")
-    await plugin._on_key_change(None, 0, True)
+    await plugin._on_key_change(session, None, 0, True)
     assert macros.executed == []
     # Visible again -> fires normally.
     state.set("device.p.power", "on", source="test")
-    await plugin._on_key_change(None, 0, True)
+    await plugin._on_key_change(session, None, 0, True)
     assert macros.executed == ["m"]
 
 
@@ -435,11 +467,12 @@ async def test_toggle_fires_off_action_when_active_else_primary():
         {"action": "macro", "macro": "extra"},
     ]}}]}
     plugin, state, macros, _devices = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
     state.set("device.p.power", "on", source="test")
-    await plugin._on_key_change(None, 0, True)
+    await plugin._on_key_change(session, None, 0, True)
     assert macros.executed == ["turn_off"]
     state.set("device.p.power", "off", source="test")
-    await plugin._on_key_change(None, 0, True)
+    await plugin._on_key_change(session, None, 0, True)
     assert macros.executed == ["turn_off", "turn_on"]
 
 
@@ -451,7 +484,8 @@ async def test_toggle_ignores_release():
          "off_action": {"action": "macro", "macro": "off"}},
     ]}}]}
     plugin, _state, macros, _devices = _make_plugin_with_recorders(config)
-    await plugin._on_key_change(None, 0, False)
+    session = _session_for(plugin)
+    await plugin._on_key_change(session, None, 0, False)
     assert macros.executed == []
 
 
@@ -461,24 +495,27 @@ async def test_toggle_ignores_release():
 @pytest.mark.asyncio
 async def test_state_set_writes_own_plugin_namespace():
     plugin, state, _m, _d = _make_plugin_with_recorders()
+    session = _session_for(plugin)
     await plugin._execute_action(
-        {"action": "state.set", "key": "plugin.streamdeck.mode", "value": "show"}, 0)
+        session, {"action": "state.set", "key": "plugin.streamdeck.mode", "value": "show"}, 0)
     assert state.get("plugin.streamdeck.mode") == "show"
 
 
 @pytest.mark.asyncio
 async def test_state_set_writes_var_via_variable_set():
     plugin, state, _m, _d = _make_plugin_with_recorders()
+    session = _session_for(plugin)
     await plugin._execute_action(
-        {"action": "state.set", "key": "var.volume", "value": 42}, 0)
+        session, {"action": "state.set", "key": "var.volume", "value": 42}, 0)
     assert state.get("var.volume") == 42
 
 
 @pytest.mark.asyncio
 async def test_state_set_drops_foreign_device_key_with_warning():
     plugin, state, _m, _d = _make_plugin_with_recorders()
+    session = _session_for(plugin)
     await plugin._execute_action(
-        {"action": "state.set", "key": "device.proj.power", "value": "on"}, 0)
+        session, {"action": "state.set", "key": "device.proj.power", "value": "on"}, 0)
     # The confused-deputy write is dropped, not applied.
     assert state.get("device.proj.power") is None
     assert any(e["level"] == "warning" for e in plugin._test_logs)
@@ -487,8 +524,9 @@ async def test_state_set_drops_foreign_device_key_with_warning():
 @pytest.mark.asyncio
 async def test_state_set_drops_other_plugin_namespace():
     plugin, state, _m, _d = _make_plugin_with_recorders()
+    session = _session_for(plugin)
     await plugin._execute_action(
-        {"action": "state.set", "key": "plugin.other.x", "value": "y"}, 0)
+        session, {"action": "state.set", "key": "plugin.other.x", "value": "y"}, 0)
     assert state.get("plugin.other.x") is None
 
 
@@ -499,7 +537,8 @@ async def test_tap_runs_state_set_alongside_macro():
         {"action": "macro", "macro": "dim_lights"},
     ]}}]}
     plugin, state, macros, _d = _make_plugin_with_recorders(config)
-    await plugin._on_key_change(None, 0, True)
+    session = _session_for(plugin)
+    await plugin._on_key_change(session, None, 0, True)
     assert state.get("var.scene") == "movie"
     assert macros.executed == ["dim_lights"]
 
@@ -510,22 +549,24 @@ async def test_tap_runs_state_set_alongside_macro():
 @pytest.mark.asyncio
 async def test_navigate_next_and_prev_page():
     plugin, state, _m, _d = _make_plugin_with_recorders({})
-    await plugin._execute_action({"action": "navigate", "page": "__next_page__"}, 0)
-    assert plugin.current_page == 1
+    session = _session_for(plugin)
+    await plugin._execute_action(session, {"action": "navigate", "page": "__next_page__"}, 0)
+    assert session.current_page == 1
     assert state.get("plugin.streamdeck.current_page") == 1
-    await plugin._execute_action({"action": "navigate", "page": "__prev_page__"}, 0)
-    assert plugin.current_page == 0
+    await plugin._execute_action(session, {"action": "navigate", "page": "__prev_page__"}, 0)
+    assert session.current_page == 0
 
 
 @pytest.mark.asyncio
 async def test_navigate_to_page_index():
     plugin, state, _m, _d = _make_plugin_with_recorders({})
-    await plugin._execute_action({"action": "navigate", "page": "2"}, 0)
-    assert plugin.current_page == 2
+    session = _session_for(plugin)
+    await plugin._execute_action(session, {"action": "navigate", "page": "2"}, 0)
+    assert session.current_page == 2
     assert state.get("plugin.streamdeck.current_page") == 2
     # A non-numeric, non-special target is ignored (no crash, no move).
-    await plugin._execute_action({"action": "navigate", "page": "garbage"}, 0)
-    assert plugin.current_page == 2
+    await plugin._execute_action(session, {"action": "navigate", "page": "garbage"}, 0)
+    assert session.current_page == 2
 
 
 # ──── Watchdog: connect / unplug recovery / late connect ────
@@ -543,6 +584,9 @@ class _FakeDeck:
         self.closed = False
         self.brightness = None
         self.key_cb = None
+
+    def id(self):
+        return f"hid-{self.serial}"
 
     def open(self):
         self._open = True
@@ -615,7 +659,8 @@ async def test_watchdog_opens_deck_when_present(monkeypatch):
     deck = _FakeDeck()
     monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck]))
     await plugin._watchdog()
-    assert plugin.deck is deck
+    session = plugin._primary_session()
+    assert session is not None and session.deck is deck
     assert deck.is_open()
     assert state.get("plugin.streamdeck.connected") is True
     assert state.get("plugin.streamdeck.model") == "Stream Deck Pedal"
@@ -629,14 +674,14 @@ async def test_watchdog_recovers_after_unplug(monkeypatch):
     monkeypatch.setattr(sd_module, "StreamDeck", fake_sd)
 
     await plugin._watchdog()
-    assert plugin.deck is deck
+    assert plugin._primary_session().deck is deck
 
     # Unplug: the library closes the deck object and it stops enumerating.
     deck._open = False
     deck._connected = False
     fake_sd._decks = []
     await plugin._watchdog()
-    assert plugin.deck is None
+    assert plugin._sessions == {}
     assert state.get("plugin.streamdeck.connected") is False
     assert deck.closed is True
 
@@ -644,7 +689,7 @@ async def test_watchdog_recovers_after_unplug(monkeypatch):
     deck2 = _FakeDeck(serial="XYZ789")
     fake_sd._decks = [deck2]
     await plugin._watchdog()
-    assert plugin.deck is deck2
+    assert plugin._primary_session().deck is deck2
     assert state.get("plugin.streamdeck.connected") is True
     assert state.get("plugin.streamdeck.serial") == "XYZ789"
 
@@ -728,7 +773,7 @@ async def test_open_deck_wires_dial_and_touch_callbacks(monkeypatch):
     plugin2, _s2, _m2, _d2 = _make_plugin_with_recorders({})
     monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([basic]))
     await plugin2._watchdog()
-    assert plugin2.deck is basic
+    assert plugin2._primary_session().deck is basic
 
 
 # ──── Dials: turn / push routing, adjust clamping ────
@@ -756,9 +801,10 @@ async def test_dial_turn_routes_cw_and_ccw():
         "ccw": [{"action": "macro", "macro": "vol_down"}],
     }]}
     plugin, _state, macros, _d = _make_plugin_with_recorders(config)
-    await plugin._on_dial_event(None, 0, TURN, 1)
+    session = _session_for(plugin)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
     assert macros.executed == ["vol_up"]
-    await plugin._on_dial_event(None, 0, TURN, -2)
+    await plugin._on_dial_event(session, None, 0, TURN, -2)
     assert macros.executed == ["vol_up", "vol_down"]
 
 
@@ -769,18 +815,20 @@ async def test_dial_push_fires_press_only_on_press():
         "press": [{"action": "macro", "macro": "mute"}],
     }]}
     plugin, _state, macros, _d = _make_plugin_with_recorders(config)
-    await plugin._on_dial_event(None, 1, PUSH, False)  # release
+    session = _session_for(plugin)
+    await plugin._on_dial_event(session, None, 1, PUSH, False)  # release
     assert macros.executed == []
-    await plugin._on_dial_event(None, 1, PUSH, True)
+    await plugin._on_dial_event(session, None, 1, PUSH, True)
     assert macros.executed == ["mute"]
 
 
 @pytest.mark.asyncio
 async def test_dial_unconfigured_or_zero_turn_is_ignored():
     plugin, _state, macros, _d = _make_plugin_with_recorders({})
-    await plugin._on_dial_event(None, 0, TURN, 3)
-    await plugin._on_dial_event(None, 0, PUSH, True)
-    await plugin._on_dial_event(None, 0, TURN, 0)
+    session = _session_for(plugin)
+    await plugin._on_dial_event(session, None, 0, TURN, 3)
+    await plugin._on_dial_event(session, None, 0, PUSH, True)
+    await plugin._on_dial_event(session, None, 0, TURN, 0)
     assert macros.executed == []
 
 
@@ -791,20 +839,21 @@ async def test_dial_adjust_steps_and_clamps():
         "adjust": {"key": "var.volume", "step": 2, "min": 0, "max": 10},
     }]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
     state.set("var.volume", 8, source="test")
 
-    await plugin._on_dial_event(None, 0, TURN, 1)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
     assert state.get("var.volume") == 10
 
     # Already at max — clamped
-    await plugin._on_dial_event(None, 0, TURN, 3)
+    await plugin._on_dial_event(session, None, 0, TURN, 3)
     assert state.get("var.volume") == 10
 
-    await plugin._on_dial_event(None, 0, TURN, -1)
+    await plugin._on_dial_event(session, None, 0, TURN, -1)
     assert state.get("var.volume") == 8
 
     # Big CCW spin clamps at min
-    await plugin._on_dial_event(None, 0, TURN, -50)
+    await plugin._on_dial_event(session, None, 0, TURN, -50)
     assert state.get("var.volume") == 0
 
 
@@ -815,9 +864,10 @@ async def test_dial_adjust_turn_magnitude_scales_step():
         "adjust": {"key": "var.level", "step": 1},
     }]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
     state.set("var.level", 0, source="test")
     # 5 detents in one event (fast spin) moves 5 steps.
-    await plugin._on_dial_event(None, 0, TURN, 5)
+    await plugin._on_dial_event(session, None, 0, TURN, 5)
     assert state.get("var.level") == 5
 
 
@@ -828,7 +878,8 @@ async def test_dial_adjust_unset_value_starts_at_min():
         "adjust": {"key": "var.fresh", "step": 1, "min": 20, "max": 30},
     }]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
-    await plugin._on_dial_event(None, 0, TURN, 1)
+    session = _session_for(plugin)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
     assert state.get("var.fresh") == 21
 
 
@@ -839,7 +890,8 @@ async def test_dial_adjust_respects_state_scope_rule():
         "adjust": {"key": "device.proj.volume", "step": 1},
     }]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
-    await plugin._on_dial_event(None, 0, TURN, 1)
+    session = _session_for(plugin)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
     # Foreign namespace write is dropped with a warning, like state.set.
     assert state.get("device.proj.volume") is None
     assert any(e["level"] == "warning" for e in plugin._test_logs)
@@ -852,10 +904,11 @@ async def test_dial_adjust_float_step():
         "adjust": {"key": "var.gain", "step": 0.5},
     }]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
     state.set("var.gain", 0, source="test")
-    await plugin._on_dial_event(None, 0, TURN, 1)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
     assert state.get("var.gain") == 0.5
-    await plugin._on_dial_event(None, 0, TURN, 1)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
     # Whole numbers come back as ints so state stays clean.
     assert state.get("var.gain") == 1
 
@@ -870,8 +923,8 @@ async def test_default_zones_follow_dials():
         {"index": 2, "label": "Mics", "adjust": {"key": "var.mic_gain"}},
     ]}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakePlusDeck()
-    zones = plugin._touch_zones()
+    session = _session_for(plugin, _FakePlusDeck())
+    zones = plugin._touch_zones(session)
     # One zone per dial (the Plus has 4), evenly split across 800px.
     assert len(zones) == 4
     assert [z["x"] for z in zones] == [0, 200, 400, 600]
@@ -888,8 +941,8 @@ async def test_explicit_zones_override_and_even_split():
         {"label": "A"}, {"label": "B"}, {"label": "C"},
     ]}}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakePlusDeck()
-    zones = plugin._touch_zones()
+    session = _session_for(plugin, _FakePlusDeck())
+    zones = plugin._touch_zones(session)
     assert len(zones) == 3
     assert [z["x"] for z in zones] == [0, 266, 532]
     # Explicit pixel bounds win over the even split.
@@ -897,8 +950,8 @@ async def test_explicit_zones_override_and_even_split():
         {"label": "Wide", "x": 0, "w": 600}, {"label": "Narrow", "x": 600, "w": 200},
     ]}}
     plugin2, _s2, _m2, _d2 = _make_plugin_with_recorders(config2)
-    plugin2.deck = _FakePlusDeck()
-    zones2 = plugin2._touch_zones()
+    session2 = _session_for(plugin2, _FakePlusDeck())
+    zones2 = plugin2._touch_zones(session2)
     assert zones2[0]["w"] == 600
     assert zones2[1]["x"] == 600
 
@@ -909,12 +962,12 @@ async def test_zone_hit_testing():
         {"label": "A"}, {"label": "B"}, {"label": "C"}, {"label": "D"},
     ]}}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakePlusDeck()
-    assert plugin._zone_at(0)["label"] == "A"
-    assert plugin._zone_at(199)["label"] == "A"
-    assert plugin._zone_at(200)["label"] == "B"
-    assert plugin._zone_at(750)["label"] == "D"
-    assert plugin._zone_at(9999) is None
+    session = _session_for(plugin, _FakePlusDeck())
+    assert plugin._zone_at(session, 0)["label"] == "A"
+    assert plugin._zone_at(session, 199)["label"] == "A"
+    assert plugin._zone_at(session, 200)["label"] == "B"
+    assert plugin._zone_at(session, 750)["label"] == "D"
+    assert plugin._zone_at(session, 9999) is None
 
 
 @pytest.mark.asyncio
@@ -924,12 +977,12 @@ async def test_touch_event_runs_zone_actions():
         {"label": "B", "touch": [{"action": "macro", "macro": "zone_b"}]},
     ]}}
     plugin, _state, macros, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakePlusDeck()
-    await plugin._on_touchscreen_event(None, TOUCH_SHORT, {"x": 500, "y": 50})
+    session = _session_for(plugin, _FakePlusDeck())
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 500, "y": 50})
     assert macros.executed == ["zone_b"]
     # Drag events and malformed payloads are ignored.
-    await plugin._on_touchscreen_event(None, TOUCH_DRAG, {"x": 100, "y": 50})
-    await plugin._on_touchscreen_event(None, TOUCH_SHORT, "junk")
+    await plugin._on_touchscreen_event(session, None, TOUCH_DRAG, {"x": 100, "y": 50})
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, "junk")
     assert macros.executed == ["zone_b"]
 
 
@@ -942,9 +995,10 @@ async def test_subscriptions_include_touch_strip_keys():
         ]},
     }
     plugin, _state = _make_plugin(config)
-    await plugin._setup_feedback_subscriptions()
-    assert plugin._touch_strip_keys == {"var.volume", "var.zone_label", "var.mic_gain"}
-    assert len(plugin._feedback_subs) == 3
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.touch_strip_keys == {"var.volume", "var.zone_label", "var.mic_gain"}
+    assert len(session.feedback_subs) == 3
 
 
 @pytest.mark.asyncio
@@ -983,31 +1037,12 @@ async def test_render_touchscreen_draws_zones(monkeypatch):
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
     plugin._load_text_font()
     state.set("var.volume", 42, source="test")
-    plugin.deck = _VisualPlusDeck()
+    session = _session_for(plugin, _VisualPlusDeck())
 
-    await plugin._render_touchscreen()
+    await plugin._render_touchscreen(session)
     assert sent["image"] == b"native-strip"
     assert sent["size"] == (800, 100)
     assert sent["rect"] == (0, 0, 800, 100)
-
-
-@pytest.mark.asyncio
-async def test_watchdog_no_deck_stays_disconnected(monkeypatch):
-    plugin, state, _m, _d = _make_plugin_with_recorders({})
-    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([]))
-    await plugin._watchdog()
-    assert plugin.deck is None
-    assert state.get("plugin.streamdeck.connected") in (None, False)
-
-
-@pytest.mark.asyncio
-async def test_watchdog_skips_while_opening(monkeypatch):
-    # The re-entrancy guard prevents a second open while one is in progress.
-    plugin, _state, _m, _d = _make_plugin_with_recorders({})
-    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([_FakeDeck()]))
-    plugin._opening = True
-    await plugin._watchdog()
-    assert plugin.deck is None  # guard short-circuited the open
 
 
 # ──── Neo: touch keys (color-only) + info strip ────
@@ -1075,18 +1110,18 @@ async def test_touch_key_renders_color_not_image():
     config = {"buttons": [{"index": 8, "page": 0, "bg_color": "#ff0000",
                            "bindings": {"press": [{"action": "macro", "macro": "m"}]}}]}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakeNeoDeck()
-    await plugin._render_button(8)
-    assert plugin.deck.key_colors[8] == (255, 0, 0)
-    assert 8 not in plugin.deck.key_images
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._render_button(session, 8)
+    assert session.deck.key_colors[8] == (255, 0, 0)
+    assert 8 not in session.deck.key_images
 
 
 @pytest.mark.asyncio
 async def test_touch_key_unassigned_goes_dark():
     plugin, _state, _m, _d = _make_plugin_with_recorders({})
-    plugin.deck = _FakeNeoDeck()
-    await plugin._render_button(9)
-    assert plugin.deck.key_colors[9] == (0, 0, 0)
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._render_button(session, 9)
+    assert session.deck.key_colors[9] == (0, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -1095,10 +1130,10 @@ async def test_touch_key_hidden_goes_dark():
         "visible_when": {"key": "var.show", "operator": "truthy"},
     }}]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakeNeoDeck()
+    session = _session_for(plugin, _FakeNeoDeck())
     state.set("var.show", "", source="test")
-    await plugin._render_button(8)
-    assert plugin.deck.key_colors[8] == (0, 0, 0)
+    await plugin._render_button(session, 8)
+    assert session.deck.key_colors[8] == (0, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -1111,13 +1146,13 @@ async def test_touch_key_feedback_drives_color():
         },
     }}]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakeNeoDeck()
+    session = _session_for(plugin, _FakeNeoDeck())
     state.set("var.mute", "1", source="test")
-    await plugin._render_button(9)
-    assert plugin.deck.key_colors[9] == (0, 255, 0)
+    await plugin._render_button(session, 9)
+    assert session.deck.key_colors[9] == (0, 255, 0)
     state.set("var.mute", "0", source="test")
-    await plugin._render_button(9)
-    assert plugin.deck.key_colors[9] == (17, 17, 17)
+    await plugin._render_button(session, 9)
+    assert session.deck.key_colors[9] == (17, 17, 17)
 
 
 @pytest.mark.asyncio
@@ -1125,13 +1160,13 @@ async def test_touch_key_press_fires_actions_and_highlights():
     config = {"buttons": [{"index": 8, "page": 0, "bg_color": "#000000",
                            "bindings": {"press": [{"action": "macro", "macro": "m"}]}}]}
     plugin, _state, macros, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakeNeoDeck()
-    await plugin._on_key_change(None, 8, True)
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._on_key_change(session, None, 8, True)
     assert macros.executed == ["m"]
     # While held, the key color is brightened toward white.
-    assert plugin.deck.key_colors[8] == (63, 63, 63)
-    await plugin._on_key_change(None, 8, False)
-    assert plugin.deck.key_colors[8] == (0, 0, 0)
+    assert session.deck.key_colors[8] == (63, 63, 63)
+    await plugin._on_key_change(session, None, 8, False)
+    assert session.deck.key_colors[8] == (0, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -1164,11 +1199,11 @@ async def test_render_all_buttons_covers_touch_keys(monkeypatch):
 
     plugin, _state, _m, _d = _make_plugin_with_recorders({})
     plugin._load_text_font()
-    plugin.deck = _FakeNeoDeck()
-    await plugin._render_all_buttons()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._render_all_buttons(session)
     # 8 LCD keys get images, 2 touch keys get colors.
-    assert sorted(plugin.deck.key_images) == list(range(8))
-    assert sorted(plugin.deck.key_colors) == [8, 9]
+    assert sorted(session.deck.key_images) == list(range(8))
+    assert sorted(session.deck.key_colors) == [8, 9]
 
 
 @pytest.mark.asyncio
@@ -1193,10 +1228,10 @@ async def test_info_strip_renders_state_value(monkeypatch):
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
     plugin._load_text_font()
     state.set("var.temp", 72, source="test")
-    plugin.deck = _FakeNeoDeck()
+    session = _session_for(plugin, _FakeNeoDeck())
 
-    await plugin._render_info_strip()
-    assert plugin.deck.screen_image == b"native-screen"
+    await plugin._render_info_strip(session)
+    assert session.deck.screen_image == b"native-screen"
     assert sent["size"] == (248, 58)
 
 
@@ -1212,24 +1247,26 @@ async def test_info_strip_skipped_on_deck_without_screen(monkeypatch):
     plugin, _state, _m, _d = _make_plugin_with_recorders(
         {"info_strip": {"source": "text", "text": "hi"}}
     )
-    plugin.deck = _NoScreenDeck()
-    await plugin._render_info_strip()
-    assert plugin.deck.screen_image is None
+    session = _session_for(plugin, _NoScreenDeck())
+    await plugin._render_info_strip(session)
+    assert session.deck.screen_image is None
 
 
 @pytest.mark.asyncio
 async def test_info_strip_state_key_is_watched():
     config = {"info_strip": {"source": "state", "key": "var.temp"}}
     plugin, _state = _make_plugin(config)
-    await plugin._setup_feedback_subscriptions()
-    assert plugin._info_strip_keys == {"var.temp"}
-    assert len(plugin._feedback_subs) == 1
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.info_strip_keys == {"var.temp"}
+    assert len(session.feedback_subs) == 1
 
     # A static-text strip watches nothing.
     plugin2, _s2 = _make_plugin({"info_strip": {"source": "text", "text": "Room A"}})
-    await plugin2._setup_feedback_subscriptions()
-    assert plugin2._info_strip_keys == set()
-    assert plugin2._feedback_subs == []
+    session2 = _session_for(plugin2)
+    await plugin2._setup_feedback_subscriptions(session2)
+    assert session2.info_strip_keys == set()
+    assert session2.feedback_subs == []
 
 
 # ──── Brightness: auto rules + idle dim ────
@@ -1245,10 +1282,11 @@ async def test_brightness_rule_first_match_wins():
         ],
     }
     plugin, state = _make_plugin(config)
+    session = _session_for(plugin)
     state.set("var.night", "1", source="test")
-    assert await plugin._current_brightness_level() == 20
+    assert await plugin._current_brightness_level(session) == 20
     state.set("var.night", "", source="test")
-    assert await plugin._current_brightness_level() == 90
+    assert await plugin._current_brightness_level(session) == 90
 
 
 @pytest.mark.asyncio
@@ -1256,14 +1294,16 @@ async def test_brightness_no_match_uses_base_and_clamps():
     config = {"brightness": 70, "auto_brightness": [
         {"level": 150, "when": {"key": "var.x", "operator": "truthy"}}]}
     plugin, state = _make_plugin(config)
+    session = _session_for(plugin)
     # No rule matches -> base brightness.
-    assert await plugin._current_brightness_level() == 70
+    assert await plugin._current_brightness_level(session) == 70
     # Match -> level clamped to 100.
     state.set("var.x", "1", source="test")
-    assert await plugin._current_brightness_level() == 100
+    assert await plugin._current_brightness_level(session) == 100
     # Malformed rules are skipped (no when / not a dict).
     plugin2, _ = _make_plugin({"auto_brightness": ["junk", {"level": 5}], "brightness": 40})
-    assert await plugin2._current_brightness_level() == 40
+    session2 = _session_for(plugin2)
+    assert await plugin2._current_brightness_level(session2) == 40
 
 
 @pytest.mark.asyncio
@@ -1271,17 +1311,17 @@ async def test_brightness_rule_keys_watched_and_applied():
     config = {"brightness": 70, "auto_brightness": [
         {"level": 25, "when": {"key": "var.movie", "operator": "truthy"}}]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
-    plugin.deck = _FakeNeoDeck()
-    await plugin._setup_feedback_subscriptions()
-    assert plugin._brightness_keys == {"var.movie"}
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.brightness_keys == {"var.movie"}
 
     state.set("var.movie", "1", source="test")
-    await plugin._on_state_change("var.movie", "1", None)
-    assert plugin.deck.brightness == 25
+    await plugin._on_state_change(session, "var.movie", "1", None)
+    assert session.deck.brightness == 25
 
     state.set("var.movie", "", source="test")
-    await plugin._on_state_change("var.movie", "", "1")
-    assert plugin.deck.brightness == 70
+    await plugin._on_state_change(session, "var.movie", "", "1")
+    assert session.deck.brightness == 70
 
 
 @pytest.mark.asyncio
@@ -1289,20 +1329,19 @@ async def test_idle_dim_after_timeout_and_wake_on_input():
     import asyncio as _a
     config = {"brightness": 70, "idle_dim": {"after_seconds": 10, "level": 5}}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    deck = _FakeNeoDeck()
-    plugin.deck = deck
+    session = _session_for(plugin, _FakeNeoDeck())
     now = _a.get_event_loop().time()
-    plugin._last_input = now - 11
+    session.last_input = now - 11
 
-    await plugin._check_idle_dim()
-    assert plugin._idle_dimmed is True
-    assert deck.brightness == 5
+    await plugin._check_idle_dim(session)
+    assert session.idle_dimmed is True
+    assert session.deck.brightness == 5
 
     # Any input wakes the deck, restores brightness, resets the timer.
-    await plugin._on_key_change(None, 0, True)
-    assert plugin._idle_dimmed is False
-    assert deck.brightness == 70
-    assert plugin._last_input >= now
+    await plugin._on_key_change(session, None, 0, True)
+    assert session.idle_dimmed is False
+    assert session.deck.brightness == 70
+    assert session.last_input >= now
 
 
 @pytest.mark.asyncio
@@ -1310,12 +1349,11 @@ async def test_idle_dim_waits_for_timeout():
     import asyncio as _a
     config = {"idle_dim": {"after_seconds": 1000, "level": 5}}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    deck = _FakeNeoDeck()
-    plugin.deck = deck
-    plugin._last_input = _a.get_event_loop().time()
-    await plugin._check_idle_dim()
-    assert plugin._idle_dimmed is False
-    assert deck.brightness is None  # untouched
+    session = _session_for(plugin, _FakeNeoDeck())
+    session.last_input = _a.get_event_loop().time()
+    await plugin._check_idle_dim(session)
+    assert session.idle_dimmed is False
+    assert session.deck.brightness is None  # untouched
 
 
 @pytest.mark.asyncio
@@ -1326,9 +1364,10 @@ async def test_watchdog_tick_drives_idle_dim(monkeypatch):
     monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck]))
     await plugin._watchdog()  # opens the deck, applies base brightness
     assert deck.brightness == 70
-    plugin._last_input -= 11
+    session = plugin._primary_session()
+    session.last_input -= 11
     await plugin._watchdog()  # healthy tick doubles as the idle clock
-    assert plugin._idle_dimmed is True
+    assert session.idle_dimmed is True
     assert deck.brightness == 5
 
 
@@ -1336,12 +1375,161 @@ async def test_watchdog_tick_drives_idle_dim(monkeypatch):
 async def test_dial_input_wakes_idle_dimmed_deck():
     config = {"brightness": 60, "idle_dim": {"after_seconds": 10, "level": 0}}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    deck = _FakeNeoDeck()
-    plugin.deck = deck
-    plugin._idle_dimmed = True
-    await plugin._on_dial_event(None, 0, TURN, 1)
-    assert plugin._idle_dimmed is False
-    assert deck.brightness == 60
+    session = _session_for(plugin, _FakeNeoDeck())
+    session.idle_dimmed = True
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
+    assert session.idle_dimmed is False
+    assert session.deck.brightness == 60
+
+
+# ──── Multi-deck: sessions, per-serial config and state ────
+
+
+@pytest.mark.asyncio
+async def test_two_decks_open_with_per_serial_state(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    deck_a = _FakeDeck(serial="AAA")
+    deck_b = _FakePlusDeck(serial="BBB")
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck_a, deck_b]))
+    await plugin._watchdog()
+
+    assert len(plugin._sessions) == 2
+    assert state.get("plugin.streamdeck.deck_count") == 2
+    assert state.get("plugin.streamdeck.deck_serials") == "AAA,BBB"
+    # Singleton keys track the primary (first-connected) deck.
+    assert state.get("plugin.streamdeck.serial") == "AAA"
+    assert state.get("plugin.streamdeck.model") == "Stream Deck Pedal"
+    # Per-serial keys exist for both decks.
+    assert state.get("plugin.streamdeck.AAA.connected") is True
+    assert state.get("plugin.streamdeck.BBB.connected") is True
+    assert state.get("plugin.streamdeck.AAA.dial_count") == 0
+    assert state.get("plugin.streamdeck.BBB.dial_count") == 4
+    assert state.get("plugin.streamdeck.BBB.model") == "Stream Deck +"
+
+
+@pytest.mark.asyncio
+async def test_decks_mirror_flat_config_by_default(monkeypatch):
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "shared"}]}}]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    monkeypatch.setattr(
+        sd_module, "StreamDeck",
+        _FakeStreamDeck([_FakeDeck(serial="AAA"), _FakeDeck(serial="BBB")]),
+    )
+    await plugin._watchdog()
+    sess_a, sess_b = plugin._sessions.values()
+    await plugin._on_key_change(sess_a, None, 0, True)
+    await plugin._on_key_change(sess_b, None, 0, True)
+    # Without a decks override, both decks run the same (flat) assignments.
+    assert macros.executed == ["shared", "shared"]
+
+
+@pytest.mark.asyncio
+async def test_decks_override_gives_independent_assignments(monkeypatch):
+    config = {
+        "buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "main_cfg"}]}}],
+        "decks": {"BBB": {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "deck_b"}]}}]}},
+    }
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    monkeypatch.setattr(
+        sd_module, "StreamDeck",
+        _FakeStreamDeck([_FakeDeck(serial="AAA"), _FakeDeck(serial="BBB")]),
+    )
+    await plugin._watchdog()
+    sess_a, sess_b = plugin._sessions.values()
+    await plugin._on_key_change(sess_a, None, 0, True)
+    assert macros.executed == ["main_cfg"]
+    await plugin._on_key_change(sess_b, None, 0, True)
+    assert macros.executed == ["main_cfg", "deck_b"]
+
+
+@pytest.mark.asyncio
+async def test_decks_have_independent_pages(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(
+        sd_module, "StreamDeck",
+        _FakeStreamDeck([_FakeDeck(serial="AAA"), _FakeDeck(serial="BBB")]),
+    )
+    await plugin._watchdog()
+    sess_a, sess_b = plugin._sessions.values()
+
+    await plugin._change_page(sess_b, 2)
+    assert sess_b.current_page == 2
+    assert sess_a.current_page == 0
+    assert state.get("plugin.streamdeck.BBB.current_page") == 2
+    assert state.get("plugin.streamdeck.AAA.current_page") == 0
+    # The singleton key tracks the primary deck (AAA), which didn't move.
+    assert state.get("plugin.streamdeck.current_page") == 0
+
+
+@pytest.mark.asyncio
+async def test_removing_one_deck_leaves_other_running(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    deck_a = _FakeDeck(serial="AAA")
+    deck_b = _FakeDeck(serial="BBB")
+    fake_sd = _FakeStreamDeck([deck_a, deck_b])
+    monkeypatch.setattr(sd_module, "StreamDeck", fake_sd)
+    await plugin._watchdog()
+    assert len(plugin._sessions) == 2
+
+    # Unplug B only.
+    deck_b._open = False
+    deck_b._connected = False
+    fake_sd._decks = [deck_a]
+    await plugin._watchdog()
+
+    assert len(plugin._sessions) == 1
+    assert plugin._primary_session().deck is deck_a
+    assert state.get("plugin.streamdeck.AAA.connected") is True
+    assert state.get("plugin.streamdeck.BBB.connected") is False
+    assert state.get("plugin.streamdeck.deck_serials") == "AAA"
+    assert state.get("plugin.streamdeck.deck_count") == 1
+    assert state.get("plugin.streamdeck.connected") is True
+    assert deck_b.closed is True
+    assert deck_a.is_open()
+
+
+@pytest.mark.asyncio
+async def test_primary_failover_when_first_deck_leaves(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    deck_a = _FakeDeck(serial="AAA")
+    deck_b = _FakePlusDeck(serial="BBB")
+    fake_sd = _FakeStreamDeck([deck_a, deck_b])
+    monkeypatch.setattr(sd_module, "StreamDeck", fake_sd)
+    await plugin._watchdog()
+    assert state.get("plugin.streamdeck.serial") == "AAA"
+
+    # The primary deck goes away -> the singleton keys fail over to BBB.
+    deck_a._open = False
+    deck_a._connected = False
+    fake_sd._decks = [deck_b]
+    await plugin._watchdog()
+
+    assert state.get("plugin.streamdeck.connected") is True
+    assert state.get("plugin.streamdeck.serial") == "BBB"
+    assert state.get("plugin.streamdeck.model") == "Stream Deck +"
+    assert state.get("plugin.streamdeck.dial_count") == 4
+
+
+@pytest.mark.asyncio
+async def test_watchdog_no_deck_stays_disconnected(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([]))
+    await plugin._watchdog()
+    assert plugin._sessions == {}
+    assert state.get("plugin.streamdeck.connected") in (None, False)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_skips_while_opening(monkeypatch):
+    # The re-entrancy guard prevents a second open while one is in progress.
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([_FakeDeck()]))
+    plugin._opening = True
+    await plugin._watchdog()
+    assert plugin._sessions == {}  # guard short-circuited the open
 
 
 # ──── Bundled text font + button image rendering ────
@@ -1371,12 +1559,12 @@ def test_create_button_image_sizes_and_wraps(monkeypatch):
         def key_image_format(self):
             return {"size": (72, 72)}
 
-    plugin.deck = _VisualDeck()
+    session = sd_module._DeckSession(_VisualDeck())
 
     # Short and long labels both yield a correctly-sized image without raising.
     for label in ["OK", "Presentation Mode",
                   "A really long multi word button label that must wrap"]:
-        img = plugin._create_button_image(label, "#1a1a2e", "#e0e0e0")
+        img = plugin._create_button_image(session, label, "#1a1a2e", "#e0e0e0")
         assert img.size == (72, 72)
         assert img.mode == "RGB"
 
@@ -1385,7 +1573,7 @@ def test_create_button_image_sizes_and_wraps(monkeypatch):
 
     # Icon + label path also renders to the right size.
     plugin._load_icon_font()
-    img = plugin._create_button_image("Power", "#1a1a2e", "#e0e0e0", icon_name="power")
+    img = plugin._create_button_image(session, "Power", "#1a1a2e", "#e0e0e0", icon_name="power")
     assert img.size == (72, 72)
 
 
@@ -1416,10 +1604,11 @@ async def test_press_highlight_marker_set_and_cleared():
     config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
         {"action": "macro", "macro": "m"}]}}]}
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
-    await plugin._on_key_change(None, 0, True)
-    assert 0 in plugin._pressed_keys
-    await plugin._on_key_change(None, 0, False)
-    assert 0 not in plugin._pressed_keys
+    session = _session_for(plugin)
+    await plugin._on_key_change(session, None, 0, True)
+    assert 0 in session.pressed_keys
+    await plugin._on_key_change(session, None, 0, False)
+    assert 0 not in session.pressed_keys
 
 
 @pytest.mark.asyncio
@@ -1429,9 +1618,10 @@ async def test_press_highlight_not_set_for_hidden_button():
         "visible_when": {"key": "var.show", "operator": "truthy"},
     }}]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
     state.set("var.show", "", source="test")  # hidden
-    await plugin._on_key_change(None, 0, True)
-    assert 0 not in plugin._pressed_keys
+    await plugin._on_key_change(session, None, 0, True)
+    assert 0 not in session.pressed_keys
 
 
 @pytest.mark.asyncio
@@ -1441,12 +1631,13 @@ async def test_press_highlight_cleared_when_hidden_mid_press():
         "visible_when": {"key": "var.show", "operator": "truthy"},
     }}]}
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
     state.set("var.show", "1", source="test")
-    await plugin._on_key_change(None, 0, True)
-    assert 0 in plugin._pressed_keys
+    await plugin._on_key_change(session, None, 0, True)
+    assert 0 in session.pressed_keys
     state.set("var.show", "", source="test")  # hidden before release
-    await plugin._on_key_change(None, 0, False)
-    assert 0 not in plugin._pressed_keys
+    await plugin._on_key_change(session, None, 0, False)
+    assert 0 not in session.pressed_keys
 
 
 def test_press_highlight_image_same_size(monkeypatch):
