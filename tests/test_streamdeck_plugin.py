@@ -39,6 +39,7 @@ from control_surfaces.streamdeck.streamdeck_plugin import (  # noqa: E402
     _condition_state_keys,
     _eval_operator,
 )
+import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 
 try:
     from server.core.plugin_api import PluginAPI
@@ -525,3 +526,134 @@ async def test_navigate_to_page_index():
     # A non-numeric, non-special target is ignored (no crash, no move).
     await plugin._execute_action({"action": "navigate", "page": "garbage"}, 0)
     assert plugin.current_page == 2
+
+
+# ──── Watchdog: connect / unplug recovery / late connect ────
+#
+# A non-visual fake deck (is_visual() False, like a Pedal) lets us exercise
+# the open/teardown path without PIL or the StreamDeck library: rendering is
+# skipped for non-visual decks, so no image code runs.
+
+
+class _FakeDeck:
+    def __init__(self, serial="ABC123"):
+        self._open = False
+        self._connected = True
+        self.serial = serial
+        self.closed = False
+        self.brightness = None
+        self.key_cb = None
+
+    def open(self):
+        self._open = True
+
+    def reset(self):
+        pass
+
+    def close(self):
+        self._open = False
+        self.closed = True
+
+    def is_open(self):
+        return self._open
+
+    def connected(self):
+        return self._connected
+
+    def is_visual(self):
+        return False  # skip rendering -> no PIL needed
+
+    def deck_type(self):
+        return "Stream Deck Pedal"
+
+    def get_serial_number(self):
+        return self.serial
+
+    def key_count(self):
+        return 3
+
+    def key_layout(self):
+        return (1, 3)
+
+    def set_brightness(self, b):
+        self.brightness = b
+
+    def set_key_callback_async(self, cb, loop=None):
+        self.key_cb = cb
+
+
+class _FakeManager:
+    def __init__(self, decks):
+        self._decks = decks
+
+    def enumerate(self):
+        return list(self._decks)
+
+
+class _FakeStreamDeck:
+    """Stand-in for the StreamDeck module's DeviceManager factory."""
+
+    def __init__(self, decks):
+        self._decks = decks
+
+    def DeviceManager(self):
+        return _FakeManager(self._decks)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_opens_deck_when_present(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    deck = _FakeDeck()
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck]))
+    await plugin._watchdog()
+    assert plugin.deck is deck
+    assert deck.is_open()
+    assert state.get("plugin.streamdeck.connected") is True
+    assert state.get("plugin.streamdeck.model") == "Stream Deck Pedal"
+
+
+@pytest.mark.asyncio
+async def test_watchdog_recovers_after_unplug(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    deck = _FakeDeck()
+    fake_sd = _FakeStreamDeck([deck])
+    monkeypatch.setattr(sd_module, "StreamDeck", fake_sd)
+
+    await plugin._watchdog()
+    assert plugin.deck is deck
+
+    # Unplug: the library closes the deck object and it stops enumerating.
+    deck._open = False
+    deck._connected = False
+    fake_sd._decks = []
+    await plugin._watchdog()
+    assert plugin.deck is None
+    assert state.get("plugin.streamdeck.connected") is False
+    assert deck.closed is True
+
+    # A deck reappears -> the same watchdog re-opens it.
+    deck2 = _FakeDeck(serial="XYZ789")
+    fake_sd._decks = [deck2]
+    await plugin._watchdog()
+    assert plugin.deck is deck2
+    assert state.get("plugin.streamdeck.connected") is True
+    assert state.get("plugin.streamdeck.serial") == "XYZ789"
+
+
+@pytest.mark.asyncio
+async def test_watchdog_no_deck_stays_disconnected(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([]))
+    await plugin._watchdog()
+    assert plugin.deck is None
+    assert state.get("plugin.streamdeck.connected") in (None, False)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_skips_while_opening(monkeypatch):
+    # The re-entrancy guard prevents a second open while one is in progress.
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([_FakeDeck()]))
+    plugin._opening = True
+    await plugin._watchdog()
+    assert plugin.deck is None  # guard short-circuited the open

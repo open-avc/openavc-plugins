@@ -269,7 +269,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -447,6 +447,7 @@ class StreamDeckPlugin:
         self._auto_page_keys = set()   # state keys watched by auto_page rules
         self._loop = None
         self._model_info = None
+        self._opening = False    # re-entrancy guard while a deck is being opened
         self._hold_tasks = {}    # key_index -> periodic task ID for hold-repeat
         self._press_times = {}   # key_index -> timestamp for tap/hold mode
         self._icon_font = None   # Loaded Lucide TTF font for icon rendering
@@ -479,30 +480,27 @@ class StreamDeckPlugin:
         await self.api.state_set("current_page", 0)
         await self.api.state_set("key_count", 0)
 
-        # Try to find and open a deck
+        # Validate HIDAPI is loadable now, so a missing native library fails
+        # the plugin with a clear message instead of silently looping in the
+        # watchdog below.
         try:
-            decks = StreamDeck.DeviceManager().enumerate()
+            StreamDeck.DeviceManager().enumerate()
         except Exception as e:
             if "hidapi" in str(e).lower() or "hid" in str(e).lower():
                 raise RuntimeError(self._hidapi_error_message()) from e
             raise
 
-        if not decks:
-            self.api.log(
-                "No Stream Deck devices found. Connect a device and restart the plugin.",
-                level="warning",
-            )
-            # Start polling for device connection
-            self.api.create_periodic_task(
-                self._poll_for_device, interval_seconds=5, name="deck_poll"
-            )
-            return
-
-        await self._open_deck(decks[0])
-
-        # Subscribe to context actions
+        # Subscribe to context actions (independent of any connected deck, and
+        # kept across reconnects).
         await self.api.event_subscribe(
             "plugin.streamdeck.action.*", self._on_context_action
+        )
+
+        # A single watchdog opens the deck if one is present now, recovers it
+        # after a mid-session unplug, and connects one that appears later. Its
+        # first iteration runs almost immediately.
+        self.api.create_periodic_task(
+            self._watchdog, interval_seconds=3, name="deck_watchdog"
         )
 
     async def stop(self):
@@ -567,17 +565,78 @@ class StreamDeckPlugin:
         # Render all buttons for the current page
         await self._render_all_buttons()
 
-    async def _poll_for_device(self):
-        """Periodically check if a deck has been connected."""
-        if self.deck and self.deck.is_open():
+    async def _watchdog(self):
+        """Keep a deck connected: open one if present, recover after unplug.
+
+        Runs on a single periodic task for the plugin's whole lifetime, so a
+        deck that is unplugged mid-session is detected and re-opened on the next
+        tick (the bundled library closes the deck object on a transport error
+        but never re-opens it). Periodic ticks never overlap, but an
+        ``_opening`` guard is kept so a slow open can't be re-entered.
+        """
+        if self._opening:
             return
+
+        # If we hold a deck, confirm it's still healthy; otherwise tear it down.
+        if self.deck is not None:
+            try:
+                healthy = self.deck.is_open() and self.deck.connected()
+            except Exception:
+                healthy = False
+            if healthy:
+                return
+            await self._handle_deck_lost()
+
+        # No (healthy) deck — try to (re)connect to the first one present.
         try:
             decks = StreamDeck.DeviceManager().enumerate()
-            if decks:
-                self.api.log("Stream Deck detected, connecting...")
-                await self._open_deck(decks[0])
         except Exception:
-            pass
+            decks = []
+        if not decks:
+            return
+
+        self._opening = True
+        try:
+            await self._open_deck(decks[0])
+        except Exception as e:
+            self.api.log(f"Failed to open Stream Deck: {e}", level="warning")
+            self.deck = None
+        finally:
+            self._opening = False
+
+    async def _handle_deck_lost(self):
+        """Tear down a deck that has gone away so the watchdog can re-open it.
+
+        Cancels in-flight hold-repeat tasks, drops the feedback subscriptions
+        (re-created on re-open), closes the stale deck object, and publishes the
+        disconnect. The context-action subscription is left intact — it lives
+        for the plugin's whole lifetime, not per-deck.
+        """
+        self.api.log("Stream Deck disconnected", level="warning")
+
+        for task_id in list(self._hold_tasks.values()):
+            self.api.cancel_task(task_id)
+        self._hold_tasks.clear()
+        self._press_times.clear()
+
+        for sub_id in self._feedback_subs:
+            try:
+                await self.api.state_unsubscribe(sub_id)
+            except Exception:
+                pass
+        self._feedback_subs = []
+
+        old = self.deck
+        self.deck = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+
+        self._model_info = None
+        await self.api.state_set("connected", False)
+        await self.api.event_emit("disconnected", {})
 
     # ──── Key Handling ────
 
