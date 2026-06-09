@@ -56,15 +56,19 @@ except ModuleNotFoundError:
 # ──── Helpers ────
 
 
-def _make_plugin(config=None):
+def _make_plugin_with_recorders(config=None):
     """Build a StreamDeckPlugin bound to a real StateStore via PluginAPI.
 
-    Returns (plugin, state_store). start() is intentionally not called.
+    Returns (plugin, state_store, macro_engine, device_manager) so a test can
+    assert what the plugin executed. start() is intentionally not called (that
+    is what pulls in the StreamDeck/PIL libraries and needs hardware).
     """
     state = StateStore()
     events = EventBus()
     state.set_event_bus(events)
     registry = PluginRegistry("streamdeck")
+    macros = MockMacroEngine()
+    devices = MockDeviceManager()
     api = PluginAPI(
         plugin_id="streamdeck",
         capabilities=StreamDeckPlugin.PLUGIN_INFO["capabilities"],
@@ -72,12 +76,21 @@ def _make_plugin(config=None):
         registry=registry,
         state_store=state,
         event_bus=events,
-        macro_engine=MockMacroEngine(),
-        device_manager=MockDeviceManager(),
+        macro_engine=macros,
+        device_manager=devices,
         platform_id="test",
     )
     plugin = StreamDeckPlugin()
     plugin.api = api
+    return plugin, state, macros, devices
+
+
+def _make_plugin(config=None):
+    """Build a StreamDeckPlugin bound to a real StateStore via PluginAPI.
+
+    Returns (plugin, state_store). start() is intentionally not called.
+    """
+    plugin, state, _macros, _devices = _make_plugin_with_recorders(config)
     return plugin, state
 
 
@@ -339,3 +352,100 @@ async def test_subscriptions_empty_config():
     await plugin._setup_feedback_subscriptions()
     assert plugin._auto_page_keys == set()
     assert plugin._feedback_subs == []
+
+
+# ──── _press_actions normalization ────
+
+
+def test_press_actions_list():
+    assert StreamDeckPlugin._press_actions(
+        {"press": [{"action": "macro", "macro": "a"}, {"action": "macro", "macro": "b"}]}
+    ) == [{"action": "macro", "macro": "a"}, {"action": "macro", "macro": "b"}]
+
+
+def test_press_actions_single_dict_wrapped():
+    assert StreamDeckPlugin._press_actions({"press": {"action": "macro", "macro": "a"}}) == [
+        {"action": "macro", "macro": "a"}
+    ]
+
+
+def test_press_actions_absent_or_invalid():
+    assert StreamDeckPlugin._press_actions({}) == []
+    assert StreamDeckPlugin._press_actions({"press": None}) == []
+    assert StreamDeckPlugin._press_actions("not a dict") == []
+    # Non-dict entries inside the array are dropped.
+    assert StreamDeckPlugin._press_actions({"press": ["x", {"action": "macro", "macro": "a"}]}) == [
+        {"action": "macro", "macro": "a"}
+    ]
+
+
+# ──── Press execution: tap fires every action, in order ────
+
+
+@pytest.mark.asyncio
+async def test_tap_fires_all_actions_in_order():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "first"},
+        {"action": "macro", "macro": "second"},
+    ]}}]}
+    plugin, _state, macros, _devices = _make_plugin_with_recorders(config)
+    await plugin._on_key_change(None, 0, True)
+    assert macros.executed == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_tap_fires_only_on_press_not_release():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "m"},
+    ]}}]}
+    plugin, _state, macros, _devices = _make_plugin_with_recorders(config)
+    await plugin._on_key_change(None, 0, False)  # release
+    assert macros.executed == []
+    await plugin._on_key_change(None, 0, True)   # press
+    assert macros.executed == ["m"]
+
+
+@pytest.mark.asyncio
+async def test_hidden_button_fires_nothing():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {
+        "press": [{"action": "macro", "macro": "m"}],
+        "visible_when": {"key": "device.p.power", "operator": "eq", "value": "on"},
+    }}]}
+    plugin, state, macros, _devices = _make_plugin_with_recorders(config)
+    state.set("device.p.power", "off", source="test")
+    await plugin._on_key_change(None, 0, True)
+    assert macros.executed == []
+    # Visible again -> fires normally.
+    state.set("device.p.power", "on", source="test")
+    await plugin._on_key_change(None, 0, True)
+    assert macros.executed == ["m"]
+
+
+@pytest.mark.asyncio
+async def test_toggle_fires_off_action_when_active_else_primary():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "turn_on", "mode": "toggle",
+         "toggle_key": "device.p.power", "toggle_value": "on",
+         "off_action": {"action": "macro", "macro": "turn_off"}},
+        # An extra action is ignored in toggle mode (toggle uses the first entry).
+        {"action": "macro", "macro": "extra"},
+    ]}}]}
+    plugin, state, macros, _devices = _make_plugin_with_recorders(config)
+    state.set("device.p.power", "on", source="test")
+    await plugin._on_key_change(None, 0, True)
+    assert macros.executed == ["turn_off"]
+    state.set("device.p.power", "off", source="test")
+    await plugin._on_key_change(None, 0, True)
+    assert macros.executed == ["turn_off", "turn_on"]
+
+
+@pytest.mark.asyncio
+async def test_toggle_ignores_release():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "on", "mode": "toggle",
+         "toggle_key": "var.x", "toggle_value": "1",
+         "off_action": {"action": "macro", "macro": "off"}},
+    ]}}]}
+    plugin, _state, macros, _devices = _make_plugin_with_recorders(config)
+    await plugin._on_key_change(None, 0, False)
+    assert macros.executed == []

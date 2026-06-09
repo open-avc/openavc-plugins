@@ -269,7 +269,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -596,9 +596,12 @@ class StreamDeckPlugin:
             self._press_times.pop(key_index, None)
             return
 
-        # Get press binding (UI stores press as an array of actions)
+        # Get press binding. The UI stores press as an array of actions; mode
+        # and toggle/hold config live on the first entry, while a default tap
+        # button fires every entry in order.
         bindings = assignment.get("bindings", {})
-        press = _unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
+        press_actions = self._press_actions(bindings)
+        press = press_actions[0] if press_actions else None
 
         if not press or not isinstance(press, dict):
             return
@@ -674,9 +677,32 @@ class StreamDeckPlugin:
                     await self._execute_action(press, key_index)
             return
 
-        # Default: tap mode — fire on press only
+        # Default: tap mode — fire every configured action in order, on press
         if pressed:
-            await self._execute_action(press, key_index)
+            await self._execute_actions(press_actions, key_index)
+
+    @staticmethod
+    def _press_actions(bindings):
+        """Return the press binding as a list of action dicts.
+
+        The Surface Configurator stores ``press`` as an array of action
+        objects (mode/toggle/hold config lives on the first entry). A single
+        dict is wrapped; anything else yields an empty list.
+        """
+        if not isinstance(bindings, dict):
+            return []
+        press = bindings.get("press")
+        if isinstance(press, list):
+            return [a for a in press if isinstance(a, dict)]
+        if isinstance(press, dict):
+            return [press]
+        return []
+
+    async def _execute_actions(self, actions, key_index):
+        """Execute a list of action bindings sequentially, in order."""
+        for action in actions:
+            if isinstance(action, dict):
+                await self._execute_action(action, key_index)
 
     async def _execute_action(self, action_binding, key_index):
         """Execute a single action binding (macro, device command, navigate)."""
