@@ -69,6 +69,7 @@ def _make_plugin_with_recorders(config=None):
     registry = PluginRegistry("streamdeck")
     macros = MockMacroEngine()
     devices = MockDeviceManager()
+    logs: list[dict] = []
     api = PluginAPI(
         plugin_id="streamdeck",
         capabilities=StreamDeckPlugin.PLUGIN_INFO["capabilities"],
@@ -79,9 +80,11 @@ def _make_plugin_with_recorders(config=None):
         macro_engine=macros,
         device_manager=devices,
         platform_id="test",
+        log_fn=lambda pid, msg, level="info": logs.append({"level": level, "message": msg}),
     )
     plugin = StreamDeckPlugin()
     plugin.api = api
+    plugin._test_logs = logs  # captured log entries, for assertions
     return plugin, state, macros, devices
 
 
@@ -449,3 +452,76 @@ async def test_toggle_ignores_release():
     plugin, _state, macros, _devices = _make_plugin_with_recorders(config)
     await plugin._on_key_change(None, 0, False)
     assert macros.executed == []
+
+
+# ──── state.set scope (mirrors the panel plugin bridge) ────
+
+
+@pytest.mark.asyncio
+async def test_state_set_writes_own_plugin_namespace():
+    plugin, state, _m, _d = _make_plugin_with_recorders()
+    await plugin._execute_action(
+        {"action": "state.set", "key": "plugin.streamdeck.mode", "value": "show"}, 0)
+    assert state.get("plugin.streamdeck.mode") == "show"
+
+
+@pytest.mark.asyncio
+async def test_state_set_writes_var_via_variable_set():
+    plugin, state, _m, _d = _make_plugin_with_recorders()
+    await plugin._execute_action(
+        {"action": "state.set", "key": "var.volume", "value": 42}, 0)
+    assert state.get("var.volume") == 42
+
+
+@pytest.mark.asyncio
+async def test_state_set_drops_foreign_device_key_with_warning():
+    plugin, state, _m, _d = _make_plugin_with_recorders()
+    await plugin._execute_action(
+        {"action": "state.set", "key": "device.proj.power", "value": "on"}, 0)
+    # The confused-deputy write is dropped, not applied.
+    assert state.get("device.proj.power") is None
+    assert any(e["level"] == "warning" for e in plugin._test_logs)
+
+
+@pytest.mark.asyncio
+async def test_state_set_drops_other_plugin_namespace():
+    plugin, state, _m, _d = _make_plugin_with_recorders()
+    await plugin._execute_action(
+        {"action": "state.set", "key": "plugin.other.x", "value": "y"}, 0)
+    assert state.get("plugin.other.x") is None
+
+
+@pytest.mark.asyncio
+async def test_tap_runs_state_set_alongside_macro():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "state.set", "key": "var.scene", "value": "movie"},
+        {"action": "macro", "macro": "dim_lights"},
+    ]}}]}
+    plugin, state, macros, _d = _make_plugin_with_recorders(config)
+    await plugin._on_key_change(None, 0, True)
+    assert state.get("var.scene") == "movie"
+    assert macros.executed == ["dim_lights"]
+
+
+# ──── navigate (deck pages) ────
+
+
+@pytest.mark.asyncio
+async def test_navigate_next_and_prev_page():
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    await plugin._execute_action({"action": "navigate", "page": "__next_page__"}, 0)
+    assert plugin.current_page == 1
+    assert state.get("plugin.streamdeck.current_page") == 1
+    await plugin._execute_action({"action": "navigate", "page": "__prev_page__"}, 0)
+    assert plugin.current_page == 0
+
+
+@pytest.mark.asyncio
+async def test_navigate_to_page_index():
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    await plugin._execute_action({"action": "navigate", "page": "2"}, 0)
+    assert plugin.current_page == 2
+    assert state.get("plugin.streamdeck.current_page") == 2
+    # A non-numeric, non-special target is ignored (no crash, no move).
+    await plugin._execute_action({"action": "navigate", "page": "garbage"}, 0)
+    assert plugin.current_page == 2

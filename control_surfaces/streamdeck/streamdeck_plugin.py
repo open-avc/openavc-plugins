@@ -269,13 +269,13 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.3.0",
+        "version": "1.4.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        "min_openavc_version": "0.3.0",
+        "min_openavc_version": "0.16.0",
         "dependencies": ["streamdeck", "pillow>=10.0"],
         "native_dependencies": [
             {
@@ -313,6 +313,7 @@ class StreamDeckPlugin:
         "capabilities": [
             "state_read",
             "state_write",
+            "variable_write",
             "event_emit",
             "event_subscribe",
             "macro_execute",
@@ -365,6 +366,14 @@ class StreamDeckPlugin:
         "detected from hardware at runtime. Button indices go left-to-right, "
         "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
         "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
+        "A button's 'press' is an array of one or more actions, run in order. "
+        "Supported press actions are exactly: macro, device.command, state.set, "
+        "and navigate (deck page: page \"__next_page__\", \"__prev_page__\", or a "
+        "page index). state.set may write only this plugin's own "
+        "plugin.streamdeck.* state or a var.* user variable; writes to device.*, "
+        "ui.*, or system.* are ignored. script.call and value_map are panel-only "
+        "and do not run on surface buttons — to call a script from a button, run "
+        "a one-line macro instead. "
         "Common AV icons: power, volume-2, volume-x, play, pause, square (stop), "
         "skip-back, skip-forward, mic, mic-off, monitor, tv, sun, moon, "
         "thermometer, fan, camera, video, airplay, cast. "
@@ -705,7 +714,12 @@ class StreamDeckPlugin:
                 await self._execute_action(action, key_index)
 
     async def _execute_action(self, action_binding, key_index):
-        """Execute a single action binding (macro, device command, navigate)."""
+        """Execute a single surface action binding.
+
+        Supports the documented surface action set: ``macro``,
+        ``device.command``, ``state.set`` (scoped like the panel plugin
+        bridge), and ``navigate`` (deck page: next/previous or a page index).
+        """
         action = action_binding.get("action", "")
 
         if action == "navigate":
@@ -714,6 +728,12 @@ class StreamDeckPlugin:
                 await self._change_page(self.current_page + 1)
             elif page_id == "__prev_page__":
                 await self._change_page(self.current_page - 1)
+            else:
+                # A specific page index (int or numeric string).
+                try:
+                    await self._change_page(int(page_id))
+                except (TypeError, ValueError):
+                    pass
 
         elif action == "macro":
             macro = action_binding.get("macro", "")
@@ -734,6 +754,34 @@ class StreamDeckPlugin:
                     self.api.log(f"Sent {command} to {device} from key {key_index}", level="debug")
                 except Exception as e:
                     self.api.log(f"Error sending command: {e}", level="error")
+
+        elif action == "state.set":
+            key = action_binding.get("key", "")
+            if key:
+                try:
+                    await self._apply_state_set(key, action_binding.get("value"))
+                except Exception as e:
+                    self.api.log(f"Error setting state '{key}': {e}", level="error")
+
+    async def _apply_state_set(self, key, value):
+        """Write a state value, mirroring the panel plugin-bridge scope rule.
+
+        A surface button may write only its own ``plugin.<id>.*`` namespace
+        (via ``state_set``) or a ``var.*`` user variable (via ``variable_set``).
+        Anything else is a confused-deputy write and is dropped with a warning —
+        exactly the scope rule the panel plugin bridge enforces in panel.js.
+        """
+        prefix = f"plugin.{self.api.plugin_id}."
+        if key.startswith(prefix):
+            await self.api.state_set(key, value)
+        elif key.startswith("var."):
+            await self.api.variable_set(key[len("var."):], value)
+        else:
+            self.api.log(
+                f"Ignoring state.set to '{key}': a surface button may only write "
+                f"its own {prefix}* state or a var.* user variable.",
+                level="warning",
+            )
 
     # ──── Page Navigation ────
 
