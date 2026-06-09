@@ -9,10 +9,13 @@ Supported models: Neo, Mini, MK.2/Original V2, XL, Plus, Pedal.
 
 import asyncio
 import functools
+import io
 import json
 import os
 import platform as platform_mod
+import re
 from pathlib import Path
+from types import SimpleNamespace
 
 # StreamDeck and PIL are imported lazily in start() to ensure
 # the .deps/ DLL search path is set up by the plugin loader first.
@@ -196,6 +199,161 @@ def _condition_state_keys(cond):
     return keys
 
 
+# ──── Virtual decks ────
+#
+# A virtual deck is a software stand-in implementing the same device interface
+# the sessions consume — it opens, renders, and receives input exactly like
+# attached hardware, except the "display" is the live mirror served over the
+# plugin's HTTP routes and input arrives via the simulate_input context
+# action. Lets layouts be built and tested with no deck attached.
+
+_NO_DISPLAY = {"size": (0, 0), "format": "", "flip": (False, False), "rotation": 0}
+
+# Geometry/format presets per virtual model. These mirror the bundled
+# library's per-device constants (Devices/StreamDeck*.py) so a virtual deck
+# renders byte-identically to the real hardware path.
+_VIRTUAL_MODELS = {
+    "Stream Deck Neo": {
+        "key_count": 8, "rows": 2, "cols": 4, "dials": 0, "touch_keys": 2,
+        "touch": False, "visual": True,
+        "key_format": {"size": (96, 96), "format": "JPEG", "flip": (True, True), "rotation": 0},
+        "screen_format": {"size": (248, 58), "format": "JPEG", "flip": (True, True), "rotation": 0},
+        "touchscreen_format": _NO_DISPLAY,
+    },
+    "Stream Deck Mini": {
+        "key_count": 6, "rows": 2, "cols": 3, "dials": 0, "touch_keys": 0,
+        "touch": False, "visual": True,
+        "key_format": {"size": (80, 80), "format": "BMP", "flip": (False, True), "rotation": 90},
+        "screen_format": _NO_DISPLAY,
+        "touchscreen_format": _NO_DISPLAY,
+    },
+    "Stream Deck MK.2": {
+        "key_count": 15, "rows": 3, "cols": 5, "dials": 0, "touch_keys": 0,
+        "touch": False, "visual": True,
+        "key_format": {"size": (72, 72), "format": "JPEG", "flip": (True, True), "rotation": 0},
+        "screen_format": _NO_DISPLAY,
+        "touchscreen_format": _NO_DISPLAY,
+    },
+    "Stream Deck XL": {
+        "key_count": 32, "rows": 4, "cols": 8, "dials": 0, "touch_keys": 0,
+        "touch": False, "visual": True,
+        "key_format": {"size": (96, 96), "format": "JPEG", "flip": (True, True), "rotation": 0},
+        "screen_format": _NO_DISPLAY,
+        "touchscreen_format": _NO_DISPLAY,
+    },
+    "Stream Deck +": {
+        "key_count": 8, "rows": 2, "cols": 4, "dials": 4, "touch_keys": 0,
+        "touch": True, "visual": True,
+        "key_format": {"size": (120, 120), "format": "JPEG", "flip": (False, False), "rotation": 0},
+        "screen_format": _NO_DISPLAY,
+        "touchscreen_format": {"size": (800, 100), "format": "JPEG", "flip": (False, False), "rotation": 0},
+    },
+    "Stream Deck Pedal": {
+        "key_count": 3, "rows": 1, "cols": 3, "dials": 0, "touch_keys": 0,
+        "touch": False, "visual": False,
+        "key_format": _NO_DISPLAY,
+        "screen_format": _NO_DISPLAY,
+        "touchscreen_format": _NO_DISPLAY,
+    },
+}
+
+
+class _VirtualDeck:
+    """Software deck implementing the device interface the sessions consume."""
+
+    def __init__(self, model, serial, preset):
+        self._model = model
+        self._serial = serial
+        self._preset = preset
+        self._open = False
+        self.brightness = None
+
+    def id(self):
+        return f"virtual:{self._serial}"
+
+    def open(self):
+        self._open = True
+
+    def close(self):
+        self._open = False
+
+    def reset(self):
+        pass
+
+    def is_open(self):
+        return self._open
+
+    def connected(self):
+        return True
+
+    def is_visual(self):
+        return self._preset["visual"]
+
+    def is_touch(self):
+        return self._preset["touch"]
+
+    def deck_type(self):
+        return self._model
+
+    def get_serial_number(self):
+        return self._serial
+
+    def key_count(self):
+        return self._preset["key_count"]
+
+    def key_layout(self):
+        return (self._preset["rows"], self._preset["cols"])
+
+    def dial_count(self):
+        return self._preset["dials"]
+
+    def touch_key_count(self):
+        return self._preset["touch_keys"]
+
+    def key_image_format(self):
+        return dict(self._preset["key_format"])
+
+    def screen_image_format(self):
+        return dict(self._preset["screen_format"])
+
+    def touchscreen_image_format(self):
+        return dict(self._preset["touchscreen_format"])
+
+    def set_brightness(self, level):
+        self.brightness = level
+
+    # Display writes are swallowed — the live mirror taps the pre-encoded
+    # images upstream, so nothing needs storing here.
+    def set_key_image(self, key, image):
+        pass
+
+    def set_key_color(self, key, r, g, b):
+        pass
+
+    def set_screen_image(self, image):
+        pass
+
+    def set_touchscreen_image(self, image, x_pos=0, y_pos=0, width=0, height=0):
+        pass
+
+    # Input callbacks are unused — simulated input dispatches straight to the
+    # plugin's session handlers.
+    def set_key_callback_async(self, cb, loop=None):
+        pass
+
+    def set_dial_callback_async(self, cb, loop=None):
+        pass
+
+    def set_touchscreen_callback_async(self, cb, loop=None):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 class _DeckSession:
     """Per-deck runtime state for one connected Stream Deck.
 
@@ -221,6 +379,10 @@ class _DeckSession:
         self.brightness_keys = set()
         self.last_input = 0.0      # loop time of the last key/dial/touch input
         self.idle_dimmed = False   # True while idle_dim has lowered brightness
+        self.is_virtual = False
+        self.render_version = 0    # bumped when mirrored images change
+        self.touch_key_colors = {}  # key index -> current hex color (mirror)
+        self.mirror_bump_handle = None  # debounce timer for render_version
 
 
 class StreamDeckPlugin:
@@ -228,7 +390,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.13.0",
+        "version": "1.14.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -278,6 +440,7 @@ class StreamDeckPlugin:
             "macro_execute",
             "device_command",
             "usb_access",
+            "http_endpoints",
         ],
     }
 
@@ -366,6 +529,13 @@ class StreamDeckPlugin:
         "per-deck sections (buttons, auto_page, dials, touchscreen, "
         "info_strip, auto_brightness, idle_dim) for that deck: "
         "{\"decks\": {\"ABC123\": {\"buttons\": [...]}}}. "
+        "To work with no hardware attached, add a top-level 'virtual_decks' "
+        "array: [{\"model\": \"Stream Deck +\", \"serial\": \"VIRT-1\"}] — "
+        "models: Stream Deck Neo, Stream Deck Mini, Stream Deck MK.2, Stream "
+        "Deck XL, Stream Deck +, Stream Deck Pedal. A virtual deck behaves "
+        "exactly like attached hardware (sessions, pages, dials, state, decks "
+        "overrides); the user sees and clicks it in the IDE's Live View, and "
+        "per-serial state marks it with <serial>.virtual = true. "
         "Button indices go left-to-right, "
         "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
         "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
@@ -469,6 +639,10 @@ class StreamDeckPlugin:
         self._sessions = {}
         self._loop = None
         self._opening = False    # re-entrancy guard while decks are being opened
+        # Live mirror: (serial, item) -> (png bytes, media type). Virtual decks
+        # always mirror; physical decks mirror while the Live View is open.
+        self._mirror_blobs = {}
+        self._mirror_physical = False
         self._icon_font = None   # Loaded Lucide TTF font for icon rendering
         self._icon_map = {}      # icon-name -> unicode code point
         self._icon_cache = {}    # (icon_name, size, color_hex) -> PIL Image
@@ -530,6 +704,10 @@ class StreamDeckPlugin:
             "plugin.streamdeck.action.*", self._on_context_action
         )
 
+        # HTTP routes serving the live-mirror images (rendered key/strip
+        # images for the IDE's Live View and for virtual decks).
+        self.api.register_router(self._build_ext_router())
+
         # A single watchdog opens every deck present now, recovers decks after
         # a mid-session unplug, and connects decks that appear later. Its
         # first iteration runs almost immediately.
@@ -540,12 +718,16 @@ class StreamDeckPlugin:
     async def stop(self):
         """Release every connected Stream Deck."""
         for session in list(self._sessions.values()):
+            if session.mirror_bump_handle is not None:
+                session.mirror_bump_handle.cancel()
+                session.mirror_bump_handle = None
             try:
                 session.deck.reset()
                 session.deck.close()
             except Exception as e:
                 self.api.log(f"Error closing deck: {e}", level="warning")
         self._sessions.clear()
+        self._mirror_blobs.clear()
         self.api.log("Stream Deck plugin stopped")
 
     async def health_check(self):
@@ -625,6 +807,7 @@ class StreamDeckPlugin:
         deck.reset()
 
         session = _DeckSession(deck)
+        session.is_virtual = isinstance(deck, _VirtualDeck)
         try:
             session.device_id = deck.id()
         except Exception:
@@ -649,6 +832,7 @@ class StreamDeckPlugin:
             "touch_key_count": deck.touch_key_count(),
             "has_touchscreen": deck.is_touch(),
             "has_info_screen": has_info_screen,
+            "virtual": session.is_virtual,
         }
 
         self._sessions[session.device_id] = session
@@ -722,12 +906,18 @@ class StreamDeckPlugin:
         if self._opening:
             return
 
-        # Health-check the decks we hold; tear down any that went away. The
-        # healthy ticks double as each deck's idle-dim clock.
+        declared_virtual = self._virtual_deck_entries()
+        declared_serials = {entry["serial"] for entry in declared_virtual}
+
+        # Health-check the decks we hold; tear down any that went away (or
+        # virtual decks no longer declared in config). The healthy ticks
+        # double as each deck's idle-dim clock.
         for session in list(self._sessions.values()):
             try:
                 healthy = session.deck.is_open() and session.deck.connected()
             except Exception:
+                healthy = False
+            if session.is_virtual and session.serial not in declared_serials:
                 healthy = False
             if healthy:
                 await self._check_idle_dim(session)
@@ -747,6 +937,16 @@ class StreamDeckPlugin:
                 device_id = None
             if device_id is None or device_id not in self._sessions:
                 new_decks.append(deck)
+
+        # Materialize declared virtual decks that aren't running yet.
+        for entry in declared_virtual:
+            if f"virtual:{entry['serial']}" not in self._sessions:
+                new_decks.append(
+                    _VirtualDeck(
+                        entry["model"], entry["serial"], _VIRTUAL_MODELS[entry["model"]]
+                    )
+                )
+
         if not new_decks:
             return
 
@@ -792,8 +992,190 @@ class StreamDeckPlugin:
             pass
 
         await self.api.state_set(f"{session.serial}.connected", False)
+        if session.mirror_bump_handle is not None:
+            session.mirror_bump_handle.cancel()
+            session.mirror_bump_handle = None
+        self._drop_mirror_blobs(session.serial)
         await self._publish_deck_state()
         await self.api.event_emit("disconnected", {"serial": session.serial})
+
+    # ──── Virtual decks + live mirror ────
+
+    def _virtual_deck_entries(self):
+        """Validated ``virtual_decks`` config entries.
+
+        Each entry needs a ``model`` from the preset table and a ``serial``;
+        serials are sanitized to state-key-safe characters and deduplicated.
+        """
+        raw = self.api.config.get("virtual_decks", [])
+        if not isinstance(raw, list):
+            return []
+        entries = []
+        seen = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            model = item.get("model")
+            serial = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("serial", "")))
+            if model not in _VIRTUAL_MODELS or not serial or serial in seen:
+                continue
+            seen.add(serial)
+            entries.append({"model": model, "serial": serial})
+        return entries
+
+    def _build_ext_router(self):
+        """FastAPI router serving the live-mirror images.
+
+        ``GET /api/plugins/streamdeck/ext/live/{serial}/{item}`` returns the
+        most recent rendered image for a key (``key_<n>``), the touchscreen
+        strip (``touchscreen``), or the info screen (``screen``).
+        """
+        from fastapi import APIRouter
+        from fastapi.responses import Response
+
+        router = APIRouter()
+
+        @router.get("/live/{serial}/{item}")
+        async def live_image(serial: str, item: str):
+            blob = self._mirror_blobs.get((serial, item))
+            if blob is None:
+                return Response(status_code=404)
+            data, media_type = blob
+            return Response(
+                content=data,
+                media_type=media_type,
+                headers={"Cache-Control": "no-store"},
+            )
+
+        return router
+
+    def _mirror_enabled(self, session):
+        """Virtual decks always mirror; physical decks only while a Live View
+        has turned mirroring on (set_live_mirror context action)."""
+        return session.is_virtual or self._mirror_physical
+
+    def _mirror(self, session, item, image):
+        """Store a rendered PIL image for the Live View and schedule a bump.
+
+        Captures the pre-native image (the native bytes are model-flipped /
+        rotated). Failures never break rendering.
+        """
+        if not self._mirror_enabled(session) or Image is None:
+            return
+        try:
+            buffer = io.BytesIO()
+            image.save(buffer, "PNG")
+        except Exception:
+            return
+        # Soft cap so a pathological config can't grow memory unbounded; a
+        # full XL with strips is ~35 entries per deck.
+        if len(self._mirror_blobs) > 512:
+            self._mirror_blobs.pop(next(iter(self._mirror_blobs)), None)
+        self._mirror_blobs[(session.serial, item)] = (buffer.getvalue(), "image/png")
+        self._schedule_mirror_bump(session)
+
+    def _drop_mirror_blobs(self, serial):
+        for key in [k for k in self._mirror_blobs if k[0] == serial]:
+            self._mirror_blobs.pop(key, None)
+
+    def _schedule_mirror_bump(self, session):
+        """Debounce render_version so a full-page render bumps state once."""
+        if session.mirror_bump_handle is not None:
+            session.mirror_bump_handle.cancel()
+        loop = asyncio.get_event_loop()
+        session.mirror_bump_handle = loop.call_later(
+            0.05, lambda: asyncio.ensure_future(self._publish_mirror_version(session))
+        )
+
+    async def _publish_mirror_version(self, session):
+        session.mirror_bump_handle = None
+        if session.device_id not in self._sessions:
+            return
+        session.render_version += 1
+        await self.api.state_set(
+            f"{session.serial}.render_version", session.render_version
+        )
+        for index, color in list(session.touch_key_colors.items()):
+            await self.api.state_set(f"{session.serial}.touch_key.{index}", color)
+
+    async def _simulate_input(self, payload):
+        """Dispatch a simulated key/dial/touch input into a session.
+
+        Used by the IDE Live View (clicking a virtual or physical deck's
+        image). Runs the exact same handler paths as hardware input.
+        """
+        serial = str(payload.get("serial", ""))
+        session = next(
+            (s for s in self._sessions.values() if s.serial == serial), None
+        )
+        if session is None:
+            self.api.log(
+                f"simulate_input: no connected deck with serial '{serial}'",
+                level="warning",
+            )
+            return
+
+        kind = payload.get("type")
+        if kind == "key":
+            try:
+                index = int(payload.get("index"))
+            except (TypeError, ValueError):
+                return
+            total = session.deck.key_count() + session.deck.touch_key_count()
+            if not 0 <= index < total:
+                return
+            pressed = payload.get("pressed")
+            if pressed is None:
+                # Full tap: press then release, like a quick physical press.
+                await self._on_key_change(session, session.deck, index, True)
+                await self._on_key_change(session, session.deck, index, False)
+            else:
+                await self._on_key_change(session, session.deck, index, bool(pressed))
+
+        elif kind == "dial_turn":
+            try:
+                index = int(payload.get("index"))
+                amount = int(payload.get("amount", 1))
+            except (TypeError, ValueError):
+                return
+            await self._on_dial_event(
+                session, session.deck, index, SimpleNamespace(name="TURN"), amount
+            )
+
+        elif kind == "dial_push":
+            try:
+                index = int(payload.get("index"))
+            except (TypeError, ValueError):
+                return
+            await self._on_dial_event(
+                session, session.deck, index, SimpleNamespace(name="PUSH"), True
+            )
+
+        elif kind == "touch":
+            try:
+                x = int(payload.get("x"))
+            except (TypeError, ValueError):
+                return
+            await self._on_touchscreen_event(
+                session, session.deck, SimpleNamespace(name="SHORT"), {"x": x, "y": 50}
+            )
+
+    async def _set_live_mirror(self, payload):
+        """Toggle mirroring of physical decks (virtual decks always mirror)."""
+        turn_on = bool(payload.get("on"))
+        if turn_on == self._mirror_physical:
+            return
+        self._mirror_physical = turn_on
+        if turn_on:
+            # Populate the mirror with the current rendering of every deck.
+            for session in list(self._sessions.values()):
+                await self._render_all_buttons(session)
+                await self._render_touchscreen(session)
+                await self._render_info_strip(session)
+        else:
+            for session in list(self._sessions.values()):
+                if not session.is_virtual:
+                    self._drop_mirror_blobs(session.serial)
 
     # ──── Key Handling ────
 
@@ -1236,6 +1618,7 @@ class StreamDeckPlugin:
             if zx > 0:
                 draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)
 
+        self._mirror(session, "touchscreen", img)
         try:
             native = PILHelper.to_native_touchscreen_format(deck, img)
             with deck:
@@ -1292,6 +1675,7 @@ class StreamDeckPlugin:
                     max_font=22, max_lines=2,
                 )
 
+        self._mirror(session, "screen", img)
         try:
             native = PILHelper.to_native_screen_format(deck, img)
             with deck:
@@ -1539,6 +1923,9 @@ class StreamDeckPlugin:
 
     def _apply_key_color(self, session, key_index, color):
         """Set a touch key's RGB backlight from a hex color (thread-safe)."""
+        if self._mirror_enabled(session):
+            session.touch_key_colors[key_index] = color
+            self._schedule_mirror_bump(session)
         r, g, b = self._hex_to_rgb(color)
         try:
             with session.deck:
@@ -1564,6 +1951,7 @@ class StreamDeckPlugin:
 
     def _apply_key_image(self, session, key_index, image):
         """Encode a PIL image and set it on a deck key (thread-safe)."""
+        self._mirror(session, f"key_{key_index}", image)
         try:
             native_image = PILHelper.to_native_key_format(session.deck, image)
             with session.deck:
@@ -2040,10 +2428,15 @@ class StreamDeckPlugin:
 
     async def _on_context_action(self, event_name, payload):
         """Handle context action events."""
-        if "action.identify" in event_name:
+        data = payload if isinstance(payload, dict) else {}
+        if "action.simulate_input" in event_name:
+            await self._simulate_input(data)
+        elif "action.set_live_mirror" in event_name:
+            await self._set_live_mirror(data)
+        elif "action.identify" in event_name:
             # A serial in the payload identifies one specific deck (the deck
             # picker's per-deck Identify); without one, flash every deck.
-            serial = payload.get("serial") if isinstance(payload, dict) else None
+            serial = data.get("serial")
             for session in list(self._sessions.values()):
                 if serial and session.serial != serial:
                     continue

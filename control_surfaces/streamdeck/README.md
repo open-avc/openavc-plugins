@@ -103,6 +103,12 @@ Example: switch to the full controls page when the projector turns on, and back 
 
 Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. With more than one deck attached, a deck picker appears above the grid in the Surface Configurator. Every deck mirrors the main configuration by default (handy for identical panels on both sides of a space). To give a deck its own assignments, select it and click **Customize separately**; **Identify** flashes the selected deck's keys so you can tell the hardware apart. **Mirror main config** drops a deck's custom assignments again.
 
+### Virtual Decks and the Live View
+
+No hardware yet, or building a project away from the room? Click **+ Add virtual deck** above the grid, pick a model, and a software deck connects a moment later. It behaves exactly like a plugged-in deck: it has pages, dials, a touchscreen, per-deck state, and its own entry in the deck picker (marked *virtual*).
+
+**Show live view** displays what's actually rendered on the selected deck right now — real or virtual — including feedback colors, wrapped labels, and the touchscreen strip. Clicking a key presses it, the dial arrows turn the encoders, and clicking the strip taps it, so a whole layout can be exercised end to end without touching the hardware. Remove a virtual deck with the &times; on its chip; its assignments stay in the project in case you add it back.
+
 ### Automatic Brightness
 
 The **Brightness** section below the grid controls the deck's backlight automatically:
@@ -127,7 +133,7 @@ The **Brightness** section below the grid controls the deck's backlight automati
 | `plugin.streamdeck.current_page` | integer | Currently active page number |
 | `plugin.streamdeck.deck_count` | integer | Number of connected decks |
 | `plugin.streamdeck.deck_serials` | string | Comma-separated serials of connected decks |
-| `plugin.streamdeck.<serial>.*` | mixed | Per-deck keys (connected, model, geometry, current_page) for every connected deck |
+| `plugin.streamdeck.<serial>.*` | mixed | Per-deck keys (connected, model, geometry, current_page, virtual, render_version) for every connected deck |
 
 The hardware layout is detected when a deck connects, so the Surface Configurator always shows the deck that's actually plugged in. While no deck is connected it shows the default layout. With several decks attached, the un-prefixed keys above track the first-connected deck; use the per-serial keys to automate against a specific deck.
 

@@ -916,6 +916,12 @@ The actual layout may be detected from hardware at runtime. The static definitio
 
 **Multiple physical units:** a surface plugin that supports more than one attached device publishes `plugin.<id>.deck_serials` (comma-separated serials, connect order) and per-unit keys at `plugin.<id>.<serial>.*` (`connected`, `model`, and the geometry keys above, plus `current_page`). When `deck_serials` lists more than one serial, the Surface Configurator shows a unit picker and reads the selected unit's per-serial geometry; per-unit config overrides live in a top-level `decks` map keyed by serial (a unit without an entry mirrors the flat config). See the Stream Deck plugin for the reference implementation.
 
+**Live mirror + simulated input (virtual units):** a surface plugin can let the IDE display and drive the surface with no hardware attached. The convention (no new platform API — it composes `http_endpoints` routes, state keys, and context actions):
+
+- Serve the currently rendered images over the plugin's registered router at `GET /api/plugins/<id>/ext/live/{serial}/{item}` (`key_<n>`, plus display items like `touchscreen`/`screen`), capturing the **pre-native** rendering (native device bytes are often flipped/rotated). Bump `plugin.<id>.<serial>.render_version` (monotonic int, debounced per render batch) so the IDE knows to re-fetch.
+- Accept a `simulate_input` context action (`{serial, type: key|dial_turn|dial_push|touch, index?, pressed?, amount?, x?}`) that dispatches into the same handler paths as hardware input, and a `set_live_mirror` action (`{on: bool}`) so physical units only pay the mirror cost while a Live View is open.
+- Software-only units are declared in config (`virtual_decks: [{model, serial}]` in the Stream Deck plugin), open through the normal session path, and publish `plugin.<id>.<serial>.virtual = true` so pickers can mark them.
+
 **Source reference for control surface implementation:** [`control_surfaces/streamdeck/streamdeck_plugin.py`](https://github.com/open-avc/openavc-plugins/blob/main/control_surfaces/streamdeck/streamdeck_plugin.py)
 
 ---

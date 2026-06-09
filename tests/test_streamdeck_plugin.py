@@ -1532,6 +1532,185 @@ async def test_watchdog_skips_while_opening(monkeypatch):
     assert plugin._sessions == {}  # guard short-circuited the open
 
 
+# ──── Virtual decks + live mirror + simulated input ────
+
+
+def _patch_pil(monkeypatch):
+    """Wire real PIL + a recording PILHelper, as _lazy_import() would."""
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+
+    class _FakePILHelper:
+        @staticmethod
+        def to_native_key_format(deck, img):
+            return b"native-key"
+
+        @staticmethod
+        def to_native_screen_format(deck, img):
+            return b"native-screen"
+
+        @staticmethod
+        def to_native_touchscreen_format(deck, img):
+            return b"native-strip"
+
+    monkeypatch.setattr(sd_module, "PILHelper", _FakePILHelper)
+
+
+@pytest.mark.asyncio
+async def test_virtual_deck_materializes_from_config(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {"virtual_decks": [{"model": "Stream Deck Neo", "serial": "VIRT-1"}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    # No StreamDeck library at all (sd_module.StreamDeck is None) — the
+    # enumerate failure is swallowed and virtual decks still open.
+    await plugin._watchdog()
+
+    session = plugin._primary_session()
+    assert session is not None and session.is_virtual
+    assert state.get("plugin.streamdeck.connected") is True
+    assert state.get("plugin.streamdeck.model") == "Stream Deck Neo"
+    assert state.get("plugin.streamdeck.serial") == "VIRT-1"
+    assert state.get("plugin.streamdeck.VIRT-1.virtual") is True
+    assert state.get("plugin.streamdeck.rows") == 2
+    assert state.get("plugin.streamdeck.touch_key_count") == 2
+    assert state.get("plugin.streamdeck.has_info_screen") is True
+
+    # Virtual decks always mirror: rendered key images are stored as PNGs.
+    assert ("VIRT-1", "key_0") in plugin._mirror_blobs
+    assert ("VIRT-1", "screen") in plugin._mirror_blobs
+    data, media = plugin._mirror_blobs[("VIRT-1", "key_0")]
+    assert media == "image/png" and data[:8] == b"\x89PNG\r\n\x1a\n"
+
+    # The debounced render_version bump lands shortly after rendering.
+    import asyncio as _a
+    await _a.sleep(0.08)
+    assert state.get("plugin.streamdeck.VIRT-1.render_version") >= 1
+
+
+@pytest.mark.asyncio
+async def test_virtual_deck_removed_from_config_tears_down(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {"virtual_decks": [{"model": "Stream Deck Pedal", "serial": "VIRT-2"}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    await plugin._watchdog()
+    assert plugin._primary_session() is not None
+
+    plugin.api._config["virtual_decks"] = []
+    await plugin._watchdog()
+    assert plugin._sessions == {}
+    assert state.get("plugin.streamdeck.connected") is False
+
+
+def test_virtual_deck_entries_validation():
+    plugin, _state = _make_plugin({"virtual_decks": [
+        {"model": "Stream Deck XL", "serial": "A B/C.D"},   # sanitized -> ABCD
+        {"model": "Bogus Model", "serial": "NOPE"},          # unknown model
+        {"model": "Stream Deck XL", "serial": "ABCD"},       # duplicate of #1
+        "junk",
+    ]})
+    assert plugin._virtual_deck_entries() == [
+        {"model": "Stream Deck XL", "serial": "ABCD"},
+    ]
+
+
+def test_virtual_deck_serial_sanitized():
+    plugin, _state = _make_plugin({"virtual_decks": [
+        {"model": "Stream Deck Mini", "serial": "My Deck.1"},
+    ]})
+    entries = plugin._virtual_deck_entries()
+    assert entries == [{"model": "Stream Deck Mini", "serial": "MyDeck1"}]
+
+
+@pytest.mark.asyncio
+async def test_simulate_input_key_tap_fires_actions(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {
+        "virtual_decks": [{"model": "Stream Deck Neo", "serial": "VIRT-1"}],
+        "buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "hello"}]}}],
+    }
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    await plugin._watchdog()
+
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.simulate_input",
+        {"serial": "VIRT-1", "type": "key", "index": 0},
+    )
+    assert macros.executed == ["hello"]
+
+    # Unknown serial logs a warning and fires nothing.
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.simulate_input",
+        {"serial": "GHOST", "type": "key", "index": 0},
+    )
+    assert macros.executed == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_simulate_input_dials_and_touch_on_virtual_plus(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {
+        "virtual_decks": [{"model": "Stream Deck +", "serial": "VPLUS"}],
+        "dials": [{"index": 0, "adjust": {"key": "var.volume", "step": 5, "min": 0, "max": 100}}],
+        "touchscreen": {"zones": [
+            {"label": "A", "touch": [{"action": "macro", "macro": "zone_a"}]},
+        ]},
+    }
+    plugin, state, macros, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    state.set("var.volume", 50, source="test")
+    await plugin._watchdog()
+
+    await plugin._simulate_input({"serial": "VPLUS", "type": "dial_turn", "index": 0, "amount": 2})
+    assert state.get("var.volume") == 60
+    await plugin._simulate_input({"serial": "VPLUS", "type": "touch", "x": 100})
+    assert macros.executed == ["zone_a"]
+
+
+@pytest.mark.asyncio
+async def test_ext_router_serves_mirror_blobs():
+    plugin, _state = _make_plugin({})
+    plugin._mirror_blobs[("VIRT-1", "key_0")] = (b"png-bytes", "image/png")
+    router = plugin._build_ext_router()
+    # The route handler is the endpoint of the only registered route.
+    handler = router.routes[0].endpoint
+    ok = await handler("VIRT-1", "key_0")
+    assert ok.status_code == 200
+    assert ok.body == b"png-bytes"
+    assert ok.media_type == "image/png"
+    missing = await handler("VIRT-1", "nope")
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_live_mirror_toggles_physical_mirroring(monkeypatch):
+    _patch_pil(monkeypatch)
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+
+    # Off by default for physical decks: rendering mirrors nothing.
+    await plugin._render_all_buttons(session)
+    assert not any(k[0] == "NEO01" for k in plugin._mirror_blobs)
+
+    # Turning it on re-renders and populates the mirror.
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.set_live_mirror", {"on": True}
+    )
+    assert ("NEO01", "key_0") in plugin._mirror_blobs
+
+    # Turning it off drops the physical deck's blobs.
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.set_live_mirror", {"on": False}
+    )
+    assert not any(k[0] == "NEO01" for k in plugin._mirror_blobs)
+
+
 # ──── Bundled text font + button image rendering ────
 
 
