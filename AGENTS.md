@@ -912,7 +912,9 @@ SURFACE_LAYOUT = {
 
 The actual layout may be detected from hardware at runtime. The static definition provides the default shown while no hardware is connected.
 
-**Live geometry override:** when the plugin publishes `plugin.<id>.connected = true` together with `plugin.<id>.rows` and `plugin.<id>.columns` state keys, the Surface Configurator renders that detected grid instead of the static `SURFACE_LAYOUT`. Publish these (plus capability keys like `dial_count`, `touch_key_count`, `has_touchscreen` if the hardware has those controls) when your plugin connects, so the editor always draws the device that's actually plugged in.
+**Live geometry override:** when the plugin publishes `plugin.<id>.connected = true` together with `plugin.<id>.rows` and `plugin.<id>.columns` state keys, the Surface Configurator renders that detected grid instead of the static `SURFACE_LAYOUT`. Publish these (plus capability keys like `dial_count`, `touch_key_count`, `has_touchscreen`, `has_info_screen` if the hardware has those controls) when your plugin connects, so the editor always draws the device that's actually plugged in.
+
+**Multiple physical units:** a surface plugin that supports more than one attached device publishes `plugin.<id>.deck_serials` (comma-separated serials, connect order) and per-unit keys at `plugin.<id>.<serial>.*` (`connected`, `model`, and the geometry keys above, plus `current_page`). When `deck_serials` lists more than one serial, the Surface Configurator shows a unit picker and reads the selected unit's per-serial geometry; per-unit config overrides live in a top-level `decks` map keyed by serial (a unit without an entry mirrors the flat config). See the Stream Deck plugin for the reference implementation.
 
 **Source reference for control surface implementation:** [`control_surfaces/streamdeck/streamdeck_plugin.py`](https://github.com/open-avc/openavc-plugins/blob/main/control_surfaces/streamdeck/streamdeck_plugin.py)
 
