@@ -322,13 +322,14 @@ async def test_auto_page_no_match_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_auto_page_clamps_out_of_range_page():
-    # max_pages defaults to 10; a rule asking for page 99 clamps to 9.
+async def test_auto_page_target_creates_its_page():
+    # Pages are emergent: a rule referencing page 99 means pages 0..99 exist,
+    # so the rule lands exactly where it points.
     config = {"auto_page": [{"page": 99, "when": {"key": "var.x", "operator": "truthy"}}]}
     plugin, state = _make_plugin(config)
     session = _session_for(plugin)
     state.set("var.x", "1", source="test")
-    assert await plugin._evaluate_auto_page(session) == 9
+    assert await plugin._evaluate_auto_page(session) == 99
 
 
 @pytest.mark.asyncio
@@ -548,7 +549,8 @@ async def test_tap_runs_state_set_alongside_macro():
 
 @pytest.mark.asyncio
 async def test_navigate_next_and_prev_page():
-    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    # A named page 1 exists, so next/prev have somewhere to go.
+    plugin, state, _m, _d = _make_plugin_with_recorders({"page_names": {"1": "Audio"}})
     session = _session_for(plugin)
     await plugin._execute_action(session, {"action": "navigate", "page": "__next_page__"}, 0)
     assert session.current_page == 1
@@ -559,7 +561,7 @@ async def test_navigate_next_and_prev_page():
 
 @pytest.mark.asyncio
 async def test_navigate_to_page_index():
-    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    plugin, state, _m, _d = _make_plugin_with_recorders({"page_names": {"2": "Lights"}})
     session = _session_for(plugin)
     await plugin._execute_action(session, {"action": "navigate", "page": "2"}, 0)
     assert session.current_page == 2
@@ -567,6 +569,19 @@ async def test_navigate_to_page_index():
     # A non-numeric, non-special target is ignored (no crash, no move).
     await plugin._execute_action(session, {"action": "navigate", "page": "garbage"}, 0)
     assert session.current_page == 2
+    # A target past the last existing page clamps to it.
+    await plugin._execute_action(session, {"action": "navigate", "page": "9"}, 0)
+    assert session.current_page == 2
+
+
+@pytest.mark.asyncio
+async def test_navigate_clamps_when_only_one_page_exists():
+    # Fresh config: a single page, so next stays put (relative targets do
+    # not create pages — only config references do).
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    session = _session_for(plugin)
+    await plugin._execute_action(session, {"action": "navigate", "page": "__next_page__"}, 0)
+    assert session.current_page == 0
 
 
 # ──── Watchdog: connect / unplug recovery / late connect ────
@@ -1447,7 +1462,8 @@ async def test_decks_override_gives_independent_assignments(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_decks_have_independent_pages(monkeypatch):
-    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    # Pages 0..2 exist via a page name; each deck moves through them alone.
+    plugin, state, _m, _d = _make_plugin_with_recorders({"page_names": {"2": "Lights"}})
     monkeypatch.setattr(
         sd_module, "StreamDeck",
         _FakeStreamDeck([_FakeDeck(serial="AAA"), _FakeDeck(serial="BBB")]),
@@ -1786,7 +1802,7 @@ async def test_default_dial_zone_drag_follows_dial_adjust():
 
 @pytest.mark.asyncio
 async def test_action_set_page_targets_one_or_all_decks(monkeypatch):
-    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    plugin, state, _m, _d = _make_plugin_with_recorders({"page_names": {"2": "Lights"}})
     deck_a = _FakeDeck(serial="AAA")
     deck_b = _FakeDeck(serial="BBB")
     monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck_a, deck_b]))
@@ -1914,7 +1930,7 @@ async def test_on_config_changed_hot_applies_without_closing_decks(monkeypatch):
     config = {
         "buttons": [{"index": 0, "page": 0, "bindings": {"feedback": {"key": "var.a"}}}],
         "brightness": 70,
-        "max_pages": 10,
+        "page_names": {"7": "Far"},
     }
     plugin, _state, _m, _d = _make_plugin_with_recorders(config)
     plugin._load_text_font()
@@ -1926,15 +1942,15 @@ async def test_on_config_changed_hot_applies_without_closing_decks(monkeypatch):
     new_config = {
         "buttons": [{"index": 1, "page": 0, "bindings": {"feedback": {"key": "var.b"}}}],
         "brightness": 30,
-        "max_pages": 3,
+        "page_names": {"1": "Audio"},
     }
     plugin.api._update_config(new_config)
     assert await plugin.on_config_changed(new_config) is True
 
     # Re-subscribed against the new config view (one feedback key again).
     assert len(session.feedback_subs) == 1
-    # Page clamped to the new max_pages.
-    assert session.current_page == 2
+    # Page clamped to the pages that still exist (0..1).
+    assert session.current_page == 1
     # Brightness re-applied from the new base level.
     assert session.deck.brightness == 30
     # The deck handle was never closed — no blank/reconnect flicker.
@@ -2205,5 +2221,235 @@ def test_press_highlight_image_same_size(monkeypatch):
     plugin, _state, _m, _d = _make_plugin_with_recorders({})
     base = img_mod.new("RGB", (72, 72), "#1a1a2e")
     out = plugin._apply_press_highlight(base)
+    assert out.size == (72, 72)
+    assert out.mode == "RGB"
+
+
+# ──── Emergent page count ────
+
+
+def test_effective_page_count_empty_config_is_one():
+    plugin, _ = _make_plugin({})
+    session = _session_for(plugin)
+    assert plugin._effective_page_count(session) == 1
+
+
+def test_effective_page_count_from_all_reference_sources():
+    config = {
+        "buttons": [
+            {"index": 0, "page": 2, "bindings": {}},
+            {"index": 1, "page": 0, "bindings": {"press": [
+                {"action": "macro", "macro": "m",
+                 "off_action": {"action": "navigate", "page": 4}},
+            ]}},
+        ],
+        "global_buttons": [
+            {"index": 7, "bindings": {"press": [{"action": "navigate", "page": "3"}]}},
+        ],
+        "auto_page": [{"page": 1, "when": {"key": "var.x", "operator": "truthy"}}],
+        "page_names": {"5": "Lights"},
+        "dials": [{"index": 0, "cw": [{"action": "navigate", "page": 6}]}],
+        "touchscreen": {"zones": [{"touch": [{"action": "navigate", "page": 7}]}]},
+    }
+    plugin, _ = _make_plugin(config)
+    session = _session_for(plugin)
+    # Highest reference is the zone's page 7 -> pages 0..7 exist.
+    assert plugin._effective_page_count(session) == 8
+
+
+def test_effective_page_count_ignores_relative_and_junk_targets():
+    config = {
+        "buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+            {"action": "navigate", "page": "__next_page__"},
+        ]}}],
+        "page_names": {"junk": "x"},
+    }
+    plugin, _ = _make_plugin(config)
+    session = _session_for(plugin)
+    assert plugin._effective_page_count(session) == 1
+
+
+def test_effective_page_count_respects_deck_override():
+    config = {
+        "page_names": {"4": "Shared Far"},
+        "decks": {"BBB": {"buttons": [{"index": 0, "page": 1}]}},
+    }
+    plugin, _ = _make_plugin(config)
+    shared = _session_for(plugin, _FakeDeck(serial="AAA"))
+    own = _session_for(plugin, _FakeDeck(serial="BBB"))
+    assert plugin._effective_page_count(shared) == 5
+    # The override fully replaces the per-deck sections, pages included.
+    assert plugin._effective_page_count(own) == 2
+
+
+# ──── Locked keys (global_buttons) ────
+
+
+@pytest.mark.asyncio
+async def test_locked_key_wins_on_every_page():
+    config = {
+        "buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "page_macro"}]}}],
+        "global_buttons": [{"index": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "locked_macro"}]}}],
+        "page_names": {"1": "Audio"},
+    }
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
+    await plugin._on_key_change(session, None, 0, True)
+    session.current_page = 1
+    await plugin._on_key_change(session, None, 0, True)
+    assert macros.executed == ["locked_macro", "locked_macro"]
+
+
+def test_unlocking_restores_the_shadowed_page_entry():
+    # The shadowed page entry stays in config; without the lock it resolves.
+    locked = {
+        "buttons": [{"index": 0, "page": 0, "label": "Page A"}],
+        "global_buttons": [{"index": 0, "label": "Locked"}],
+    }
+    plugin, _ = _make_plugin(locked)
+    session = _session_for(plugin)
+    assert plugin._get_button_assignment(session, 0, 0)["label"] == "Locked"
+    assert plugin._get_button_assignment(session, 3, 0)["label"] == "Locked"
+
+    unlocked = {"buttons": [{"index": 0, "page": 0, "label": "Page A"}]}
+    plugin2, _ = _make_plugin(unlocked)
+    session2 = _session_for(plugin2)
+    assert plugin2._get_button_assignment(session2, 0, 0)["label"] == "Page A"
+
+
+@pytest.mark.asyncio
+async def test_locked_key_watch_keys_replace_shadowed_entry_keys():
+    config = {
+        "buttons": [{"index": 0, "page": 0, "bindings": {"feedback": {"key": "var.shadowed"}}}],
+        "global_buttons": [{"index": 0, "bindings": {"feedback": {"key": "var.locked"}}}],
+    }
+    plugin, _ = _make_plugin(config)
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    # Only the locked key's feedback is watched; the shadowed entry is inert.
+    assert len(session.feedback_subs) == 1
+    assert session.macro_keys == {}
+
+
+@pytest.mark.asyncio
+async def test_locked_key_macro_marks_on_any_page(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {"global_buttons": [{"index": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "mute_all"}]}}]}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.macro_keys == {"mute_all": {(None, 0)}}
+
+    session.current_page = 3  # not page 0 — the mark still lands and renders
+    await plugin._on_macro_event("macro.started.mute_all", {})
+    assert session.macro_marks[(None, 0)] == "running"
+    assert 0 in session.deck.key_images
+
+
+@pytest.mark.asyncio
+async def test_locked_key_hidden_by_visible_when_keeps_reservation():
+    config = {
+        "buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "page_macro"}]}}],
+        "global_buttons": [{"index": 0, "bindings": {
+            "press": [{"action": "macro", "macro": "locked_macro"}],
+            "visible_when": {"key": "var.show", "operator": "truthy"},
+        }}],
+    }
+    plugin, state, macros, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
+    state.set("var.show", "", source="test")  # locked key hidden
+    await plugin._on_key_change(session, None, 0, True)
+    # The reservation stands: neither the hidden lock nor the shadowed
+    # page entry fires.
+    assert macros.executed == []
+
+
+@pytest.mark.asyncio
+async def test_hot_apply_rebuilds_locked_key_map(monkeypatch):
+    _patch_pil(monkeypatch)
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.macro_keys == {}
+
+    new_config = {"global_buttons": [{"index": 1, "bindings": {"press": [
+        {"action": "macro", "macro": "help"}]}}]}
+    plugin.api._update_config(new_config)
+    assert await plugin.on_config_changed(new_config) is True
+    assert session.macro_keys == {"help": {(None, 1)}}
+
+
+@pytest.mark.asyncio
+async def test_deck_override_replaces_global_buttons():
+    config = {
+        "global_buttons": [{"index": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "shared_lock"}]}}],
+        "decks": {"BBB": {"buttons": [], "global_buttons": [
+            {"index": 0, "bindings": {"press": [{"action": "macro", "macro": "own_lock"}]}},
+        ]}},
+    }
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    shared = _session_for(plugin, _FakeDeck(serial="AAA"))
+    own = _session_for(plugin, _FakeDeck(serial="BBB"))
+    await plugin._on_key_change(shared, None, 0, True)
+    await plugin._on_key_change(own, None, 0, True)
+    assert macros.executed == ["shared_lock", "own_lock"]
+
+
+# ──── Per-deck brightness (deck_settings) ────
+
+
+@pytest.mark.asyncio
+async def test_deck_settings_brightness_is_a_unit_property():
+    config = {
+        "brightness": 70,
+        "deck_settings": {"AAA": {"brightness": 40}},
+        # Brightness inside a layout override is ignored — unit property only.
+        "decks": {"AAA": {"buttons": [], "brightness": 20}},
+    }
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    bright = _session_for(plugin, _FakeDeck(serial="AAA"))
+    plain = _session_for(plugin, _FakeDeck(serial="BBB"))
+    assert await plugin._current_brightness_level(bright) == 40
+    assert await plugin._current_brightness_level(plain) == 70
+
+
+@pytest.mark.asyncio
+async def test_deck_settings_absent_defaults_to_70():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    session = _session_for(plugin, _FakeDeck(serial="AAA"))
+    assert await plugin._current_brightness_level(session) == 70
+
+
+# ──── Page-key "you are here" highlight ────
+
+
+def test_nav_target_page_extraction():
+    nav = {"bindings": {"press": [{"action": "navigate", "page": 2}]}}
+    assert StreamDeckPlugin._nav_target_page(nav) == 2
+    nav_str = {"bindings": {"press": [{"action": "navigate", "page": "3"}]}}
+    assert StreamDeckPlugin._nav_target_page(nav_str) == 3
+    relative = {"bindings": {"press": [{"action": "navigate", "page": "__next_page__"}]}}
+    assert StreamDeckPlugin._nav_target_page(relative) is None
+    macro = {"bindings": {"press": [{"action": "macro", "macro": "m"}]}}
+    assert StreamDeckPlugin._nav_target_page(macro) is None
+    assert StreamDeckPlugin._nav_target_page({}) is None
+
+
+def test_apply_nav_active_image_same_size(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    base = img_mod.new("RGB", (72, 72), "#1a1a2e")
+    out = plugin._apply_nav_active(base)
     assert out.size == (72, 72)
     assert out.mode == "RGB"

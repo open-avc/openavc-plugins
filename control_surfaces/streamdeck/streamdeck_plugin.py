@@ -396,16 +396,18 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.21.0",
+        "version": "1.22.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
             "Plug in a Stream Deck over USB, or add a virtual deck to design "
-            "without hardware. Then open the **Stream Deck** view in the "
-            "sidebar and click any key to choose what it does: run a macro, "
-            "send a device command, set a variable, or switch deck pages. "
-            "Dial, touch strip, and automation options appear in the same "
-            "view when the connected deck has them."
+            "without hardware. Open the **Stream Deck** view in the sidebar: "
+            "the picture of your deck is live. Click any key to set what it "
+            "does (run a macro, send a device command, set a variable, switch "
+            "pages); Shift+click presses it for real. Add pages with the + "
+            "tab, and lock keys you want on every page — like page switchers. "
+            "Dials, the touch strip, and the info screen are set up by "
+            "clicking them in the picture."
         ),
         "category": "control_surface",
         "license": "MIT",
@@ -462,36 +464,11 @@ class StreamDeckPlugin:
         ],
     }
 
-    CONFIG_SCHEMA = {
-        "brightness": {
-            "type": "integer",
-            "label": "Button Brightness",
-            "description": "Screen brightness percentage (0-100).",
-            "default": 70,
-            "min": 0,
-            "max": 100,
-        },
-        "button_color": {
-            "type": "color",
-            "label": "Default Button Color",
-            "description": "Background color for buttons without a custom color.",
-            "default": "#1a1a2e",
-        },
-        "text_color": {
-            "type": "color",
-            "label": "Text Color",
-            "description": "Label text color.",
-            "default": "#e0e0e0",
-        },
-        "max_pages": {
-            "type": "integer",
-            "label": "Number of Pages",
-            "description": "How many button pages are available (applies to every deck).",
-            "default": 10,
-            "min": 1,
-            "max": 100,
-        },
-    }
+    # No CONFIG_SCHEMA: every setting is edited in context inside the
+    # Stream Deck view (brightness on the deck, colors under Appearance,
+    # pages as tabs), so the generic settings form has nothing to show.
+    # The config keys themselves (brightness, button_color, text_color,
+    # deck_settings, ...) are documented in AI_GUIDE and the README.
 
     SURFACE_LAYOUT = {
         "type": "grid",
@@ -500,7 +477,6 @@ class StreamDeckPlugin:
         "key_size_px": 72,
         "key_spacing_px": 4,
         "supports_pages": True,
-        "max_pages": 10,
         # Device-backed surface: the IDE editor renders only real units
         # (USB or virtual). With none connected it shows a connect /
         # add-virtual-deck state instead of this fallback grid.
@@ -544,6 +520,11 @@ class StreamDeckPlugin:
         "seconds without any key/dial/touch input; any input wakes it. "
         "Example: dim to 10 when device.projector_1.power is off, and "
         "idle-dim to 5 after 600 seconds. "
+        "Base brightness is the top-level 'brightness' (0-100, default 70). "
+        "Per-deck base levels live in a top-level 'deck_settings' map: "
+        "{\"deck_settings\": {\"ABC123\": {\"brightness\": 40}}} — a unit "
+        "property that never creates a decks override. Default key colors "
+        "are the top-level 'button_color' and 'text_color' hex values. "
         "Multiple decks: every connected deck is listed in "
         "plugin.streamdeck.deck_serials (comma-separated) with per-deck state "
         "at plugin.streamdeck.<serial>.* (connected, model, rows, columns, "
@@ -552,9 +533,9 @@ class StreamDeckPlugin:
         "the primary (earliest-connected) deck. By default every deck mirrors "
         "the main config; to give a specific deck its own assignments, add a "
         "top-level 'decks' map keyed by serial — the entry fully replaces the "
-        "per-deck sections (buttons, auto_page, dials, touchscreen, "
-        "info_strip, auto_brightness, idle_dim, page_names) for that deck: "
-        "{\"decks\": {\"ABC123\": {\"buttons\": [...]}}}. "
+        "per-deck sections (buttons, global_buttons, auto_page, dials, "
+        "touchscreen, info_strip, auto_brightness, idle_dim, page_names) for "
+        "that deck: {\"decks\": {\"ABC123\": {\"buttons\": [...]}}}. "
         "Macros can drive the deck with an event.emit step targeting "
         "plugin.streamdeck.action.<name> — actions: set_page {page}, "
         "set_brightness {level} (holds until the next brightness rule, idle "
@@ -583,6 +564,17 @@ class StreamDeckPlugin:
         "ui.*, or system.* are ignored. script.call and value_map are panel-only "
         "and do not run on surface buttons — to call a script from a button, run "
         "a one-line macro instead. "
+        "Keys that must stay the same on every page (page switchers, "
+        "mute-all, help) go in a top-level 'global_buttons' array: same entry "
+        "shape as 'buttons' but with NO 'page' field. A global_buttons entry "
+        "at an index wins over any per-page button at that index, on every "
+        "page. Example page-switcher pair: {\"global_buttons\": [{\"index\": "
+        "6, \"icon\": \"chevron-left\", \"bindings\": {\"press\": "
+        "[{\"action\": \"navigate\", \"page\": \"__prev_page__\"}]}}, "
+        "{\"index\": 7, \"icon\": \"chevron-right\", \"bindings\": "
+        "{\"press\": [{\"action\": \"navigate\", \"page\": "
+        "\"__next_page__\"}]}}]}. A key that navigates to a specific page "
+        "index is automatically highlighted while that page is showing. "
         "Common AV icons: power, volume-2, volume-x, play, pause, square (stop), "
         "skip-back, skip-forward, mic, mic-off, monitor, tv, sun, moon, "
         "thermometer, fan, camera, video, airplay, cast. "
@@ -597,11 +589,12 @@ class StreamDeckPlugin:
         "the config (alongside 'buttons'): each entry is {\"page\": N, \"when\": "
         "{condition}} using the same operator schema. Rules are evaluated in "
         "order and the first match wins, so put more specific conditions first. "
-        "The page count comes from the top-level 'max_pages' setting (default "
-        "10, global across decks). Pages can be labeled with a per-deck "
-        "'page_names' section ({\"0\": \"Sources\"}), and decks with a "
-        "top-level 'deck_names' map ({\"<serial>\": \"Lectern\"}) — names are "
-        "display-only. "
+        "Pages exist by being used — there is no page-count setting: placing "
+        "a button, auto_page rule, page name, or numeric navigate target on "
+        "page N creates pages 0 through N (every deck always has page 0). "
+        "Pages can be labeled with a per-deck 'page_names' section "
+        "({\"0\": \"Sources\"}), and decks with a top-level 'deck_names' map "
+        "({\"<serial>\": \"Lectern\"}) — names are display-only. "
         "When dial_count > 0, a top-level 'dials' array configures the rotary "
         "encoders (not paged — dials keep their assignment on every page): "
         "{\"index\": 0, \"label\": \"Volume\", \"adjust\": {\"key\": "
@@ -815,7 +808,7 @@ class StreamDeckPlugin:
             session.feedback_subs = []
             await self._setup_feedback_subscriptions(session)
 
-            max_pages = self.api.config.get("max_pages", 10)
+            max_pages = self._effective_page_count(session)
             if session.current_page >= max_pages:
                 await self._change_page(session, max_pages - 1)
             target = await self._evaluate_auto_page(session)
@@ -840,10 +833,13 @@ class StreamDeckPlugin:
         """Per-deck config view.
 
         A ``decks[serial]`` override fully replaces the per-deck sections
-        (buttons, auto_page, dials, touchscreen, info_strip, auto_brightness,
-        idle_dim) for that deck. Decks without an override mirror the flat
-        top-level config — so a single deck never deals with serials, and a
-        second deck shows the same controls until it's customized.
+        (buttons, global_buttons, auto_page, dials, touchscreen, info_strip,
+        auto_brightness, idle_dim, page_names) for that deck. Decks without
+        an override mirror the flat top-level config — so a single deck never
+        deals with serials, and a second deck shows the same controls until
+        it's given its own layout. Unit properties (``deck_settings``,
+        ``deck_names``) live outside this view on purpose: setting them never
+        forks a layout.
         """
         decks = self.api.config.get("decks")
         if isinstance(decks, dict):
@@ -1981,8 +1977,25 @@ class StreamDeckPlugin:
                     continue
                 if await self._eval_condition(when):
                     return max(0, min(100, int(level)))
-        base = _coerce_numeric(self._deck_setting(session, "brightness", 70))
+        base = _coerce_numeric(self._unit_brightness(session))
         return max(0, min(100, int(base if base is not None else 70)))
+
+    def _unit_brightness(self, session):
+        """Base brightness for one deck.
+
+        A unit property, not a layout property: ``deck_settings[serial]``
+        wins, then the flat plugin-wide ``brightness``, then 70. Never read
+        from a ``decks[serial]`` layout override — a deck shouldn't need its
+        own layout just to sit at a different brightness.
+        """
+        settings = self.api.config.get("deck_settings")
+        if isinstance(settings, dict):
+            entry = settings.get(session.serial)
+            if isinstance(entry, dict):
+                level = _coerce_numeric(entry.get("brightness"))
+                if level is not None:
+                    return level
+        return self.api.config.get("brightness", 70)
 
     def _set_deck_brightness(self, session, level):
         """Apply a brightness level to a deck (best-effort)."""
@@ -2038,9 +2051,76 @@ class StreamDeckPlugin:
 
     # ──── Page Navigation ────
 
+    def _effective_page_count(self, session):
+        """Pages exist by being used — no page-count setting.
+
+        The count is 1 + the highest page index referenced anywhere in the
+        deck's config view: button placements, page rules, page names, and
+        numeric navigate targets in any action list (key presses including
+        off/hold actions, locked keys, dial turns/presses, strip zones).
+        Every deck has at least one page.
+        """
+        cfg = self._deck_config(session)
+        highest = 0
+
+        def note(value):
+            nonlocal highest
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                return
+            if idx > highest:
+                highest = idx
+
+        def scan_actions(value):
+            for action in self._action_list(value):
+                if action.get("action") == "navigate":
+                    note(action.get("page"))
+                for nested in ("off_action", "hold_action"):
+                    sub = action.get(nested)
+                    if isinstance(sub, dict) and sub.get("action") == "navigate":
+                        note(sub.get("page"))
+
+        buttons = cfg.get("buttons", [])
+        for btn in buttons if isinstance(buttons, list) else []:
+            if not isinstance(btn, dict):
+                continue
+            note(btn.get("page", 0))
+            bindings = btn.get("bindings", {})
+            if isinstance(bindings, dict):
+                scan_actions(bindings.get("press"))
+        for btn in self._global_buttons(cfg):
+            bindings = btn.get("bindings", {})
+            if isinstance(bindings, dict):
+                scan_actions(bindings.get("press"))
+
+        rules = cfg.get("auto_page", [])
+        for rule in rules if isinstance(rules, list) else []:
+            if isinstance(rule, dict):
+                note(rule.get("page"))
+
+        names = cfg.get("page_names", {})
+        for key in names.keys() if isinstance(names, dict) else []:
+            note(key)
+
+        dials = cfg.get("dials", [])
+        for dial in dials if isinstance(dials, list) else []:
+            if isinstance(dial, dict):
+                for field in ("cw", "ccw", "press"):
+                    scan_actions(dial.get(field))
+
+        touchscreen = cfg.get("touchscreen", {})
+        zones = touchscreen.get("zones") if isinstance(touchscreen, dict) else None
+        for zone in zones if isinstance(zones, list) else []:
+            if isinstance(zone, dict):
+                for field in ("touch", "long_touch"):
+                    scan_actions(zone.get(field))
+
+        return highest + 1
+
     async def _change_page(self, session, new_page):
         """Switch a deck to a different button page."""
-        max_pages = self.api.config.get("max_pages", 10)
+        max_pages = self._effective_page_count(session)
         if new_page < 0:
             new_page = 0
         elif new_page >= max_pages:
@@ -2179,13 +2259,24 @@ class StreamDeckPlugin:
                             if style_inactive.get("icon"):
                                 icon = style_inactive["icon"]
 
-        macro_mark = session.macro_marks.get((session.current_page, key_index))
+        # Locked keys store their macro mark under page None (lit on every
+        # page); page keys under their page.
+        macro_mark = (
+            session.macro_marks.get((None, key_index))
+            or session.macro_marks.get((session.current_page, key_index))
+        )
+        # A key that navigates to the page currently showing gets a "you are
+        # here" treatment automatically — page-switcher rows read as tabs.
+        nav_target = self._nav_target_page(assignment) if assignment else None
+        nav_active = nav_target is not None and nav_target == session.current_page
 
         # Touch keys show color only (no LCD): the effective background color
         # after feedback/toggle evaluation, brightened while held; a macro
         # run/result mark overrides the color outright.
         if is_touch_key:
             color = self._MACRO_MARK_COLORS.get(macro_mark, bg_color)
+            if nav_active and macro_mark is None:
+                color = self._lighten_hex(color, 0.2)
             if key_index in session.pressed_keys:
                 color = self._lighten_hex(color, 0.25)
             self._apply_key_color(session, key_index, color)
@@ -2195,11 +2286,43 @@ class StreamDeckPlugin:
         # physically held, draw the momentary-press highlight on top; a macro
         # run/result mark draws a colored border (+ loader glyph).
         image = self._create_button_image(session, label, bg_color, text_color, icon)
+        if nav_active:
+            image = self._apply_nav_active(image)
         if key_index in session.pressed_keys:
             image = self._apply_press_highlight(image)
         if macro_mark:
             image = self._apply_macro_mark(image, macro_mark)
         self._apply_key_image(session, key_index, image)
+
+    @staticmethod
+    def _nav_target_page(assignment):
+        """The numeric deck page a key's first press action navigates to.
+
+        None for non-navigate keys and for the relative next/previous targets
+        (those have no single page to light up for).
+        """
+        bindings = assignment.get("bindings", {})
+        if not isinstance(bindings, dict):
+            return None
+        press = _unwrap_binding(bindings.get("press"))
+        if not isinstance(press, dict) or press.get("action") != "navigate":
+            return None
+        try:
+            return int(press.get("page"))
+        except (TypeError, ValueError):
+            return None
+
+    def _apply_nav_active(self, image):
+        """Subtle highlight for a page key whose target page is showing."""
+        try:
+            overlay = Image.new("RGB", image.size, (255, 255, 255))
+            out = Image.blend(image, overlay, 0.12)
+            draw = ImageDraw.Draw(out)
+            w, h = out.size
+            draw.rectangle([0, 0, w - 1, h - 1], outline=(138, 180, 147), width=2)
+            return out
+        except Exception:
+            return image
 
     @staticmethod
     def _hex_to_rgb(color):
@@ -2572,7 +2695,7 @@ class StreamDeckPlugin:
         rules = self._deck_config(session).get("auto_page", [])
         if not isinstance(rules, list):
             return None
-        max_pages = self.api.config.get("max_pages", 10)
+        max_pages = self._effective_page_count(session)
         for rule in rules:
             if not isinstance(rule, dict):
                 continue
@@ -2601,12 +2724,19 @@ class StreamDeckPlugin:
         """
         cfg = self._deck_config(session)
         buttons = cfg.get("buttons", [])
+        page_buttons = (
+            [b for b in buttons if isinstance(b, dict)]
+            if isinstance(buttons, list) else []
+        )
+        global_buttons = self._global_buttons(cfg)
+        locked = self._locked_indexes(cfg)
+        # A page entry shadowed by a locked key never renders or fires, so
+        # its watch keys and macro references are inert too.
+        page_buttons = [b for b in page_buttons if b.get("index") not in locked]
         watch_keys = set()
         session.auto_page_keys = set()
 
-        for btn in buttons if isinstance(buttons, list) else []:
-            if not isinstance(btn, dict):
-                continue
+        for btn in page_buttons + global_buttons:
             bindings = btn.get("bindings", {})
             if isinstance(bindings, dict):
                 # Feedback key
@@ -2686,13 +2816,14 @@ class StreamDeckPlugin:
                     (page, index)
                 )
 
-        for btn in buttons if isinstance(buttons, list) else []:
-            if not isinstance(btn, dict):
-                continue
+        # Locked keys are marked with page None: their macro runs light the
+        # key on whatever page is showing.
+        entries = [(btn, btn.get("page", 0)) for btn in page_buttons]
+        entries += [(btn, None) for btn in global_buttons]
+        for btn, page in entries:
             index = btn.get("index")
             if index is None:
                 continue
-            page = btn.get("page", 0)
             bindings = btn.get("bindings", {})
             if not isinstance(bindings, dict):
                 continue
@@ -2732,30 +2863,40 @@ class StreamDeckPlugin:
         if key in session.brightness_keys and not session.idle_dimmed:
             await self._apply_active_brightness(session)
 
-        # Re-render buttons on the current page that depend on this key
-        buttons = self._deck_config(session).get("buttons", [])
+        # Re-render keys that depend on this state key: locked keys on any
+        # page, plus the current page's buttons (entries shadowed by a lock
+        # are inert and skipped).
+        cfg = self._deck_config(session)
+        locked = self._locked_indexes(cfg)
+        to_render = list(self._global_buttons(cfg))
+        buttons = cfg.get("buttons", [])
         for btn in buttons if isinstance(buttons, list) else []:
             if not isinstance(btn, dict):
                 continue
             if btn.get("page", 0) != session.current_page:
                 continue
+            if btn.get("index") in locked:
+                continue
+            to_render.append(btn)
 
-            bindings = btn.get("bindings", {})
-            matched = False
-            if isinstance(bindings, dict):
-                feedback = bindings.get("feedback", {})
-                if isinstance(feedback, dict) and feedback.get("key") == key:
-                    matched = True
-                press = _unwrap_binding(bindings.get("press"))
-                if isinstance(press, dict) and press.get("toggle_key") == key:
-                    matched = True
-                if not matched and key in _condition_state_keys(bindings.get("visible_when")):
-                    matched = True
-
-            if matched:
+        for btn in to_render:
+            if self._binding_watches_key(btn.get("bindings", {}), key):
                 key_index = btn.get("index")
                 if key_index is not None:
                     await self._render_button(session, key_index)
+
+    @staticmethod
+    def _binding_watches_key(bindings, key):
+        """True when a key binding's rendering depends on a state key."""
+        if not isinstance(bindings, dict):
+            return False
+        feedback = bindings.get("feedback", {})
+        if isinstance(feedback, dict) and feedback.get("key") == key:
+            return True
+        press = _unwrap_binding(bindings.get("press"))
+        if isinstance(press, dict) and press.get("toggle_key") == key:
+            return True
+        return key in _condition_state_keys(bindings.get("visible_when"))
 
     # ──── Macro run feedback ────
 
@@ -2800,7 +2941,8 @@ class StreamDeckPlugin:
                                     asyncio.ensure_future(self._clear_macro_mark(s, p, k)),
                             )
                         )
-                if page == session.current_page:
+                # Page None = a locked key; it shows on every page.
+                if page is None or page == session.current_page:
                     await self._render_button(session, key_index)
 
     async def _clear_macro_mark(self, session, page, key_index):
@@ -2809,7 +2951,7 @@ class StreamDeckPlugin:
             return
         if (
             session.macro_marks.pop((page, key_index), None) is not None
-            and page == session.current_page
+            and (page is None or page == session.current_page)
         ):
             await self._render_button(session, key_index)
 
@@ -2921,9 +3063,38 @@ class StreamDeckPlugin:
 
     # ──── Helpers ────
 
+    @staticmethod
+    def _global_buttons(cfg):
+        """Validated ``global_buttons`` entries from a config view.
+
+        Same entry shape as ``buttons`` but with no ``page`` field: a locked
+        key keeps one assignment on every page (page switchers, mute-all).
+        """
+        entries = cfg.get("global_buttons", []) if isinstance(cfg, dict) else []
+        if not isinstance(entries, list):
+            return []
+        return [b for b in entries if isinstance(b, dict)]
+
+    def _locked_indexes(self, cfg):
+        """Key indexes reserved deck-wide by ``global_buttons`` entries."""
+        return {
+            b.get("index") for b in self._global_buttons(cfg)
+            if b.get("index") is not None
+        }
+
     def _get_button_assignment(self, session, page, key_index):
-        """Look up the button assignment for a specific page/key index."""
-        buttons = self._deck_config(session).get("buttons", [])
+        """Look up the key assignment for a page/key index.
+
+        A ``global_buttons`` entry for the index wins on every page — a
+        locked key is reserved deck-wide, and a per-page entry at the same
+        index never renders or fires while the lock exists. Page-scoped
+        ``buttons`` entries fill the rest.
+        """
+        cfg = self._deck_config(session)
+        for btn in self._global_buttons(cfg):
+            if btn.get("index") == key_index:
+                return btn
+        buttons = cfg.get("buttons", [])
         for btn in buttons if isinstance(buttons, list) else []:
             if not isinstance(btn, dict):
                 continue

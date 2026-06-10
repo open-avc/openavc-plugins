@@ -24,36 +24,40 @@ Use any Elgato Stream Deck as a physical control surface for OpenAVC. Assign mac
   sudo udevadm control --reload-rules && sudo udevadm trigger
   ```
 
-## Configuration
+## The Stream Deck View
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| Button Brightness | Integer | 70 | Screen brightness (0-100) |
-| Default Button Color | Color | `#1a1a2e` | Background color for unassigned buttons |
-| Text Color | Color | `#e0e0e0` | Button label text color |
-| Number of Pages | Integer | 10 | How many button pages are available (1-100, applies to every deck) |
+Everything lives in one place: the **Stream Deck** view in the Programmer IDE sidebar. It shows a live picture of your deck — what you see on screen is exactly what the hardware is showing, as it renders it. With no deck connected, the view offers to wait for USB hardware or add a virtual deck so you can build now.
 
-These settings appear on the plugin's page and in the **Plugin Settings** section at the bottom of the Stream Deck view, so everything is reachable without leaving the view. The base brightness is also editable inside the view's **Brightness** section.
-
-A deck that's been customized separately (see Multiple Decks below) can override Brightness and the two colors just for itself — the **This deck's settings** row appears above the grid; blank values inherit the main settings.
+- **Click** anything in the picture — a key, a dial, the touch strip, the info screen — to edit it in the inspector panel on the right.
+- **Shift+click** a key (or use the **▶** badge / the inspector's **Press** button) to press it for real.
+- With nothing selected, the inspector shows **the deck itself**: its name, status, brightness, and an **Identify** button that flashes the hardware.
+- Switching page tabs flips the physical deck too, so you always watch your edits land. If a page rule moves the deck while you're editing, a small notice says so.
 
 Configuration changes apply live: saving updates the running decks in place, so they never blank or reconnect while you edit.
 
+For reference, the plugin's config keys (all editable in the view, and writable by automation/AI): `buttons`, `global_buttons`, `auto_page`, `page_names`, `dials`, `touchscreen`, `info_strip`, `brightness` (default 70), `auto_brightness`, `idle_dim`, `button_color` (default `#1a1a2e`), `text_color` (default `#e0e0e0`), `deck_names`, `deck_settings`, `decks`, `virtual_decks`.
+
 ## Configuring Buttons
 
-Use the **Surface Configurator** in the Programmer IDE:
+1. Click a key in the deck picture.
+2. In the inspector, set:
+   - **What it does** -- run a macro, send a device command, set a variable, or switch pages. Add more actions to run several in order.
+   - **What it shows** -- label, icon, and colors.
+   - **Behavior** -- the button mode (see below) and state-driven Visual Feedback.
+   - **More** -- visibility conditions and the Arrange tools (copy, paste, move, swap).
+3. Use the **page tabs** above the picture to work across pages; **+** adds one.
 
-1. Open the **Stream Deck** view in the Plugins sidebar section. The strip at the top names the deck being edited (model, serial, friendly name); with no deck connected, the view offers to wait for USB hardware or add a virtual deck.
-2. Click a button on the visual grid
-3. In the assignment panel, set:
-   - **Label** -- text displayed on the button
-   - **Button Mode** -- how the button behaves (see below)
-   - **Press Action** -- what happens when pressed: run a macro, send a device command, set a variable, or navigate pages
-   - **Visual Feedback** -- pick a state key, set a condition, choose active/inactive colors and labels
-   - **Visibility** -- optionally hide the button unless a state condition is met
-4. Use **page tabs** to set up multiple pages of buttons
+### Locked Keys
 
-The assignment panel's **Arrange** row copies, pastes, moves, or swaps button assignments between keys and pages, and the **&#8943;** menu next to the page tabs duplicates a whole page to the first empty one or clears it.
+Turn on **Same on every page** in a key's inspector to lock it: the key keeps that one assignment on every page, and anything page-specific at that position stays hidden until you unlock it. Locked keys carry a small pin badge in the editor. Use them for the controls that must never move — page switchers, mute-all, a help key.
+
+A key whose action navigates to a specific page lights up automatically while that page is showing, so a locked row of page keys reads like tabs on the hardware itself.
+
+## Pages
+
+A new project has one page. Click **+** in the page tab row to add the next one — the first time you do, the plugin places locked **‹ ›** page keys in free bottom-row slots so the new page is immediately reachable from the hardware (move, edit, or delete them like any other locked key). Double-click a tab to name it ("Sources", "Audio"); names show up in the tabs, Navigate targets, and paging rules. The **&#8943;** menu on the active tab renames, duplicates, clears, or (for the last page) deletes it.
+
+There is no page-count setting: pages exist by being used. Placing a button, page name, paging rule, or numeric navigate target on page N creates pages up to N.
 
 ### Button Modes
 
@@ -80,7 +84,7 @@ Example: hide the source-select and volume buttons unless the projector is on (`
 
 ### Dials (Stream Deck +)
 
-When a deck with dials is connected, a dial row appears under the button grid in the Surface Configurator. Click a dial to configure it:
+When a deck with dials is connected, they appear in the deck picture. Click a dial to configure it (the inspector also has turn/press test buttons):
 
 - **Label** -- shown on the touchscreen under the dial
 - **Turning Adjusts a Value** -- pick a variable; each detent adds or subtracts the step, clamped to min/max. Spin fast and the value moves proportionally faster. Have a macro or trigger watch the variable to drive a device (volume, mic gain, camera pan speed).
@@ -91,17 +95,17 @@ Dials keep their assignment on every button page.
 
 ### Touchscreen (Stream Deck +)
 
-By default the touch strip shows one zone per dial with the dial's label and the live value of its adjusted variable -- no setup needed. To take over the strip, add custom zones in the **Touchscreen** section below the grid. Each zone can show a label (static or from a state key), a live state value, custom colors, and run actions when tapped. A zone can also run separate **long-press actions**, and **swiping** across a zone can step a variable up and down like turning a dial (the default per-dial zones do this automatically with the dial's own variable). Zones split the strip evenly, or set explicit pixel positions.
+By default the touch strip shows one zone per dial with the dial's label and the live value of its adjusted variable -- no setup needed. To take over the strip, click it in the deck picture and add custom zones in the inspector. Each zone can show a label (static or from a state key), a live state value, custom colors, and run actions when tapped. A zone can also run separate **long-press actions**, and **swiping** across a zone can step a variable up and down like turning a dial (the default per-dial zones do this automatically with the dial's own variable). Zones split the strip evenly, or set explicit pixel positions.
 
 ### Touch Keys and Info Screen (Neo)
 
-The Neo's two side touch keys appear below the button grid in the Surface Configurator. They work like regular buttons (press actions, modes, feedback, visibility, per-page assignment) but have no display -- each key glows with its background color, and feedback colors override it when active.
+The Neo's two side touch keys appear in the deck picture beside the info screen. They work like regular buttons (press actions, modes, feedback, visibility, per-page assignment, locking) but have no display -- each key glows with its background color, and feedback colors override it when active.
 
-The small info screen between the touch keys is configured in the **Info Screen** section: show a live state value (with an optional heading) or static text. State-driven values refresh automatically.
+The small info screen between the touch keys is configured by clicking it in the picture: show a live state value (with an optional heading) or static text. State-driven values refresh automatically.
 
-### Automatic Paging
+### Page Automation
 
-Below the button grid, the **Automatic Paging** section switches the deck to a page automatically when state changes. Add a rule, choose the target page, and set the condition (same operators as visibility, with AND / OR). Rules are checked top to bottom and the first match wins, so list the most specific conditions first. Reorder rules with the up/down arrows.
+Below the deck picture, the **Page automation** section switches the deck to a page automatically when state changes. Add a rule, choose the target page, and set the condition (same operators as visibility, with AND / OR). Rules are checked top to bottom and the first match wins, so list the most specific conditions first. Reorder rules with the up/down arrows.
 
 Manual navigation (a button's Navigate action) still works immediately; the next state change that matches a rule takes over again.
 
@@ -109,25 +113,22 @@ Example: switch to the full controls page when the projector turns on, and back 
 
 ### Multiple Decks
 
-Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. The deck strip above the grid shows every connected deck; click one to edit it. Every deck mirrors the main configuration by default (handy for identical panels on both sides of a space). To give a deck its own assignments, select it and click **Customize separately**; **Identify** flashes the selected deck's keys so you can tell the hardware apart. **Mirror main config** drops a deck's custom assignments again. Give each deck a friendly name ("Lectern", "Tech Booth") in the strip's name field -- it replaces the model name and is published to `plugin.streamdeck.<serial>.name`.
+Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. With two or more known decks, a card strip appears above the page tabs: every connected deck (plus any remembered, disconnected one) is a card showing its name, model, whether it uses the shared layout or its own, and which page it's on right now. Click a card to edit that deck; **Identify** in its inspector flashes the hardware so you can tell twins apart. Name each deck ("Lectern", "Tech Booth") in its inspector -- the name is published to `plugin.streamdeck.<serial>.name`.
 
-Pages can be named too: double-click the page label between the arrows ("Page 1") and type a name like "Sources" or "Audio". Page names show up in the tabs, the Navigate action's target list, and the automatic paging rules.
+Every deck shows the **shared layout** by default, so identical panels on both sides of a space need zero extra setup, and a brand-new deck works the moment it's plugged in. A line by the page tabs always says which layout you're editing. To make one deck different, open its inspector and choose **Give this deck its own layout** (it starts as a copy of the shared one); **Use the shared layout instead** deletes its own layout again, and **Move this layout to another deck...** re-keys it -- including onto a replacement after hardware dies. A disconnected deck with a saved layout stays visible as a dimmed card, so swapping a dead deck never means rebuilding its layout.
 
-### Virtual Decks and the Live View
+### Virtual Decks
 
-No hardware yet, or building a project away from the room? With nothing connected, the Stream Deck view offers **Add virtual Stream Deck** directly; with decks already present, use **+ Virtual Stream Deck** at the end of the deck strip. Pick a model and a software deck connects a moment later. It behaves exactly like a plugged-in deck: it has pages, dials, a touchscreen, per-deck state, and its own card in the deck strip (marked *virtual*).
+No hardware yet, or building a project away from the space? With nothing connected, the Stream Deck view offers **Add virtual Stream Deck** directly; with decks already present, use **+ Virtual deck** at the end of the card strip. Pick a model and a software deck connects a moment later. It behaves exactly like a plugged-in deck: live picture, pages, dials, touchscreen, per-deck state, its own card (marked *virtual*). Click its keys to press them, turn its dials from the inspector, tap its strip -- a whole layout can be exercised end to end without touching hardware. **Remove** in its inspector retires it; because layouts live in the shared configuration, a real deck picks up everything you built on a virtual one the moment it's plugged in.
 
-The **Live Preview** section shows what's actually rendered on the selected deck right now — real or virtual — including feedback colors, wrapped labels, and the touchscreen strip. It opens automatically for virtual decks. Clicking a key presses it, the dial arrows turn the encoders, and clicking the strip taps it, so a whole layout can be exercised end to end without touching the hardware. **Remove** in the deck strip retires a virtual deck; its assignments stay in the project in case you add it back.
+### Brightness
 
-Because layouts live in the shared configuration, a real deck picks up everything you built on a virtual one the moment it's plugged in — no transfer needed. The only exception is a layout made with **Customize separately**, which is tied to one deck's serial: use **Transfer layout to...** in the deck picker to hand it (and the deck's name) to another deck. If a customized deck disappears for good — replaced hardware, or a retired virtual deck — its saved layout shows up above the grid with **Use on this deck** and **Delete** options, so swapping a dead deck never means rebuilding its layout.
+Each deck's base brightness is a slider in its inspector (select the deck -- click its card, or click empty space so nothing else is selected). Different decks can sit at different levels; the value is stored per deck in `deck_settings`, with the plugin-wide `brightness` as the fallback, so changing it never forks a layout.
 
-### Automatic Brightness
+The **Brightness automation** section below the picture adds:
 
-The **Brightness** section below the grid controls the deck's backlight:
-
-- **Base brightness** -- the everyday level (the same value as the Button Brightness plugin setting).
 - **Dim when idle** -- lower the brightness after a period with no key, dial, or touch input. Any press, turn, or tap wakes the deck and restores the normal level.
-- **Brightness rules** -- set a brightness level when a state condition holds (same condition editor as visibility and paging). Rules are checked in order, the first match wins, and with no match the base brightness from the plugin settings applies. Example: drop to 20% whenever the projector is running so the deck doesn't glow in a dark room.
+- **Brightness rules** -- set a level while a state condition holds (same condition editor as visibility and paging). Rules are checked in order, the first match wins, and with no match each deck returns to its own base level. Example: drop to 20% whenever the projector is running so the deck doesn't glow in a dark room.
 
 ## State Keys
 
@@ -184,7 +185,7 @@ Every payload accepts an optional `"serial"` to target one specific deck; leave 
 - **No Stream Deck found:** Make sure the deck is connected via USB. On Linux, check that the udev rule is installed (see Requirements above).
 - **Plugin shows Error:** Check the System Log for details. The most common issue is a missing HIDAPI library.
 - **Buttons not updating:** Make sure the feedback key you chose actually changes value. Check the State view to verify.
-- **Multiple decks:** All connected decks are used. If two decks show the same buttons, that's the default mirroring -- select one in the deck picker and click Customize separately.
+- **Multiple decks:** All connected decks are used. Two decks showing the same buttons is the default — they share one layout. To make one different, click its card and choose **Give this deck its own layout** in its inspector.
 
 ## License
 
