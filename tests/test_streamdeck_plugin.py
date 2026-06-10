@@ -1905,6 +1905,93 @@ async def test_flash_key_writes_white_then_restores(monkeypatch):
     assert len(session.deck.key_images) >= writes_before
 
 
+# ──── Macro run feedback on keys ────
+
+
+@pytest.mark.asyncio
+async def test_macro_key_map_built_from_all_binding_slots():
+    config = {"buttons": [
+        {"index": 0, "page": 0, "bindings": {"press": [
+            {"action": "macro", "macro": "m1"},
+            {"action": "macro", "macro": "m2"},
+        ]}},
+        {"index": 3, "page": 1, "bindings": {"press": [
+            {"action": "macro", "macro": "m1", "mode": "toggle",
+             "toggle_key": "var.x",
+             "off_action": {"action": "macro", "macro": "m_off"}},
+        ]}},
+    ]}
+    plugin, _state = _make_plugin(config)
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.macro_keys == {
+        "m1": {(0, 0), (1, 3)},
+        "m2": {(0, 0)},
+        "m_off": {(1, 3)},
+    }
+
+
+@pytest.mark.asyncio
+async def test_macro_started_marks_and_completed_flashes(monkeypatch):
+    import asyncio as _a
+    _patch_pil(monkeypatch)
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "movie_time"}]}}]}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._setup_feedback_subscriptions(session)
+
+    await plugin._on_macro_event("macro.started.movie_time", {})
+    assert session.macro_marks[(0, 0)] == "running"
+    assert 0 in session.deck.key_images  # re-rendered with the mark
+
+    await plugin._on_macro_event("macro.completed.movie_time", {})
+    assert session.macro_marks[(0, 0)] == "done"
+    # The result flash clears itself shortly after.
+    await _a.sleep(0.9)
+    assert (0, 0) not in session.macro_marks
+
+
+@pytest.mark.asyncio
+async def test_macro_cancelled_clears_mark_immediately(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {"buttons": [{"index": 1, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "m"}]}}]}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._setup_feedback_subscriptions(session)
+
+    await plugin._on_macro_event("macro.started.m", {})
+    assert session.macro_marks[(0, 1)] == "running"
+    await plugin._on_macro_event("macro.cancelled.m", {})
+    assert session.macro_marks == {}
+
+
+@pytest.mark.asyncio
+async def test_macro_mark_colors_touch_key(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {"buttons": [{"index": 8, "page": 0, "bg_color": "#111111",
+                           "bindings": {"press": [{"action": "macro", "macro": "m"}]}}]}
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._setup_feedback_subscriptions(session)
+
+    await plugin._on_macro_event("macro.started.m", {})
+    # Touch keys can't show a border, so the mark takes over the RGB color.
+    assert session.deck.key_colors[8] == (245, 158, 11)  # amber
+
+
+@pytest.mark.asyncio
+async def test_macro_event_for_unreferenced_macro_is_ignored():
+    plugin, _state = _make_plugin({})
+    session = _session_for(plugin)
+    await plugin._on_macro_event("macro.started.someone_elses", {})
+    assert session.macro_marks == {}
+
+
 # ──── Bundled text font + button image rendering ────
 
 

@@ -385,6 +385,9 @@ class _DeckSession:
         self.mirror_bump_handle = None  # debounce timer for render_version
         self.overlay_active = False     # show_message overlay suppresses renders
         self.overlay_handle = None      # auto-restore timer for the overlay
+        self.macro_keys = {}            # macro_id -> {(page, key_index), ...}
+        self.macro_marks = {}           # (page, key_index) -> running|done|error
+        self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
 
 
 class StreamDeckPlugin:
@@ -392,7 +395,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.16.0",
+        "version": "1.17.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -725,6 +728,10 @@ class StreamDeckPlugin:
         # images for the IDE's Live View and for virtual decks).
         self.api.register_router(self._build_ext_router())
 
+        # Macro lifecycle events drive run/done/error marks on any key whose
+        # bindings reference the macro — no matter who started it.
+        await self.api.event_subscribe("macro.*", self._on_macro_event)
+
         # A single watchdog opens every deck present now, recovers decks after
         # a mid-session unplug, and connects decks that appear later. Its
         # first iteration runs almost immediately.
@@ -741,6 +748,9 @@ class StreamDeckPlugin:
             if session.overlay_handle is not None:
                 session.overlay_handle.cancel()
                 session.overlay_handle = None
+            for handle in session.macro_clear_handles.values():
+                handle.cancel()
+            session.macro_clear_handles.clear()
             try:
                 session.deck.reset()
                 session.deck.close()
@@ -1019,6 +1029,9 @@ class StreamDeckPlugin:
             session.overlay_handle.cancel()
             session.overlay_handle = None
         session.overlay_active = False
+        for handle in session.macro_clear_handles.values():
+            handle.cancel()
+        session.macro_clear_handles.clear()
         self._drop_mirror_blobs(session.serial)
         await self._publish_deck_state()
         await self.api.event_emit("disconnected", {"serial": session.serial})
@@ -2081,20 +2094,26 @@ class StreamDeckPlugin:
                             if style_inactive.get("icon"):
                                 icon = style_inactive["icon"]
 
+        macro_mark = session.macro_marks.get((session.current_page, key_index))
+
         # Touch keys show color only (no LCD): the effective background color
-        # after feedback/toggle evaluation, brightened while held.
+        # after feedback/toggle evaluation, brightened while held; a macro
+        # run/result mark overrides the color outright.
         if is_touch_key:
-            color = bg_color
+            color = self._MACRO_MARK_COLORS.get(macro_mark, bg_color)
             if key_index in session.pressed_keys:
                 color = self._lighten_hex(color, 0.25)
             self._apply_key_color(session, key_index, color)
             return
 
         # Generate the button image and set it on the deck. While the key is
-        # physically held, draw the momentary-press highlight on top.
+        # physically held, draw the momentary-press highlight on top; a macro
+        # run/result mark draws a colored border (+ loader glyph).
         image = self._create_button_image(session, label, bg_color, text_color, icon)
         if key_index in session.pressed_keys:
             image = self._apply_press_highlight(image)
+        if macro_mark:
+            image = self._apply_macro_mark(image, macro_mark)
         self._apply_key_image(session, key_index, image)
 
     @staticmethod
@@ -2566,6 +2585,37 @@ class StreamDeckPlugin:
                     session.brightness_keys.update(_condition_state_keys(rule.get("when")))
         watch_keys |= session.brightness_keys
 
+        # Macro feedback map: which (page, key) bindings reference which
+        # macro, so macro.started/completed/error events can mark those keys.
+        # Only keys have a display to mark — dial/zone macro actions aren't
+        # mapped.
+        session.macro_keys = {}
+
+        def _note_macro(action, page, index):
+            if (
+                isinstance(action, dict)
+                and action.get("action") == "macro"
+                and action.get("macro")
+            ):
+                session.macro_keys.setdefault(str(action["macro"]), set()).add(
+                    (page, index)
+                )
+
+        for btn in buttons if isinstance(buttons, list) else []:
+            if not isinstance(btn, dict):
+                continue
+            index = btn.get("index")
+            if index is None:
+                continue
+            page = btn.get("page", 0)
+            bindings = btn.get("bindings", {})
+            if not isinstance(bindings, dict):
+                continue
+            for action in self._press_actions(bindings):
+                _note_macro(action, page, index)
+                _note_macro(action.get("off_action"), page, index)
+                _note_macro(action.get("hold_action"), page, index)
+
         callback = functools.partial(self._on_state_change, session)
         for key in watch_keys:
             sub_id = await self.api.state_subscribe(key, callback)
@@ -2621,6 +2671,82 @@ class StreamDeckPlugin:
                 key_index = btn.get("index")
                 if key_index is not None:
                     await self._render_button(session, key_index)
+
+    # ──── Macro run feedback ────
+
+    _MACRO_MARK_COLORS = {
+        "running": "#f59e0b",
+        "done": "#22c55e",
+        "error": "#ef4444",
+    }
+
+    async def _on_macro_event(self, event_name, payload):
+        """Mark keys whose bindings reference a macro that changed state."""
+        for prefix, mark in (
+            ("macro.started.", "running"),
+            ("macro.completed.", "done"),
+            ("macro.cancelled.", None),
+            ("macro.error.", "error"),
+        ):
+            if event_name.startswith(prefix):
+                await self._apply_macro_mark_event(event_name[len(prefix):], mark)
+                return
+
+    async def _apply_macro_mark_event(self, macro_id, mark):
+        for session in list(self._sessions.values()):
+            targets = session.macro_keys.get(macro_id)
+            if not targets:
+                continue
+            for page, key_index in targets:
+                handle = session.macro_clear_handles.pop((page, key_index), None)
+                if handle is not None:
+                    handle.cancel()
+                if mark is None:
+                    session.macro_marks.pop((page, key_index), None)
+                else:
+                    session.macro_marks[(page, key_index)] = mark
+                    if mark in ("done", "error"):
+                        # Brief result flash, then back to the normal render.
+                        delay = 0.8 if mark == "done" else 1.2
+                        session.macro_clear_handles[(page, key_index)] = (
+                            asyncio.get_event_loop().call_later(
+                                delay,
+                                lambda s=session, p=page, k=key_index:
+                                    asyncio.ensure_future(self._clear_macro_mark(s, p, k)),
+                            )
+                        )
+                if page == session.current_page:
+                    await self._render_button(session, key_index)
+
+    async def _clear_macro_mark(self, session, page, key_index):
+        session.macro_clear_handles.pop((page, key_index), None)
+        if session.device_id not in self._sessions:
+            return
+        if (
+            session.macro_marks.pop((page, key_index), None) is not None
+            and page == session.current_page
+        ):
+            await self._render_button(session, key_index)
+
+    def _apply_macro_mark(self, image, mark):
+        """Border (+ loader glyph while running) showing a macro's run state."""
+        color = self._MACRO_MARK_COLORS.get(mark)
+        if color is None:
+            return image
+        try:
+            out = image.copy()
+            draw = ImageDraw.Draw(out)
+            w, h = out.size
+            draw.rectangle([0, 0, w - 1, h - 1], outline=color, width=3)
+            if mark == "running":
+                icon = self._render_icon("loader", color, max(16, w // 3))
+                if icon is not None:
+                    size = max(10, w // 4)
+                    icon = icon.resize((size, size), Image.LANCZOS)
+                    out.paste(icon, (w - size - 3, 3), icon)
+            return out
+        except Exception:
+            return image
 
     # ──── Context Actions ────
 

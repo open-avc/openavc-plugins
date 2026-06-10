@@ -64,6 +64,8 @@ Use the **Surface Configurator** in the Programmer IDE:
 
 Separate from button modes, the Visual Feedback section lets you set state-driven colors and conditional labels. Use it for color changes on any button mode. Toggle has its own label fields built in, so you don't need Visual Feedback just for label changes on toggle buttons.
 
+Keys that run a macro also show the macro's progress automatically: an amber border with a spinner glyph while it runs, a brief green flash when it completes, and a red flash if it fails -- no matter where the macro was started from (the deck, a panel, a trigger, or a schedule). Neo touch keys pulse the same colors.
+
 ### Hiding Buttons
 
 Each button can be hidden based on system state. In the assignment panel, open **Visibility**, turn on "Show only when...", then pick a state key, operator, and value. When the condition is false the button shows as a blank black key and ignores presses; when true it renders and responds normally. Add more than one condition and combine them with AND / OR. Operators: equals, not equals, greater/less than (and or-equal), has a value, is empty or zero.
