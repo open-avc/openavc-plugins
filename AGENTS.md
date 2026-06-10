@@ -134,7 +134,7 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | `event_subscribe` | `event_subscribe()` |
 | `macro_execute` | `macro_execute()` |
 | `device_command` | `device_command()` |
-| `network_listen` | Plugin may open network ports |
+| `network_listen` | Plugin may open network ports; also gates `mdns_browse(service_types, duration=5.0)` (LAN service discovery via the platform's mDNS listener; feature-detect with `getattr` — added in platform 0.16.0) |
 | `usb_access` | Plugin may access USB devices |
 | `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*`; also gates `proxy_to()` (outbound requests) |
 
@@ -932,8 +932,11 @@ SURFACE_LAYOUT = {
     "requires_device": True,                  # editor renders only for real units
     "device_label": "Stream Deck",            # noun used in the editor chrome
     "virtual_models": ["Stream Deck Neo"],    # enables the add-virtual-unit flow
+    "network": True,                          # enables the add-network-unit flow
 }
 ```
+
+**Network units (`"network": True`):** the editor offers "Add network deck" flows (empty state, deck inspector, and status cards for configured-but-offline entries). The plugin must then: read a top-level `network_decks: [{host, port?, serial?}]` config array (explicit opt-in — never auto-attach to LAN devices), serve two ext routes — `POST ext/network/scan` returning `{browse_available, found: [{host, port, name, serial, kind, already_added}]}` (use `api.mdns_browse` when available, feature-detected) and `POST ext/network/test` taking `{host, port}` and returning `{ok, error?}` — and publish per-entry status at `plugin.<id>.net.<host_port_sanitized>.status` plus `plugin.<id>.<serial>.transport` (`"usb" | "network" | "virtual"`) and `<serial>.address` once connected.
 
 The actual layout may be detected from hardware at runtime. The static definition provides the default geometry while no hardware is connected.
 

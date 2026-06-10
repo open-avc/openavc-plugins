@@ -13,7 +13,11 @@ import io
 import json
 import os
 import platform as platform_mod
+import queue
 import re
+import socket
+import struct
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -355,6 +359,632 @@ class _VirtualDeck:
         return False
 
 
+# ──── Network-attached decks ────
+#
+# Elgato's Network Dock and the Stream Deck Studio expose the deck's HID
+# reports over raw TCP (default port 5343). Two wire framings exist, detected
+# from the first bytes the device sends after connect:
+#
+#   Cora (Network Dock, newer firmware) — every message has a 16-byte header:
+#     offset 0  4B  magic 43 93 8A 41
+#     offset 4  u16le flags  (VERBATIM 0x8000 = payload addressed to the HID
+#                             device behind the bridge; REQ_ACK 0x4000;
+#                             ACK_NAK 0x0200; RESULT 0x0100)
+#     offset 6  u8  hid op   (0 = write, 1 = send feature, 2 = get feature)
+#     offset 7  u8  reserved
+#     offset 8  u32le message id
+#     offset 12 u32le payload length, then the payload.
+#
+#   Legacy (Stream Deck Studio) — fixed 512-byte receive packets carrying the
+#   raw HID report from byte 0; writes are raw, padded to 1024 bytes.
+#
+# In both modes the device sends a keepalive (payload starts 01 0A, connection
+# number at byte 5) every few seconds; the host must answer each one with
+# 03 1A <connection_no> (a 32-byte Cora ACK_NAK payload, or a raw 1024-byte
+# packet in legacy mode). More than ~5 s without any bytes means the link is
+# dead. A dock reports the deck plugged into it via a "Device 2" payload
+# (01 0B): child vid/pid at offsets 26/28, serial at 94-125, and a dedicated
+# TCP port for the child at offset 126 — the client opens a second connection
+# to that port and drives the deck there. Hotplug arrives as an unsolicited
+# Device 2 payload on the primary connection.
+
+_NET_DEFAULT_PORT = 5343
+_NET_MDNS_SERVICE = "_elg._tcp.local."
+_NET_IDLE_TIMEOUT = 5.0     # no bytes received in this window -> link dead
+_NET_GET_TIMEOUT = 5.0      # feature-report read timeout
+_NET_CONNECT_TIMEOUT = 4.0  # TCP connect timeout
+_CORA_MAGIC = b"\x43\x93\x8a\x41"
+_CORA_FLAG_VERBATIM = 0x8000
+_CORA_FLAG_ACK_NAK = 0x0200
+_CORA_OP_WRITE = 0x00
+_CORA_OP_SEND_REPORT = 0x01
+_CORA_OP_GET_REPORT = 0x02
+_SDS_PACKET_LEN = 512       # legacy mode: fixed receive packet size
+_SDS_WRITE_LEN = 1024       # legacy mode: writes padded to this length
+# The dock's own bridge endpoint reports this product id; it is not a deck.
+_NET_DOCK_PID = 0xFFFF
+
+
+def _cora_pack(flags, hid_op, message_id, payload):
+    """Build one Cora frame (16-byte header + payload)."""
+    return (
+        _CORA_MAGIC
+        + struct.pack("<HBBII", flags, hid_op, 0, message_id, len(payload))
+        + bytes(payload)
+    )
+
+
+class _CoraStream:
+    """Incremental Cora frame parser with resync on the magic marker."""
+
+    def __init__(self):
+        self._buf = bytearray()
+
+    def feed(self, data):
+        """Consume bytes; return a list of (flags, hid_op, message_id, payload)."""
+        self._buf.extend(data)
+        frames = []
+        while True:
+            idx = self._buf.find(_CORA_MAGIC)
+            if idx < 0:
+                # Keep the tail in case a magic marker straddles the chunk edge
+                del self._buf[:-3]
+                break
+            if idx > 0:
+                del self._buf[:idx]
+            if len(self._buf) < 16:
+                break
+            flags, hid_op, _res, message_id, length = struct.unpack(
+                "<HBBII", self._buf[4:16]
+            )
+            if len(self._buf) < 16 + length:
+                break
+            payload = bytes(self._buf[16:16 + length])
+            del self._buf[:16 + length]
+            frames.append((flags, hid_op, message_id, payload))
+        return frames
+
+
+def _parse_device2(payload):
+    """Parse a Device 2 payload (01 0B). Returns None when no child is attached."""
+    if len(payload) < 128 or payload[0] != 0x01 or payload[1] != 0x0B:
+        return None
+    if payload[4] != 0x02:  # status: 0x02 = child connected and ready
+        return None
+    vid, pid = struct.unpack_from("<HH", payload, 26)
+    raw_serial = bytes(payload[94:125])
+    serial = raw_serial.split(b"\x00", 1)[0].decode("ascii", "replace").strip()
+    (port,) = struct.unpack_from("<H", payload, 126)
+    return {"vid": vid, "pid": pid, "serial": serial, "port": port}
+
+
+def _transport_error():
+    """The bundled library's TransportError, so its reader thread handles our
+    failures exactly like a USB unplug. Falls back to OSError when the library
+    isn't loaded (unit tests)."""
+    try:
+        from StreamDeck.Transport.Transport import TransportError
+        return TransportError
+    except Exception:
+        return OSError
+
+
+class _NetDeckDevice:
+    """One TCP connection to a network-attached deck or dock, presenting the
+    same device interface as the bundled library's HID transport (open/close/
+    is_open/connected/vendor_id/product_id/path/write/read/write_feature/
+    read_feature) so the library's device classes work over it unchanged.
+
+    A reader thread owns the socket's receive side: it answers keepalives,
+    resolves pending feature-report reads, queues input reports for the
+    library's poll loop, and surfaces Device 2 (child hotplug) payloads.
+    """
+
+    is_network = True
+
+    def __init__(self, host, port, role="deck"):
+        self._host = host
+        self._port = int(port)
+        self._role = role
+        self._sock = None
+        self._mode = None           # "cora" | "legacy"
+        self._dead = True
+        self._last_rx = 0.0
+        self._connected_evt = threading.Event()
+        self._write_lock = threading.Lock()
+        self._inputs = queue.Queue(maxsize=256)
+        self._pending = {}           # report_id -> [threading.Event, payload]
+        self._pending_lock = threading.Lock()
+        self._reader = None
+        self._mid = 0
+        self._vid = 0x0FD9
+        self._pid = 0
+        self.device2 = None          # latest parsed Device 2 payload (or None)
+        self.device2_seen = False    # True once any Device 2 payload arrived
+        self.address = f"{host}:{port}"
+        # Back-reference set by _DockLink so _open_deck can find the link
+        self.link = None
+
+    # ── connection lifecycle (blocking; call from an executor) ──
+
+    def connect(self, timeout=_NET_CONNECT_TIMEOUT):
+        """Open the socket and wait for the device's first keepalive (which
+        also reveals the framing mode). Raises on failure."""
+        self._sock = socket.create_connection(
+            (self._host, self._port), timeout=timeout
+        )
+        self._sock.settimeout(1.0)
+        self._dead = False
+        self._last_rx = time.monotonic()
+        self._reader = threading.Thread(
+            target=self._read_loop,
+            name=f"streamdeck-net-{self._host}:{self._port}",
+            daemon=True,
+        )
+        self._reader.start()
+        ok = self._connected_evt.wait(timeout + 2.0)
+        # The event also fires when the reader dies (so a connect against a
+        # dead link never hangs) — success means alive AND mode detected.
+        if not ok or self._dead or self._mode is None:
+            self.close()
+            raise TimeoutError("device sent no keepalive after connect")
+
+    def close(self):
+        self._dead = True
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        with self._pending_lock:
+            for evt_payload in self._pending.values():
+                evt_payload[0].set()
+            self._pending.clear()
+
+    # ── reader thread ──
+
+    def _read_loop(self):
+        cora = _CoraStream()
+        sds = bytearray()
+        head = bytearray()
+        sock = self._sock
+        while not self._dead and sock is not None:
+            try:
+                data = sock.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not data:
+                break
+            self._last_rx = time.monotonic()
+            if self._mode is None:
+                head.extend(data)
+                if len(head) >= 4 and head[:4] == _CORA_MAGIC:
+                    self._mode = "cora"
+                elif len(head) >= 2 and head[0] == 0x01 and head[1] == 0x0A:
+                    self._mode = "legacy"
+                elif len(head) >= 4:
+                    break  # not a deck protocol
+                else:
+                    continue
+                data, head = bytes(head), bytearray()
+            if self._mode == "cora":
+                for flags, hid_op, mid, payload in cora.feed(data):
+                    self._handle_payload(payload, flags, hid_op, mid)
+            else:
+                sds.extend(data)
+                while len(sds) >= _SDS_PACKET_LEN:
+                    packet = bytes(sds[:_SDS_PACKET_LEN])
+                    del sds[:_SDS_PACKET_LEN]
+                    self._handle_payload(packet, None, None, None)
+        self._dead = True
+        self._connected_evt.set()  # unblock a connect() waiting on a dead link
+
+    def _handle_payload(self, payload, flags, hid_op, mid):
+        if len(payload) < 2:
+            return
+        # Keepalive: answer every one; the first marks the link connected.
+        if payload[0] == 0x01 and payload[1] == 0x0A and len(payload) > 4:
+            conn_no = payload[5] if len(payload) > 5 else 0
+            ack = bytes((0x03, 0x1A, conn_no)) + b"\x00" * 29
+            try:
+                if self._mode == "cora":
+                    self._send_raw(_cora_pack(
+                        _CORA_FLAG_ACK_NAK, hid_op or 0, mid or 0, ack
+                    ))
+                else:
+                    self._send_raw(ack.ljust(_SDS_WRITE_LEN, b"\x00"))
+            except OSError:
+                return
+            self._connected_evt.set()
+            return
+        # Device 2: the dock reporting its attached deck (also hotplug events)
+        if payload[0] == 0x01 and payload[1] == 0x0B:
+            self.device2 = _parse_device2(payload)
+            self.device2_seen = True
+            self._resolve_pending(0x1C, payload)
+            return
+        # Input report from the deck (delivered whole, report id first)
+        if payload[0] == 0x01:
+            try:
+                self._inputs.put_nowait(payload)
+            except queue.Full:
+                try:
+                    self._inputs.get_nowait()
+                    self._inputs.put_nowait(payload)
+                except queue.Empty:
+                    pass
+            return
+        # Feature-report response. Verbatim responses key on payload[0];
+        # bridge ("host") responses are 0x03-prefixed and key on payload[1].
+        if self._mode == "cora" and flags is not None and flags & _CORA_FLAG_VERBATIM:
+            self._resolve_pending(payload[0], payload)
+        elif payload[0] == 0x03:
+            self._resolve_pending(payload[1], payload)
+        else:
+            self._resolve_pending(payload[0], payload)
+
+    def _resolve_pending(self, report_id, payload):
+        with self._pending_lock:
+            slot = self._pending.pop(report_id, None)
+        if slot is not None:
+            slot[1] = payload
+            slot[0].set()
+
+    # ── shared send path ──
+
+    def _send_raw(self, data):
+        sock = self._sock
+        if self._dead or sock is None:
+            raise OSError("network deck connection is closed")
+        with self._write_lock:
+            sock.sendall(data)
+
+    def _next_mid(self):
+        self._mid = (self._mid + 1) & 0xFFFFFF
+        return self._mid
+
+    def _get_report(self, request_payload, report_id, flags):
+        evt = threading.Event()
+        slot = [evt, None]
+        with self._pending_lock:
+            self._pending[report_id] = slot
+        try:
+            if self._mode == "cora":
+                self._send_raw(_cora_pack(
+                    flags, _CORA_OP_GET_REPORT, self._next_mid(), request_payload
+                ))
+            else:
+                self._send_raw(bytes(request_payload).ljust(_SDS_WRITE_LEN, b"\x00"))
+            if not evt.wait(_NET_GET_TIMEOUT) or slot[1] is None:
+                raise _transport_error()("feature report read timed out")
+            return slot[1]
+        finally:
+            with self._pending_lock:
+                self._pending.pop(report_id, None)
+
+    def read_host_feature(self, report_id):
+        """Bridge-level feature read (0x03-prefixed, non-verbatim): dock/unit
+        identity (0x80), Device 2 (0x1C), firmware/serial/MAC."""
+        return self._get_report(bytes((0x03, report_id)), report_id, 0)
+
+    def identify(self):
+        """Read the unit's vendor/product id from the 0x80 report."""
+        payload = self.read_host_feature(0x80)
+        if len(payload) >= 16:
+            self._vid, self._pid = struct.unpack_from("<HH", payload, 12)
+        return self._vid, self._pid
+
+    # ── the device interface the bundled library's classes consume ──
+
+    def open(self):
+        if self._dead:
+            raise _transport_error()("network deck connection is closed")
+
+    def is_open(self):
+        return not self._dead
+
+    def connected(self):
+        return (
+            not self._dead
+            and (time.monotonic() - self._last_rx) <= _NET_IDLE_TIMEOUT
+        )
+
+    def vendor_id(self):
+        return self._vid
+
+    def product_id(self):
+        return self._pid
+
+    def path(self):
+        return f"tcp:{self._host}:{self._port}"
+
+    def write(self, payload):
+        try:
+            if self._mode == "cora":
+                self._send_raw(_cora_pack(
+                    _CORA_FLAG_VERBATIM, _CORA_OP_WRITE, 0, bytes(payload)
+                ))
+            else:
+                self._send_raw(bytes(payload).ljust(_SDS_WRITE_LEN, b"\x00"))
+        except OSError as e:
+            raise _transport_error()(str(e)) from e
+        return len(payload)
+
+    def write_feature(self, payload):
+        try:
+            if self._mode == "cora":
+                self._send_raw(_cora_pack(
+                    _CORA_FLAG_VERBATIM, _CORA_OP_SEND_REPORT, 0, bytes(payload)
+                ))
+            else:
+                self._send_raw(bytes(payload).ljust(_SDS_WRITE_LEN, b"\x00"))
+        except OSError as e:
+            raise _transport_error()(str(e)) from e
+        return len(payload)
+
+    def read_feature(self, report_id, length):
+        if self._dead:
+            raise _transport_error()("network deck connection is closed")
+        if self._mode == "cora":
+            payload = self._get_report(bytes((report_id,)), report_id, _CORA_FLAG_VERBATIM)
+        else:
+            payload = self._get_report(bytes((report_id,)), report_id, 0)
+        return (bytes(payload) + b"\x00" * length)[:length]
+
+    def read(self, length):
+        if self._dead:
+            raise _transport_error()("network deck connection is closed")
+        try:
+            payload = self._inputs.get_nowait()
+        except queue.Empty:
+            return None
+        return (payload + b"\x00" * length)[:length]
+
+
+def _classify_net_error(exc):
+    """Human connection status for the deck inspector / ghost cards."""
+    if isinstance(exc, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "unreachable (no response)"
+    if isinstance(exc, socket.gaierror):
+        return "address not found"
+    if isinstance(exc, OSError):
+        return "unreachable"
+    return str(exc) or "connection failed"
+
+
+class _DockLink:
+    """One configured network deck entry: owns the primary TCP connection
+    (keepalive, identity, Device 2 watch) and, when the unit is a dock, the
+    second connection that drives the docked deck. Reconnects with capped
+    exponential backoff; the plugin watchdog drives it every tick."""
+
+    def __init__(self, host, port):
+        self.host = host
+        self.port = int(port)
+        self.key = f"{host}:{port}"
+        self.state_key = re.sub(r"[^A-Za-z0-9_-]", "_", self.key)
+        self.primary = None          # _NetDeckDevice (the unit itself)
+        self.child = None            # _NetDeckDevice (deck docked in it)
+        self.status = "connecting"
+        self.fail_count = 0
+        self.next_attempt = 0.0
+        self.observed_serial = ""    # deck serial, once known (for re-resolve)
+        self._connecting = False
+        self._resolve_attempted = False
+
+    def close(self):
+        for dev in (self.child, self.primary):
+            if dev is not None:
+                dev.close()
+        self.primary = None
+        self.child = None
+
+    def _connect_blocking(self):
+        """Connect the primary, identify it, and bring up the child deck if
+        the unit reports one. Runs in an executor (blocking sockets)."""
+        primary = _NetDeckDevice(self.host, self.port, role="primary")
+        primary.link = self
+        primary.connect()
+        try:
+            primary.identify()
+            # Ask for the current child; docks answer, deck-units may not.
+            try:
+                primary.read_host_feature(0x1C)
+            except Exception:
+                pass
+        except Exception:
+            primary.close()
+            raise
+        self.primary = primary
+        self._connect_child_blocking()
+
+    def _connect_child_blocking(self):
+        info = self.primary.device2 if self.primary else None
+        if not info:
+            return
+        child = _NetDeckDevice(self.host, info["port"], role="child")
+        child.link = self
+        child.connect()
+        child._vid, child._pid = info["vid"], info["pid"]
+        if info.get("serial"):
+            self.observed_serial = info["serial"]
+        self.child = child
+
+    async def ensure(self, loop, log):
+        """Watchdog tick: reconnect what's down (respecting backoff) and
+        reconcile the child against the latest Device 2 report. Returns the
+        transports that are up; the caller turns them into deck objects."""
+        now = time.monotonic()
+        if self._connecting:
+            return self._live_transports()
+
+        primary_up = self.primary is not None and self.primary.connected()
+        if not primary_up:
+            self.close()
+            if now < self.next_attempt:
+                return []
+            self._connecting = True
+            try:
+                await loop.run_in_executor(None, self._connect_blocking)
+                self.fail_count = 0
+                self.status = "connected"
+                self._resolve_attempted = False
+            except Exception as e:
+                self.close()
+                self.fail_count += 1
+                self.next_attempt = now + min(3.0 * (2 ** min(self.fail_count - 1, 4)), 30.0)
+                self.status = _classify_net_error(e)
+                log(
+                    f"Network deck {self.key}: {self.status} "
+                    f"(retry in {int(self.next_attempt - now)}s)",
+                    "warning",
+                )
+                return []
+            finally:
+                self._connecting = False
+            return self._live_transports()
+
+        # Primary healthy: reconcile the child with the latest hotplug report.
+        info = self.primary.device2
+        child_up = self.child is not None and self.child.connected()
+        want_port = info["port"] if info else None
+        have_port = self.child._port if self.child else None
+        if info is None and self.child is not None:
+            # Deck removed from the dock
+            self.child.close()
+            self.child = None
+        elif info is not None and (not child_up or have_port != want_port):
+            if self.child is not None:
+                self.child.close()
+                self.child = None
+            self._connecting = True
+            try:
+                await loop.run_in_executor(None, self._connect_child_blocking)
+            except Exception as e:
+                log(
+                    f"Network deck {self.key}: docked deck {_classify_net_error(e)}",
+                    "warning",
+                )
+            finally:
+                self._connecting = False
+        return self._live_transports()
+
+    def _live_transports(self):
+        out = []
+        for dev in (self.primary, self.child):
+            if dev is not None and dev.connected() and dev.product_id() not in (0, _NET_DOCK_PID):
+                out.append(dev)
+        return out
+
+
+_StudioClass = None
+
+
+def _studio_deck_class():
+    """Vendored Stream Deck Studio device definition (32 keys, 2 dials),
+    matching the upstream library's gen2 image protocol. The bundled library
+    predates the Studio; this subclass supplies its constants and input
+    parsing so the rack unit works over its built-in Ethernet."""
+    global _StudioClass
+    if _StudioClass is not None:
+        return _StudioClass
+    from StreamDeck.Devices.StreamDeck import ControlType, DialEventType
+    from StreamDeck.Devices.StreamDeckOriginalV2 import StreamDeckOriginalV2
+
+    class StreamDeckStudio(StreamDeckOriginalV2):
+        KEY_COUNT = 32
+        KEY_COLS = 16
+        KEY_ROWS = 2
+        DIAL_COUNT = 2
+        TOUCH_KEY_COUNT = 0
+        KEY_PIXEL_WIDTH = 80
+        KEY_PIXEL_HEIGHT = 120
+        KEY_IMAGE_FORMAT = "JPEG"
+        KEY_FLIP = (False, False)
+        KEY_ROTATION = 0
+        DECK_TYPE = "Stream Deck Studio"
+        DECK_VISUAL = True
+
+        _DIAL_EVENT_TRANSFORM = {
+            DialEventType.TURN: lambda v: v if v < 0x80 else -(0x100 - v),
+            DialEventType.PUSH: bool,
+        }
+
+        def _read_control_states(self):
+            data = self.device.read(43)
+            if data is None:
+                return None
+            states = data[1:]
+            if states[0] == 0x00:  # key event
+                return {
+                    ControlType.KEY: [bool(s) for s in states[3:3 + self.KEY_COUNT]]
+                }
+            if states[0] == 0x03:  # dial event
+                if states[3] == 0x01:
+                    event_type = DialEventType.TURN
+                elif states[3] == 0x00:
+                    event_type = DialEventType.PUSH
+                else:
+                    return None
+                transform = self._DIAL_EVENT_TRANSFORM[event_type]
+                return {
+                    ControlType.DIAL: {
+                        event_type: [
+                            transform(s)
+                            for s in states[4:4 + self.DIAL_COUNT]
+                        ],
+                    }
+                }
+            return None
+
+        def get_serial_number(self):
+            serial = self.device.read_feature(0x06, 32)
+            return self._extract_string(serial[5:])
+
+        def get_firmware_version(self):
+            version = self.device.read_feature(0x05, 32)
+            return self._extract_string(version[5:])
+
+    _StudioClass = StreamDeckStudio
+    return _StudioClass
+
+
+def _net_deck_class(pid):
+    """Map a child/unit product id to the library device class driving it."""
+    if StreamDeck is None:
+        return None
+    if pid == 0x00AA:
+        return _studio_deck_class()
+    ids = StreamDeck.USBProductIDs
+    mapping = {
+        ids.USB_PID_STREAMDECK_ORIGINAL: StreamDeck.StreamDeckOriginal,
+        ids.USB_PID_STREAMDECK_ORIGINAL_V2: StreamDeck.StreamDeckOriginalV2,
+        ids.USB_PID_STREAMDECK_MK2_SCISSOR: StreamDeck.StreamDeckOriginalV2,
+        ids.USB_PID_STREAMDECK_MK2_MODULE: StreamDeck.StreamDeckOriginalV2,
+        ids.USB_PID_STREAMDECK_MINI: StreamDeck.StreamDeckMini,
+        ids.USB_PID_STREAMDECK_NEO: StreamDeck.StreamDeckNeo,
+        ids.USB_PID_STREAMDECK_XL: StreamDeck.StreamDeckXL,
+        ids.USB_PID_STREAMDECK_MK2: StreamDeck.StreamDeckOriginalV2,
+        ids.USB_PID_STREAMDECK_MK2_V2: StreamDeck.StreamDeckOriginalV2,
+        ids.USB_PID_STREAMDECK_PEDAL: StreamDeck.StreamDeckPedal,
+        ids.USB_PID_STREAMDECK_MINI_MK2: StreamDeck.StreamDeckMini,
+        ids.USB_PID_STREAMDECK_MINI_MK2_MODULE: StreamDeck.StreamDeckMini,
+        ids.USB_PID_STREAMDECK_XL_V2: StreamDeck.StreamDeckXL,
+        ids.USB_PID_STREAMDECK_XL_V2_MODULE: StreamDeck.StreamDeckXL,
+        ids.USB_PID_STREAMDECK_PLUS: StreamDeck.StreamDeckPlus,
+    }
+    return mapping.get(pid)
+
+
 class _DeckSession:
     """Per-deck runtime state for one connected Stream Deck.
 
@@ -404,18 +1034,19 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.29.0",
+        "version": "1.30.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
-            "Plug in a Stream Deck over USB, or add a virtual deck to design "
-            "without hardware. Open the **Stream Deck** view in the sidebar: "
-            "the picture of your deck is live. Click any key to set what it "
-            "does (run a macro, send a device command, set a variable, switch "
-            "pages); Shift+click presses it for real. Add pages with the + "
-            "tab, and lock keys you want on every page — like page switchers. "
-            "Dials, the touch strip, and the info screen are set up by "
-            "clicking them in the picture."
+            "Plug in a Stream Deck over USB, add one on the network (Elgato "
+            "Network Dock or a Stream Deck Studio's Ethernet port), or add a "
+            "virtual deck to design without hardware. Open the **Stream "
+            "Deck** view in the sidebar: the picture of your deck is live. "
+            "Click any key to set what it does (run a macro, send a device "
+            "command, set a variable, switch pages); Shift+click presses it "
+            "for real. Add pages with the + tab, and lock keys you want on "
+            "every page — like page switchers. Dials, the touch strip, and "
+            "the info screen are set up by clicking them in the picture."
         ),
         "category": "control_surface",
         "license": "MIT",
@@ -468,6 +1099,10 @@ class StreamDeckPlugin:
             "macro_execute",
             "device_command",
             "usb_access",
+            # Network-attached decks: outbound TCP to the deck plus mDNS
+            # browse (api.mdns_browse, feature-detected — older cores fall
+            # back to manual add-by-address).
+            "network_listen",
             "http_endpoints",
         ],
     }
@@ -486,10 +1121,13 @@ class StreamDeckPlugin:
         "key_spacing_px": 4,
         "supports_pages": True,
         # Device-backed surface: the IDE editor renders only real units
-        # (USB or virtual). With none connected it shows a connect /
-        # add-virtual-deck state instead of this fallback grid.
+        # (USB, network, or virtual). With none connected it shows a connect /
+        # add-deck state instead of this fallback grid.
         "requires_device": True,
         "device_label": "Stream Deck",
+        # The editor offers "Add network deck" (ext/network/scan + /test
+        # routes, network_decks config array).
+        "network": True,
         # Must match the _VIRTUAL_MODELS preset table below.
         "virtual_models": [
             "Stream Deck Neo",
@@ -568,6 +1206,18 @@ class StreamDeckPlugin:
         "exactly like attached hardware (sessions, pages, dials, state, decks "
         "overrides); the user sees and clicks it in the IDE's Live View, and "
         "per-serial state marks it with <serial>.virtual = true. "
+        "Decks reached over the network (Elgato Network Dock, or a Stream "
+        "Deck Studio's built-in Ethernet) are added with a top-level "
+        "'network_decks' array: [{\"host\": \"192.168.1.40\", \"port\": 5343}] "
+        "— port is optional (default 5343), and the plugin records the deck's "
+        "serial on the entry after the first connect so it can follow the "
+        "deck to a new DHCP address. Network decks never attach on their own; "
+        "an entry here is the explicit opt-in. Once connected they behave "
+        "exactly like USB decks (same buttons/pages/decks config, same state "
+        "keys) with <serial>.transport = \"network\" and <serial>.address "
+        "set. Connection progress per entry is published at "
+        "plugin.streamdeck.net.<host_port>.status (host_port has non-"
+        "alphanumerics replaced with _, e.g. 192_168_1_40_5343). "
         "Button indices go left-to-right, "
         "top-to-bottom (e.g. Neo: 0-3 top row, 4-7 bottom row; MK.2: 0-4 top, "
         "5-9 middle, 10-14 bottom). Use page 0 unless multi-page is requested. "
@@ -736,6 +1386,8 @@ class StreamDeckPlugin:
         self._text_font_path = None  # Bundled label font (legible on Linux/Pi)
         self._font_cache = {}    # size -> ImageFont
         self._label_cache = {}   # (label, w, h, color, max_font, max_lines) -> RGBA
+        # "host:port" -> _DockLink for each configured network deck
+        self._dock_links = {}
 
     async def start(self, api):
         """Initialize and connect to the Stream Deck."""
@@ -831,6 +1483,9 @@ class StreamDeckPlugin:
                 self.api.log(f"Error closing deck: {e}", level="warning")
         self._sessions.clear()
         self._mirror_blobs.clear()
+        for link in self._dock_links.values():
+            link.close()
+        self._dock_links.clear()
         self.api.log("Stream Deck plugin stopped")
 
     async def health_check(self):
@@ -943,6 +1598,9 @@ class StreamDeckPlugin:
             await self.api.state_set(
                 f"{prefix}.name", str(deck_names.get(session.serial, ""))
             )
+            await self.api.state_set(
+                f"{prefix}.address", getattr(session, "address", "")
+            )
             for key, value in session.geometry.items():
                 await self.api.state_set(f"{prefix}.{key}", value)
             await self.api.state_set(f"{prefix}.current_page", session.current_page)
@@ -954,12 +1612,26 @@ class StreamDeckPlugin:
 
         session = _DeckSession(deck)
         session.is_virtual = isinstance(deck, _VirtualDeck)
+        net_device = getattr(deck, "device", None)
+        session.is_network = bool(getattr(net_device, "is_network", False))
+        session.address = net_device.address if session.is_network else ""
+        session.transport = (
+            "virtual" if session.is_virtual
+            else "network" if session.is_network
+            else "usb"
+        )
         try:
             session.device_id = deck.id()
         except Exception:
             session.device_id = f"deck-{id(deck)}"
         session.serial = deck.get_serial_number() or "unknown"
         session.model = deck.deck_type()
+        if session.is_network and getattr(net_device, "link", None) is not None:
+            if session.serial and session.serial != "unknown":
+                # Recorded on the link; the watchdog persists it to the
+                # config entry so discovery can follow the deck if its
+                # address changes later (DHCP renumbering).
+                net_device.link.observed_serial = session.serial
 
         # Geometry comes from the live hardware, not a static model table, so
         # any deck the library enumerates renders correctly — including models
@@ -986,6 +1658,7 @@ class StreamDeckPlugin:
             # but nothing renders, so the editor skips display-only flows.
             "visual": is_visual,
             "virtual": session.is_virtual,
+            "transport": session.transport,
         }
 
         self._sessions[session.device_id] = session
@@ -1101,6 +1774,13 @@ class StreamDeckPlugin:
                     )
                 )
 
+        # Network decks: reconnect configured units (with backoff) and collect
+        # any decks whose connection came up since the last tick.
+        try:
+            await self._reconcile_network_decks(new_decks)
+        except Exception as e:
+            self.api.log(f"Network deck reconcile error: {e}", level="warning")
+
         if not new_decks:
             return
 
@@ -1194,6 +1874,168 @@ class StreamDeckPlugin:
             entries.append({"model": model, "serial": serial})
         return entries
 
+    # ──── Network decks ────
+
+    def _network_deck_entries(self):
+        """Validated ``network_decks`` config entries.
+
+        Each entry needs a ``host`` (IP or hostname); ``port`` defaults to
+        5343. ``serial`` is recorded automatically after the first connect so
+        a deck that moves to a new DHCP address can be found again via
+        discovery. Entries are explicit opt-in — the plugin never attaches to
+        a deck on the network that hasn't been added here.
+        """
+        raw = self.api.config.get("network_decks", [])
+        if not isinstance(raw, list):
+            return []
+        entries = []
+        seen = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            host = str(item.get("host", "")).strip()
+            try:
+                port = int(item.get("port", _NET_DEFAULT_PORT))
+            except (TypeError, ValueError):
+                continue
+            if not host or not (0 < port < 65536):
+                continue
+            key = f"{host}:{port}"
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({
+                "host": host,
+                "port": port,
+                "key": key,
+                "serial": str(item.get("serial", "") or ""),
+            })
+        return entries
+
+    async def _reconcile_network_decks(self, new_decks):
+        """Watchdog half of network decks.
+
+        Keeps one _DockLink per configured entry, publishes each link's
+        status for the editor (``plugin.streamdeck.net.<key>.status``),
+        appends deck objects for transports that came up, and self-heals the
+        configured host via discovery when a known deck stops answering.
+        """
+        entries = self._network_deck_entries()
+        declared = {e["key"]: e for e in entries}
+
+        for key, link in list(self._dock_links.items()):
+            if key not in declared:
+                link.close()
+                del self._dock_links[key]
+                await self.api.state_set(f"net.{link.state_key}.status", "removed")
+
+        serial_updates = False
+        for key, entry in declared.items():
+            link = self._dock_links.get(key)
+            if link is None:
+                link = _DockLink(entry["host"], entry["port"])
+                if entry["serial"]:
+                    link.observed_serial = entry["serial"]
+                self._dock_links[key] = link
+            transports = await link.ensure(self._loop, self.api.log)
+            for transport in transports:
+                if transport.path() not in self._sessions:
+                    cls = _net_deck_class(transport.product_id())
+                    if cls is not None:
+                        new_decks.append(cls(transport))
+            await self.api.state_set(f"net.{link.state_key}.address", key)
+            await self.api.state_set(f"net.{link.state_key}.status", link.status)
+            if link.observed_serial and link.observed_serial != entry["serial"]:
+                serial_updates = True
+            known_serial = link.observed_serial or entry["serial"]
+            if (
+                known_serial
+                and link.fail_count >= 3
+                and not link._resolve_attempted
+                and callable(getattr(self.api, "mdns_browse", None))
+            ):
+                link._resolve_attempted = True
+                self.api.create_task(
+                    self._net_reresolve(key, known_serial),
+                    name=f"net_reresolve_{link.state_key}",
+                )
+        if serial_updates:
+            await self._persist_network_serials()
+
+    async def _persist_network_serials(self):
+        """Record each connected deck's serial on its ``network_decks`` entry
+        (so discovery can follow the deck if its address changes later)."""
+        raw = self.api.config.get("network_decks")
+        if not isinstance(raw, list):
+            return
+        updated = []
+        changed = False
+        for item in raw:
+            entry = dict(item) if isinstance(item, dict) else item
+            if isinstance(entry, dict):
+                host = str(entry.get("host", "")).strip()
+                try:
+                    port = int(entry.get("port", _NET_DEFAULT_PORT))
+                except (TypeError, ValueError):
+                    port = _NET_DEFAULT_PORT
+                link = self._dock_links.get(f"{host}:{port}")
+                if (
+                    link
+                    and link.observed_serial
+                    and entry.get("serial") != link.observed_serial
+                ):
+                    entry["serial"] = link.observed_serial
+                    changed = True
+            updated.append(entry)
+        if changed:
+            config = dict(self.api.config)
+            config["network_decks"] = updated
+            await self.api.save_config(config)
+
+    async def _net_reresolve(self, key, serial):
+        """A configured deck stopped answering: browse discovery for its
+        serial and follow it to its new address."""
+        try:
+            results = await self.api.mdns_browse([_NET_MDNS_SERVICE], duration=5.0)
+        except Exception as e:
+            self.api.log(f"Network deck discovery failed: {e}", level="warning")
+            return
+        for r in results:
+            txt = r.get("txt") or {}
+            if str(txt.get("sn", "")) != serial:
+                continue
+            new_host = r.get("ip")
+            new_port = r.get("port") or _NET_DEFAULT_PORT
+            if not new_host or f"{new_host}:{new_port}" == key:
+                return
+            raw = self.api.config.get("network_decks")
+            if not isinstance(raw, list):
+                return
+            updated = []
+            changed = False
+            for item in raw:
+                entry = dict(item) if isinstance(item, dict) else item
+                if isinstance(entry, dict):
+                    e_host = str(entry.get("host", "")).strip()
+                    try:
+                        e_port = int(entry.get("port", _NET_DEFAULT_PORT))
+                    except (TypeError, ValueError):
+                        e_port = _NET_DEFAULT_PORT
+                    if f"{e_host}:{e_port}" == key:
+                        entry["host"] = new_host
+                        entry["port"] = new_port
+                        changed = True
+                updated.append(entry)
+            if changed:
+                self.api.log(
+                    f"Network deck {serial} answered at {new_host}:{new_port} "
+                    f"(was {key}); following it"
+                )
+                config = dict(self.api.config)
+                config["network_decks"] = updated
+                await self.api.save_config(config)
+            return
+
     def _build_ext_router(self):
         """FastAPI router serving the live-mirror images.
 
@@ -1217,6 +2059,68 @@ class StreamDeckPlugin:
                 media_type=media_type,
                 headers={"Cache-Control": "no-store"},
             )
+
+        @router.post("/network/scan")
+        async def network_scan():
+            """Find network decks on the LAN. Returns browse_available=False
+            where multicast discovery can't run (older cores, Docker bridge
+            networks) — the manual add-by-address path always works."""
+            entries = self._network_deck_entries()
+            configured_keys = {e["key"] for e in entries}
+            configured_hosts = {e["host"] for e in entries}
+            browse = getattr(self.api, "mdns_browse", None)
+            if not callable(browse):
+                return {"browse_available": False, "found": []}
+            try:
+                results = await browse([_NET_MDNS_SERVICE], duration=4.0)
+            except Exception as e:
+                self.api.log(f"Network deck scan failed: {e}", level="warning")
+                return {"browse_available": False, "found": []}
+            found = []
+            for r in results:
+                service = str(r.get("service_type") or "")
+                if not service.startswith("_elg."):
+                    continue
+                host = r.get("ip") or ""
+                if not host:
+                    continue
+                port = r.get("port") or _NET_DEFAULT_PORT
+                txt = r.get("txt") or {}
+                found.append({
+                    "host": host,
+                    "port": port,
+                    "name": r.get("instance_name") or r.get("hostname") or host,
+                    "serial": str(txt.get("sn", "")),
+                    "kind": (
+                        "Network Dock"
+                        if str(txt.get("dt", "")) == "215"
+                        else "Stream Deck"
+                    ),
+                    "already_added": (
+                        f"{host}:{port}" in configured_keys
+                        or host in configured_hosts
+                    ),
+                })
+            return {"browse_available": True, "found": found}
+
+        @router.post("/network/test")
+        async def network_test(payload: dict):
+            """Try a TCP connection to host:port (the manual-add Test button)."""
+            host = str(payload.get("host", "")).strip()
+            try:
+                port = int(payload.get("port", _NET_DEFAULT_PORT))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "invalid port"}
+            if not host or not (0 < port < 65536):
+                return {"ok": False, "error": "enter a host or IP address"}
+            try:
+                _reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout=3.0
+                )
+            except Exception as e:
+                return {"ok": False, "error": _classify_net_error(e)}
+            writer.close()
+            return {"ok": True}
 
         return router
 

@@ -3000,3 +3000,509 @@ def test_apply_nav_active_image_same_size(monkeypatch):
     out = plugin._apply_nav_active(base)
     assert out.size == (72, 72)
     assert out.mode == "RGB"
+
+
+# ──── Network decks: framing ────
+
+
+def test_cora_pack_layout():
+    frame = sd_module._cora_pack(0x8000, 0x02, 0x123456, b"\x84")
+    assert frame[:4] == b"\x43\x93\x8a\x41"
+    flags, op, res, mid, length = __import__("struct").unpack("<HBBII", frame[4:16])
+    assert (flags, op, res, mid, length) == (0x8000, 0x02, 0, 0x123456, 1)
+    assert frame[16:] == b"\x84"
+
+
+def test_cora_stream_parses_split_frames_and_resyncs():
+    stream = sd_module._CoraStream()
+    frame1 = sd_module._cora_pack(0x0000, 0x00, 7, b"\x01\x0a\x00\x00\x00\x05")
+    frame2 = sd_module._cora_pack(0x8000, 0x00, 0, b"\x01\x00\x00\x01" + b"\x00" * 8)
+    blob = b"\xde\xad\xbe\xef" + frame1 + frame2  # garbage prefix -> resync
+    # Feed in awkward chunk sizes spanning frame boundaries
+    frames = []
+    for i in range(0, len(blob), 7):
+        frames.extend(stream.feed(blob[i:i + 7]))
+    assert len(frames) == 2
+    assert frames[0][3][:2] == b"\x01\x0a"
+    assert frames[1][0] == 0x8000
+    assert frames[1][3][0] == 0x01
+
+
+def test_parse_device2_layout():
+    payload = bytearray(130)
+    payload[0], payload[1] = 0x01, 0x0B
+    payload[4] = 0x02  # child connected
+    payload[26:28] = (0x0FD9).to_bytes(2, "little")
+    payload[28:30] = (0x0080).to_bytes(2, "little")
+    payload[94:94 + 7] = b"ABC123\x00"
+    payload[126:128] = (5344).to_bytes(2, "little")
+    info = sd_module._parse_device2(bytes(payload))
+    assert info == {"vid": 0x0FD9, "pid": 0x0080, "serial": "ABC123", "port": 5344}
+    payload[4] = 0x00  # child gone
+    assert sd_module._parse_device2(bytes(payload)) is None
+    assert sd_module._parse_device2(b"\x01\x0b") is None
+
+
+# ──── Network decks: live TCP transport against a fake dock ────
+
+
+class _FakeDock:
+    """Minimal Cora-speaking dock on a localhost socket for transport tests."""
+
+    def __init__(self, keepalives=True):
+        import socket as _socket
+        self.sock = _socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        self.keepalives = keepalives
+        self.received = []          # parsed (flags, op, mid, payload) from client
+        self.conn = None
+        self.stop = False
+        self.feature_responses = {}  # report_id -> response payload bytes
+        import threading as _threading
+        self.thread = _threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        import struct as _struct
+        import time as _time
+        try:
+            self.conn, _ = self.sock.accept()
+        except OSError:
+            return
+        self.conn.settimeout(0.1)
+        stream = sd_module._CoraStream()
+        last_ka = 0.0
+        while not self.stop:
+            now = _time.monotonic()
+            if self.keepalives and now - last_ka >= 0.4:
+                ka = sd_module._cora_pack(
+                    0x4000, 0x01, 99, b"\x01\x0a\x00\x00\x00\x07"
+                )
+                try:
+                    self.conn.sendall(ka)
+                except OSError:
+                    break
+                last_ka = now
+            try:
+                data = self.conn.recv(65536)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            if not data:
+                break
+            for frame in stream.feed(data):
+                self.received.append(frame)
+                flags, op, mid, payload = frame
+                if op == sd_module._CORA_OP_GET_REPORT:
+                    rid = payload[1] if payload[0] == 0x03 else payload[0]
+                    resp = self.feature_responses.get(rid)
+                    if resp is not None:
+                        rflags = 0x8000 if not (payload[0] == 0x03) else 0x0100
+                        try:
+                            self.conn.sendall(
+                                sd_module._cora_pack(rflags, op, mid, resp)
+                            )
+                        except OSError:
+                            break
+            _ = _struct  # quiet linters
+
+    def send_frame(self, flags, op, mid, payload):
+        self.conn.sendall(sd_module._cora_pack(flags, op, mid, payload))
+
+    def close(self):
+        self.stop = True
+        for s in (self.conn, self.sock):
+            try:
+                s and s.close()
+            except OSError:
+                pass
+
+
+def test_net_device_connects_acks_keepalives_and_reports_liveness():
+    dock = _FakeDock()
+    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    try:
+        dev.connect(timeout=3.0)
+        assert dev.is_open() and dev.connected()
+        # The client must have ACKed the keepalive: ACK_NAK flags, echoed
+        # op/mid, 32-byte payload 03 1A <connection_no from byte 5>
+        import time as _time
+        deadline = _time.monotonic() + 2.0
+        acks = []
+        while _time.monotonic() < deadline and not acks:
+            acks = [f for f in dock.received if f[0] & sd_module._CORA_FLAG_ACK_NAK]
+            _time.sleep(0.05)
+        assert acks, "no keepalive ACK reached the dock"
+        flags, op, mid, payload = acks[0]
+        assert (op, mid) == (0x01, 99)
+        assert payload[:3] == b"\x03\x1a\x07" and len(payload) == 32
+    finally:
+        dev.close()
+        dock.close()
+
+
+def test_net_device_liveness_decays_without_keepalives():
+    dock = _FakeDock()
+    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    try:
+        dev.connect(timeout=3.0)
+        dock.keepalives = False
+        dev._last_rx -= sd_module._NET_IDLE_TIMEOUT + 1  # simulate silence
+        assert not dev.connected()
+        assert dev.is_open()  # socket itself still up; watchdog reaps via connected()
+    finally:
+        dev.close()
+        dock.close()
+
+
+def test_net_device_input_reports_and_nonblocking_read():
+    dock = _FakeDock()
+    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    try:
+        dev.connect(timeout=3.0)
+        assert dev.read(14) is None  # nothing queued -> non-blocking None
+        report = b"\x01\x00\x00\x00\x01" + b"\x00" * 9
+        dock.send_frame(0x8000, 0x00, 0, report)
+        import time as _time
+        got = None
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline and got is None:
+            got = dev.read(14)
+            _time.sleep(0.01)
+        assert got is not None
+        assert got[:5] == report[:5] and len(got) == 14  # padded to length
+    finally:
+        dev.close()
+        dock.close()
+
+
+def test_net_device_feature_roundtrip_and_write_framing():
+    dock = _FakeDock()
+    dock.feature_responses[0x06] = b"\x06\x00\x00\x00\x00NETSN77\x00"
+    dock.feature_responses[0x80] = (
+        b"\x03\x80" + b"\x00" * 10 + (0x0FD9).to_bytes(2, "little")
+        + (0x00AA).to_bytes(2, "little") + b"\x00" * 16
+    )
+    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    try:
+        dev.connect(timeout=3.0)
+        # Verbatim (child/deck) feature read: payload [id], response keyed on it
+        data = dev.read_feature(0x06, 32)
+        assert data[:1] == b"\x06" and data[5:12] == b"NETSN77"
+        assert len(data) == 32
+        # Bridge identity via 0x80: vid/pid at payload offsets 12/14
+        assert dev.identify() == (0x0FD9, 0x00AA)
+        # hid write -> Cora WRITE|VERBATIM with the full report as payload
+        dev.write(b"\x02\x07\x00\x01\x00\x00\x00\x00")
+        import time as _time
+        _time.sleep(0.3)
+        writes = [
+            f for f in dock.received
+            if f[1] == sd_module._CORA_OP_WRITE
+            and f[0] & sd_module._CORA_FLAG_VERBATIM
+        ]
+        assert writes and writes[0][3][:2] == b"\x02\x07"
+    finally:
+        dev.close()
+        dock.close()
+
+
+def test_net_device_legacy_mode_keepalive_and_padded_writes():
+    import socket as _socket
+    import threading as _threading
+    srv = _socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    received = []
+    ready = _threading.Event()
+
+    def serve():
+        conn, _ = srv.accept()
+        # Legacy keepalive: 512-byte packet, 01 0A, connection_no at byte 5
+        ka = bytearray(512)
+        ka[0], ka[1], ka[5] = 0x01, 0x0A, 0x09
+        conn.sendall(bytes(ka))
+        conn.settimeout(3.0)
+        buf = b""
+        while len(buf) < 1024 + 1024:  # the ACK plus one padded write
+            try:
+                chunk = conn.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+        received.append(buf)
+        ready.set()
+        conn.close()
+
+    thread = _threading.Thread(target=serve, daemon=True)
+    thread.start()
+    dev = sd_module._NetDeckDevice("127.0.0.1", port)
+    try:
+        dev.connect(timeout=3.0)
+        assert dev._mode == "legacy"
+        dev.write(b"\x02\x10\x00\x11\x22\x33")  # unpadded LED report
+        assert ready.wait(3.0)
+        buf = received[0]
+        # First 1024 bytes: the raw keepalive ACK
+        assert buf[:3] == b"\x03\x1a\x09" and len(buf) >= 2048
+        # Next 1024: the write padded to exactly 1024
+        assert buf[1024:1030] == b"\x02\x10\x00\x11\x22\x33"
+        assert buf[1024 + 6:2048] == b"\x00" * (1024 - 6)
+    finally:
+        dev.close()
+        srv.close()
+
+
+def test_net_device_hotplug_device2_updates():
+    dock = _FakeDock()
+    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    try:
+        dev.connect(timeout=3.0)
+        payload = bytearray(130)
+        payload[0], payload[1], payload[4] = 0x01, 0x0B, 0x02
+        payload[26:28] = (0x0FD9).to_bytes(2, "little")
+        payload[28:30] = (0x0090).to_bytes(2, "little")
+        payload[94:94 + 4] = b"SN1\x00"
+        payload[126:128] = (4242).to_bytes(2, "little")
+        dock.send_frame(0x0000, 0x01, 0, bytes(payload))
+        import time as _time
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline and not dev.device2_seen:
+            _time.sleep(0.02)
+        assert dev.device2 == {
+            "vid": 0x0FD9, "pid": 0x0090, "serial": "SN1", "port": 4242
+        }
+        # Child removed: status byte != 0x02 -> device2 becomes None
+        payload[4] = 0x00
+        dock.send_frame(0x0000, 0x01, 0, bytes(payload))
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline and dev.device2 is not None:
+            _time.sleep(0.02)
+        assert dev.device2 is None and dev.device2_seen
+    finally:
+        dev.close()
+        dock.close()
+
+
+# ──── Network decks: config, reconcile, and routes ────
+
+
+def test_network_deck_entries_validation():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({
+        "network_decks": [
+            {"host": "192.168.1.40"},                      # default port
+            {"host": "192.168.1.41", "port": 5400},
+            {"host": "192.168.1.41", "port": 5400},        # duplicate dropped
+            {"host": "", "port": 5343},                    # no host dropped
+            {"host": "192.168.1.42", "port": "bad"},       # bad port dropped
+            {"host": "192.168.1.43", "port": 99999},       # out of range
+            "not-a-dict",
+        ]
+    })
+    entries = plugin._network_deck_entries()
+    assert [(e["host"], e["port"]) for e in entries] == [
+        ("192.168.1.40", 5343),
+        ("192.168.1.41", 5400),
+    ]
+    assert entries[0]["key"] == "192.168.1.40:5343"
+
+
+def test_dock_link_backoff_grows_and_caps(monkeypatch):
+    link = sd_module._DockLink("192.0.2.1", 5343)  # TEST-NET, never answers
+
+    def fail_connect():
+        raise ConnectionRefusedError()
+
+    monkeypatch.setattr(link, "_connect_blocking", fail_connect)
+    logs = []
+    loop = __import__("asyncio").new_event_loop()
+
+    async def run():
+        delays = []
+        for _ in range(7):
+            link.next_attempt = 0.0  # bypass the wait, measure the schedule
+            before = sd_module.time.monotonic()
+            out = await link.ensure(loop, lambda m, level="info": logs.append(m))
+            assert out == []
+            delays.append(link.next_attempt - before)
+        return delays
+
+    try:
+        delays = loop.run_until_complete(run())
+    finally:
+        loop.close()
+    assert delays[0] == pytest.approx(3.0, abs=0.5)
+    assert delays[1] == pytest.approx(6.0, abs=0.5)
+    assert delays[2] == pytest.approx(12.0, abs=0.5)
+    assert max(delays) <= 30.5  # capped
+    assert link.status == "connection refused"
+    assert any("retry in" in m for m in logs)
+
+
+def test_reconcile_creates_links_publishes_status_and_drops_removed():
+    plugin, state, _m, _d = _make_plugin_with_recorders({
+        "network_decks": [{"host": "192.0.2.7", "port": 5343}]
+    })
+    loop = __import__("asyncio").new_event_loop()
+    plugin._loop = loop
+    try:
+        async def fake_ensure(self, _loop, _log):
+            self.status = "connecting"
+            return []
+
+        original = sd_module._DockLink.ensure
+        sd_module._DockLink.ensure = fake_ensure
+        try:
+            loop.run_until_complete(plugin._reconcile_network_decks([]))
+            assert "192.0.2.7:5343" in plugin._dock_links
+            assert state.get(
+                "plugin.streamdeck.net.192_0_2_7_5343.status"
+            ) == "connecting"
+            # Entry removed from config -> link closed, status says removed
+            plugin.api._update_config({"network_decks": []})
+            loop.run_until_complete(plugin._reconcile_network_decks([]))
+            assert plugin._dock_links == {}
+            assert state.get(
+                "plugin.streamdeck.net.192_0_2_7_5343.status"
+            ) == "removed"
+        finally:
+            sd_module._DockLink.ensure = original
+    finally:
+        loop.close()
+
+
+def test_persist_network_serials_records_observed_serial():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({
+        "network_decks": [{"host": "192.0.2.9", "port": 5343}]
+    })
+    saved = {}
+
+    async def fake_save(config):
+        saved.update(config)
+        plugin.api._update_config(config)
+
+    plugin.api.save_config = fake_save
+    link = sd_module._DockLink("192.0.2.9", 5343)
+    link.observed_serial = "NETSN77"
+    plugin._dock_links[link.key] = link
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(plugin._persist_network_serials())
+    finally:
+        loop.close()
+    assert saved["network_decks"][0]["serial"] == "NETSN77"
+
+
+def test_net_reresolve_follows_serial_to_new_host():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({
+        "network_decks": [{"host": "192.0.2.9", "port": 5343, "serial": "SN42"}]
+    })
+    saved = {}
+
+    async def fake_save(config):
+        saved.update(config)
+        plugin.api._update_config(config)
+
+    async def fake_browse(service_types, duration=5.0):
+        assert service_types == [sd_module._NET_MDNS_SERVICE]
+        return [
+            {"ip": "192.0.2.50", "port": 5343,
+             "service_type": "_elg._tcp.local.", "txt": {"sn": "OTHER"}},
+            {"ip": "192.0.2.77", "port": 5343,
+             "service_type": "_elg._tcp.local.", "txt": {"sn": "SN42"}},
+        ]
+
+    plugin.api.save_config = fake_save
+    plugin.api.mdns_browse = fake_browse
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(plugin._net_reresolve("192.0.2.9:5343", "SN42"))
+    finally:
+        loop.close()
+    assert saved["network_decks"][0]["host"] == "192.0.2.77"
+    assert any("following it" in log["message"] for log in plugin._test_logs)
+
+
+def test_scan_route_maps_results_and_marks_already_added():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({
+        "network_decks": [{"host": "192.0.2.7", "port": 5343}]
+    })
+
+    async def fake_browse(service_types, duration=5.0):
+        return [
+            {"ip": "192.0.2.7", "port": 5343, "service_type": "_elg._tcp.local.",
+             "instance_name": "Booth Dock", "txt": {"dt": "215", "sn": "AA"}},
+            {"ip": "192.0.2.8", "port": 5343, "service_type": "_elg._tcp.local.",
+             "instance_name": "Rack Studio", "txt": {"dt": "9", "sn": "BB"}},
+            {"ip": "192.0.2.9", "port": 80, "service_type": "_http._tcp.local.",
+             "instance_name": "Printer", "txt": {}},
+        ]
+
+    plugin.api.mdns_browse = fake_browse
+    router = plugin._build_ext_router()
+    scan = next(
+        r.endpoint for r in router.routes if r.path == "/network/scan"
+    )
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        result = loop.run_until_complete(scan())
+    finally:
+        loop.close()
+    assert result["browse_available"] is True
+    assert len(result["found"]) == 2  # the printer is filtered out
+    dock = next(f for f in result["found"] if f["host"] == "192.0.2.7")
+    assert dock["kind"] == "Network Dock" and dock["already_added"] is True
+    studio = next(f for f in result["found"] if f["host"] == "192.0.2.8")
+    assert studio["kind"] == "Stream Deck" and studio["already_added"] is False
+
+
+def test_scan_route_degrades_without_mdns_browse():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    # Older cores: PluginAPI has no mdns_browse attribute at all
+    if hasattr(plugin.api, "mdns_browse"):
+        plugin.api.mdns_browse = None
+    router = plugin._build_ext_router()
+    scan = next(r.endpoint for r in router.routes if r.path == "/network/scan")
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        result = loop.run_until_complete(scan())
+    finally:
+        loop.close()
+    assert result == {"browse_available": False, "found": []}
+
+
+def test_test_route_validates_and_reports_refused():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    router = plugin._build_ext_router()
+    test_ep = next(r.endpoint for r in router.routes if r.path == "/network/test")
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        bad = loop.run_until_complete(test_ep({"host": ""}))
+        assert bad["ok"] is False
+        # A localhost port nothing listens on -> connection refused
+        import socket as _socket
+        probe = _socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+        probe.close()
+        refused = loop.run_until_complete(
+            test_ep({"host": "127.0.0.1", "port": free_port})
+        )
+        assert refused["ok"] is False and refused["error"]
+        # And a live listener -> ok
+        srv = _socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        ok = loop.run_until_complete(
+            test_ep({"host": "127.0.0.1", "port": srv.getsockname()[1]})
+        )
+        srv.close()
+        assert ok["ok"] is True
+    finally:
+        loop.close()

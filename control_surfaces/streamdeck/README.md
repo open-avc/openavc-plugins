@@ -12,10 +12,11 @@ Use any Elgato Stream Deck as a physical control surface for OpenAVC. Assign mac
 | XL / XL V2 | 32 | 8x4 | LCD keys |
 | Plus | 8 + 4 dials | 4x2 + dials | LCD keys + touchscreen |
 | Pedal | 3 | 3x1 | No display (foot switches) |
+| Studio | 32 + 2 dials | 16x2 | LCD keys (rack unit, connects over Ethernet) |
 
 ## Requirements
 
-- Elgato Stream Deck hardware connected via USB
+- Elgato Stream Deck hardware connected via USB, or reachable over the network (see [Network Decks](#network-decks))
 - **Windows:** No additional setup needed. The HIDAPI library is installed automatically.
 - **Linux:** Install HIDAPI and add a USB permission rule:
   ```bash
@@ -24,9 +25,28 @@ Use any Elgato Stream Deck as a physical control surface for OpenAVC. Assign mac
   sudo udevadm control --reload-rules && sudo udevadm trigger
   ```
 
+No USB setup is needed for network decks.
+
+## Network Decks
+
+A deck doesn't have to be plugged into the OpenAVC server. Two kinds of network connection are supported:
+
+- **Elgato Network Dock** — the deck plugs into the dock, the dock plugs into the network (PoE or USB-C power). Works with current-generation Mini, MK.2, Neo, XL, and Plus; a Pedal works on DHCP networks only.
+- **Stream Deck Studio** — the rack unit's built-in Ethernet port.
+
+Open the Stream Deck view and choose **+ Network Stream Deck** (or **Add a network deck** when nothing is connected yet). Decks on the same network segment are found automatically; anywhere else, add the deck by its IP address — the deck shows its address on its keys at power-up. Once connected, a network deck works exactly like a USB deck: same pages, layouts, dials, and live editing.
+
+Notes for installed systems:
+
+- **Set a static IP on the deck** (configured on the deck's own keys at power-up) so its address never changes. On DHCP networks the plugin records the deck's serial number and follows it to a new address automatically.
+- The connection is plain TCP on port 5343 with no authentication, like most AV control protocols. Keep decks on the control VLAN.
+- **Network decks never attach on their own.** Only decks you add are used, so a deck someone brings into the building stays theirs.
+- Automatic discovery doesn't cross VLANs, Docker bridge networks, or NAT — add by IP address there. The connection itself works from every deployment, including Docker and VMs, with no USB passthrough.
+- Dock firmware updates still require Elgato's own app (7.1 or newer) on a separate computer; day-to-day operation never needs it. Don't leave Elgato's software running against a production dock — two controllers fighting over one deck makes it misbehave.
+
 ## The Stream Deck View
 
-Everything lives in one place: the **Stream Deck** view in the Programmer IDE sidebar. It shows a live picture of your deck — what you see on screen is exactly what the hardware is showing, as it renders it. With no deck connected, the view offers to wait for USB hardware or add a virtual deck so you can build now.
+Everything lives in one place: the **Stream Deck** view in the Programmer IDE sidebar. It shows a live picture of your deck — what you see on screen is exactly what the hardware is showing, as it renders it. With no deck connected, the view offers to wait for USB hardware, add a network deck, or add a virtual deck so you can build now.
 
 - **Click** anything in the picture — a key, a dial, the touch strip, the info screen — to edit it in the inspector panel on the right.
 - **Shift+click** a key (or use the **▶** badge / the inspector's **Press** button) to press it for real.
@@ -35,7 +55,7 @@ Everything lives in one place: the **Stream Deck** view in the Programmer IDE si
 
 Configuration changes apply live: saving updates the running decks in place, so they never blank or reconnect while you edit.
 
-For reference, the plugin's config keys (all editable in the view, and writable by automation/AI): `buttons`, `global_buttons`, `auto_page`, `page_names`, `dials`, `touchscreen`, `info_strip`, `brightness` (default 70), `auto_brightness`, `idle_dim`, `button_color` (default `#1a1a2e`), `text_color` (default `#e0e0e0`), `deck_names`, `deck_settings`, `decks`, `virtual_decks`.
+For reference, the plugin's config keys (all editable in the view, and writable by automation/AI): `buttons`, `global_buttons`, `auto_page`, `page_names`, `dials`, `touchscreen`, `info_strip`, `brightness` (default 70), `auto_brightness`, `idle_dim`, `button_color` (default `#1a1a2e`), `text_color` (default `#e0e0e0`), `deck_names`, `deck_settings`, `decks`, `virtual_decks`, `network_decks`.
 
 ## Configuring Buttons
 
