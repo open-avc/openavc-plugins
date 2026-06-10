@@ -396,13 +396,17 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.20.0",
+        "version": "1.20.1",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        "min_openavc_version": "0.16.0",
+        # Verified against the v0.15.1 tag: every API this plugin calls
+        # (variable_set, register_router, subscriptions, periodic tasks) and
+        # both gated capabilities (variable_write, http_endpoints) exist
+        # there. on_config_changed simply isn't called on older cores.
+        "min_openavc_version": "0.15.1",
         "dependencies": ["streamdeck", "pillow>=10.0"],
         "native_dependencies": [
             {

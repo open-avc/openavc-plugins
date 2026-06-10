@@ -1,7 +1,7 @@
 {
     "id": "streamdeck",
     "name": "Elgato Stream Deck",
-    "version": "1.20.0",
+    "version": "1.20.1",
     "author": "OpenAVC",
     "description": "Use Elgato Stream Deck hardware as a physical control surface.",
     "category": "control_surface",
@@ -10,5 +10,5 @@
     "capabilities": ["state_read", "state_write", "variable_write", "event_emit", "event_subscribe", "macro_execute", "device_command", "usb_access", "http_endpoints"],
     "dependencies": ["streamdeck", "pillow>=10.0"],
     "has_native_dependencies": true,
-    "min_openavc_version": "0.16.0"
+    "min_openavc_version": "0.15.1"
 }
