@@ -396,9 +396,17 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.20.1",
+        "version": "1.21.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
+        "usage": (
+            "Plug in a Stream Deck over USB, or add a virtual deck to design "
+            "without hardware. Then open the **Stream Deck** view in the "
+            "sidebar and click any key to choose what it does: run a macro, "
+            "send a device command, set a variable, or switch deck pages. "
+            "Dial, touch strip, and automation options appear in the same "
+            "view when the connected deck has them."
+        ),
         "category": "control_surface",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
@@ -464,15 +472,15 @@ class StreamDeckPlugin:
             "max": 100,
         },
         "button_color": {
-            "type": "string",
+            "type": "color",
             "label": "Default Button Color",
-            "description": "Background color for buttons without a custom icon (hex).",
+            "description": "Background color for buttons without a custom color.",
             "default": "#1a1a2e",
         },
         "text_color": {
-            "type": "string",
+            "type": "color",
             "label": "Text Color",
-            "description": "Label text color (hex).",
+            "description": "Label text color.",
             "default": "#e0e0e0",
         },
         "max_pages": {
@@ -482,12 +490,6 @@ class StreamDeckPlugin:
             "default": 10,
             "min": 1,
             "max": 100,
-        },
-        "pages": {
-            "type": "group",
-            "label": "Button Assignments",
-            "description": "Configured by the Surface Configurator. Do not edit manually.",
-            "fields": {},
         },
     }
 
@@ -499,6 +501,20 @@ class StreamDeckPlugin:
         "key_spacing_px": 4,
         "supports_pages": True,
         "max_pages": 10,
+        # Device-backed surface: the IDE editor renders only real units
+        # (USB or virtual). With none connected it shows a connect /
+        # add-virtual-deck state instead of this fallback grid.
+        "requires_device": True,
+        "device_label": "Stream Deck",
+        # Must match the _VIRTUAL_MODELS preset table below.
+        "virtual_models": [
+            "Stream Deck Neo",
+            "Stream Deck Mini",
+            "Stream Deck MK.2",
+            "Stream Deck XL",
+            "Stream Deck +",
+            "Stream Deck Pedal",
+        ],
     }
 
     AI_GUIDE = (

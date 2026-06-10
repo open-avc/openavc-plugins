@@ -29,9 +29,11 @@ Use any Elgato Stream Deck as a physical control surface for OpenAVC. Assign mac
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | Button Brightness | Integer | 70 | Screen brightness (0-100) |
-| Default Button Color | String | `#1a1a2e` | Background color for unassigned buttons |
-| Text Color | String | `#e0e0e0` | Button label text color |
+| Default Button Color | Color | `#1a1a2e` | Background color for unassigned buttons |
+| Text Color | Color | `#e0e0e0` | Button label text color |
 | Number of Pages | Integer | 10 | How many button pages are available (1-100, applies to every deck) |
+
+These settings appear on the plugin's page and in the **Plugin Settings** section at the bottom of the Stream Deck view, so everything is reachable without leaving the view. The base brightness is also editable inside the view's **Brightness** section.
 
 A deck that's been customized separately (see Multiple Decks below) can override Brightness and the two colors just for itself — the **This deck's settings** row appears above the grid; blank values inherit the main settings.
 
@@ -41,7 +43,7 @@ Configuration changes apply live: saving updates the running decks in place, so 
 
 Use the **Surface Configurator** in the Programmer IDE:
 
-1. Open the **Stream Deck** view in the Plugins sidebar section
+1. Open the **Stream Deck** view in the Plugins sidebar section. The strip at the top names the deck being edited (model, serial, friendly name); with no deck connected, the view offers to wait for USB hardware or add a virtual deck.
 2. Click a button on the visual grid
 3. In the assignment panel, set:
    - **Label** -- text displayed on the button
@@ -107,22 +109,23 @@ Example: switch to the full controls page when the projector turns on, and back 
 
 ### Multiple Decks
 
-Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. With more than one deck attached, a deck picker appears above the grid in the Surface Configurator. Every deck mirrors the main configuration by default (handy for identical panels on both sides of a space). To give a deck its own assignments, select it and click **Customize separately**; **Identify** flashes the selected deck's keys so you can tell the hardware apart. **Mirror main config** drops a deck's custom assignments again. Give each deck a friendly name ("Lectern", "Tech Booth") in the picker's name field -- it replaces the model name in the picker and is published to `plugin.streamdeck.<serial>.name`.
+Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. The deck strip above the grid shows every connected deck; click one to edit it. Every deck mirrors the main configuration by default (handy for identical panels on both sides of a space). To give a deck its own assignments, select it and click **Customize separately**; **Identify** flashes the selected deck's keys so you can tell the hardware apart. **Mirror main config** drops a deck's custom assignments again. Give each deck a friendly name ("Lectern", "Tech Booth") in the strip's name field -- it replaces the model name and is published to `plugin.streamdeck.<serial>.name`.
 
 Pages can be named too: double-click the page label between the arrows ("Page 1") and type a name like "Sources" or "Audio". Page names show up in the tabs, the Navigate action's target list, and the automatic paging rules.
 
 ### Virtual Decks and the Live View
 
-No hardware yet, or building a project away from the room? Click **+ Add virtual deck** above the grid, pick a model, and a software deck connects a moment later. It behaves exactly like a plugged-in deck: it has pages, dials, a touchscreen, per-deck state, and its own entry in the deck picker (marked *virtual*).
+No hardware yet, or building a project away from the room? With nothing connected, the Stream Deck view offers **Add virtual Stream Deck** directly; with decks already present, use **+ Virtual Stream Deck** at the end of the deck strip. Pick a model and a software deck connects a moment later. It behaves exactly like a plugged-in deck: it has pages, dials, a touchscreen, per-deck state, and its own card in the deck strip (marked *virtual*).
 
-**Show live view** displays what's actually rendered on the selected deck right now — real or virtual — including feedback colors, wrapped labels, and the touchscreen strip. Clicking a key presses it, the dial arrows turn the encoders, and clicking the strip taps it, so a whole layout can be exercised end to end without touching the hardware. Remove a virtual deck with the &times; on its chip; its assignments stay in the project in case you add it back.
+The **Live Preview** section shows what's actually rendered on the selected deck right now — real or virtual — including feedback colors, wrapped labels, and the touchscreen strip. It opens automatically for virtual decks. Clicking a key presses it, the dial arrows turn the encoders, and clicking the strip taps it, so a whole layout can be exercised end to end without touching the hardware. **Remove** in the deck strip retires a virtual deck; its assignments stay in the project in case you add it back.
 
 Because layouts live in the shared configuration, a real deck picks up everything you built on a virtual one the moment it's plugged in — no transfer needed. The only exception is a layout made with **Customize separately**, which is tied to one deck's serial: use **Transfer layout to...** in the deck picker to hand it (and the deck's name) to another deck. If a customized deck disappears for good — replaced hardware, or a retired virtual deck — its saved layout shows up above the grid with **Use on this deck** and **Delete** options, so swapping a dead deck never means rebuilding its layout.
 
 ### Automatic Brightness
 
-The **Brightness** section below the grid controls the deck's backlight automatically:
+The **Brightness** section below the grid controls the deck's backlight:
 
+- **Base brightness** -- the everyday level (the same value as the Button Brightness plugin setting).
 - **Dim when idle** -- lower the brightness after a period with no key, dial, or touch input. Any press, turn, or tap wakes the deck and restores the normal level.
 - **Brightness rules** -- set a brightness level when a state condition holds (same condition editor as visibility and paging). Rules are checked in order, the first match wins, and with no match the base brightness from the plugin settings applies. Example: drop to 20% whenever the projector is running so the deck doesn't glow in a dark room.
 
@@ -145,7 +148,7 @@ The **Brightness** section below the grid controls the deck's backlight automati
 | `plugin.streamdeck.deck_serials` | string | Comma-separated serials of connected decks |
 | `plugin.streamdeck.<serial>.*` | mixed | Per-deck keys (connected, model, geometry, current_page, virtual, render_version) for every connected deck |
 
-The hardware layout is detected when a deck connects, so the Surface Configurator always shows the deck that's actually plugged in. While no deck is connected it shows the default layout. With several decks attached, the un-prefixed keys above track the first-connected deck; use the per-serial keys to automate against a specific deck.
+The hardware layout is detected when a deck connects, so the Surface Configurator always shows the deck that's actually plugged in. While no deck (real or virtual) is connected, the view explains how to connect one instead of showing an editor. With several decks attached, the un-prefixed keys above track the first-connected deck; use the per-serial keys to automate against a specific deck.
 
 ## Events
 

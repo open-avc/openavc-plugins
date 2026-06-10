@@ -206,6 +206,13 @@ CONFIG_SCHEMA = {
         "default": True,
     },
 
+    # Color picker (stores a hex string like "#1a1a2e")
+    "accent_color": {
+        "type": "color",
+        "label": "Accent Color",
+        "default": "#8ab493",
+    },
+
     # Dropdown
     "qos": {
         "type": "select",
@@ -921,14 +928,20 @@ SURFACE_LAYOUT = {
     "key_spacing_px": 4,         # Gap between buttons
     "supports_pages": True,      # Multi-page button assignment
     "max_pages": 10,             # Maximum number of pages
+    # Device-backed surfaces only (all three optional):
+    "requires_device": True,                  # editor renders only for real units
+    "device_label": "Stream Deck",            # noun used in the editor chrome
+    "virtual_models": ["Stream Deck Neo"],    # enables the add-virtual-unit flow
 }
 ```
 
-The actual layout may be detected from hardware at runtime. The static definition provides the default shown while no hardware is connected.
+The actual layout may be detected from hardware at runtime. The static definition provides the default geometry while no hardware is connected.
+
+**Device-backed surfaces (`requires_device`):** when set, the IDE never renders the static grid as if hardware were attached. With zero units connected it shows a connect prompt instead ("No <device_label> detected... connect by USB"), plus an add-virtual-unit option when `virtual_models` is declared (the model strings must match what the plugin's own virtual-unit config accepts). Plugins that omit `requires_device` keep the static-grid behavior. The IDE also renders the plugin's `CONFIG_SCHEMA` settings form at the bottom of the plugin's surface view, so users never have to leave the view to change plugin settings.
 
 **Live geometry override:** when the plugin publishes `plugin.<id>.connected = true` together with `plugin.<id>.rows` and `plugin.<id>.columns` state keys, the Surface Configurator renders that detected grid instead of the static `SURFACE_LAYOUT`. Publish these (plus capability keys like `dial_count`, `touch_key_count`, `has_touchscreen`, `has_info_screen` if the hardware has those controls) when your plugin connects, so the editor always draws the device that's actually plugged in.
 
-**Multiple physical units:** a surface plugin that supports more than one attached device publishes `plugin.<id>.deck_serials` (comma-separated serials, connect order) and per-unit keys at `plugin.<id>.<serial>.*` (`connected`, `model`, and the geometry keys above, plus `current_page`). When `deck_serials` lists more than one serial, the Surface Configurator shows a unit picker and reads the selected unit's per-serial geometry; per-unit config overrides live in a top-level `decks` map keyed by serial (a unit without an entry mirrors the flat config). See the Stream Deck plugin for the reference implementation.
+**Multiple physical units:** a surface plugin that supports more than one attached device publishes `plugin.<id>.deck_serials` (comma-separated serials, connect order) and per-unit keys at `plugin.<id>.<serial>.*` (`connected`, `model`, and the geometry keys above, plus `current_page`). The Surface Configurator shows a unit strip whenever at least one serial is present -- it names the unit being edited (model, serial, friendly name, virtual marker) even for a single unit, and becomes a picker with several -- reading the selected unit's per-serial geometry; per-unit config overrides live in a top-level `decks` map keyed by serial (a unit without an entry mirrors the flat config). See the Stream Deck plugin for the reference implementation.
 
 **Live mirror + simulated input (virtual units):** a surface plugin can let the IDE display and drive the surface with no hardware attached. The convention (no new platform API — it composes `http_endpoints` routes, state keys, and context actions):
 

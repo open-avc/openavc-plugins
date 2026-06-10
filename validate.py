@@ -36,7 +36,7 @@ MIT_COMPATIBLE_LICENSES = {
 }
 
 VALID_CONFIG_TYPES = {
-    "string", "integer", "float", "boolean", "select",
+    "string", "text", "integer", "float", "boolean", "select", "color",
     "state_key", "macro_ref", "device_ref", "command_ref", "group", "mapping_list",
 }
 
