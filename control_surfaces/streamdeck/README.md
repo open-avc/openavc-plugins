@@ -103,7 +103,9 @@ Example: switch to the full controls page when the projector turns on, and back 
 
 ### Multiple Decks
 
-Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. With more than one deck attached, a deck picker appears above the grid in the Surface Configurator. Every deck mirrors the main configuration by default (handy for identical panels on both sides of a space). To give a deck its own assignments, select it and click **Customize separately**; **Identify** flashes the selected deck's keys so you can tell the hardware apart. **Mirror main config** drops a deck's custom assignments again.
+Connect as many decks as you like -- each runs independently with its own pages, dials, and displays. With more than one deck attached, a deck picker appears above the grid in the Surface Configurator. Every deck mirrors the main configuration by default (handy for identical panels on both sides of a space). To give a deck its own assignments, select it and click **Customize separately**; **Identify** flashes the selected deck's keys so you can tell the hardware apart. **Mirror main config** drops a deck's custom assignments again. Give each deck a friendly name ("Lectern", "Tech Booth") in the picker's name field -- it replaces the model name in the picker and is published to `plugin.streamdeck.<serial>.name`.
+
+Pages can be named too: double-click the page label between the arrows ("Page 1") and type a name like "Sources" or "Audio". Page names show up in the tabs, the Navigate action's target list, and the automatic paging rules.
 
 ### Virtual Decks and the Live View
 

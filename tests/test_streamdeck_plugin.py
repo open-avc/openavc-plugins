@@ -1905,6 +1905,22 @@ async def test_flash_key_writes_white_then_restores(monkeypatch):
     assert len(session.deck.key_images) >= writes_before
 
 
+# ──── Deck names ────
+
+
+@pytest.mark.asyncio
+async def test_deck_name_published_from_config(monkeypatch):
+    config = {"deck_names": {"AAA": "Lectern"}}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    monkeypatch.setattr(
+        sd_module, "StreamDeck",
+        _FakeStreamDeck([_FakeDeck(serial="AAA"), _FakeDeck(serial="BBB")]),
+    )
+    await plugin._watchdog()
+    assert state.get("plugin.streamdeck.AAA.name") == "Lectern"
+    assert state.get("plugin.streamdeck.BBB.name") == ""
+
+
 # ──── Input echo (last_input convention) ────
 
 

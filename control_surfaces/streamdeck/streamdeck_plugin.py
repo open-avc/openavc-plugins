@@ -396,7 +396,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.18.0",
+        "version": "1.19.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -533,7 +533,7 @@ class StreamDeckPlugin:
         "the main config; to give a specific deck its own assignments, add a "
         "top-level 'decks' map keyed by serial — the entry fully replaces the "
         "per-deck sections (buttons, auto_page, dials, touchscreen, "
-        "info_strip, auto_brightness, idle_dim) for that deck: "
+        "info_strip, auto_brightness, idle_dim, page_names) for that deck: "
         "{\"decks\": {\"ABC123\": {\"buttons\": [...]}}}. "
         "Macros can drive the deck with an event.emit step targeting "
         "plugin.streamdeck.action.<name> — actions: set_page {page}, "
@@ -578,7 +578,10 @@ class StreamDeckPlugin:
         "{condition}} using the same operator schema. Rules are evaluated in "
         "order and the first match wins, so put more specific conditions first. "
         "The page count comes from the top-level 'max_pages' setting (default "
-        "10, global across decks). "
+        "10, global across decks). Pages can be labeled with a per-deck "
+        "'page_names' section ({\"0\": \"Sources\"}), and decks with a "
+        "top-level 'deck_names' map ({\"<serial>\": \"Lectern\"}) — names are "
+        "display-only. "
         "When dial_count > 0, a top-level 'dials' array configures the rotary "
         "encoders (not paged — dials keep their assignment on every page): "
         "{\"index\": 0, \"label\": \"Volume\", \"adjust\": {\"key\": "
@@ -824,10 +827,15 @@ class StreamDeckPlugin:
                 await self.api.state_set(key, value)
             await self.api.state_set("current_page", primary.current_page)
 
+        deck_names = self.api.config.get("deck_names")
+        deck_names = deck_names if isinstance(deck_names, dict) else {}
         for session in sessions:
             prefix = session.serial
             await self.api.state_set(f"{prefix}.connected", True)
             await self.api.state_set(f"{prefix}.model", session.model)
+            await self.api.state_set(
+                f"{prefix}.name", str(deck_names.get(session.serial, ""))
+            )
             for key, value in session.geometry.items():
                 await self.api.state_set(f"{prefix}.{key}", value)
             await self.api.state_set(f"{prefix}.current_page", session.current_page)
