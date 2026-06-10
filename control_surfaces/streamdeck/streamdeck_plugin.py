@@ -396,7 +396,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.22.0",
+        "version": "1.23.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -914,6 +914,10 @@ class StreamDeckPlugin:
             has_info_screen = deck.screen_image_format()["size"][0] > 0
         except Exception:
             has_info_screen = False
+        try:
+            is_visual = bool(deck.is_visual())
+        except Exception:
+            is_visual = True
         session.geometry = {
             "key_count": deck.key_count(),
             "rows": rows,
@@ -922,6 +926,9 @@ class StreamDeckPlugin:
             "touch_key_count": deck.touch_key_count(),
             "has_touchscreen": deck.is_touch(),
             "has_info_screen": has_info_screen,
+            # False for display-less decks (foot pedals): keys fire actions
+            # but nothing renders, so the editor skips display-only flows.
+            "visual": is_visual,
             "virtual": session.is_virtual,
         }
 
