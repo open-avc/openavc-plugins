@@ -117,6 +117,8 @@ No hardware yet, or building a project away from the room? Click **+ Add virtual
 
 **Show live view** displays what's actually rendered on the selected deck right now — real or virtual — including feedback colors, wrapped labels, and the touchscreen strip. Clicking a key presses it, the dial arrows turn the encoders, and clicking the strip taps it, so a whole layout can be exercised end to end without touching the hardware. Remove a virtual deck with the &times; on its chip; its assignments stay in the project in case you add it back.
 
+Because layouts live in the shared configuration, a real deck picks up everything you built on a virtual one the moment it's plugged in — no transfer needed. The only exception is a layout made with **Customize separately**, which is tied to one deck's serial: use **Transfer layout to...** in the deck picker to hand it (and the deck's name) to another deck. If a customized deck disappears for good — replaced hardware, or a retired virtual deck — its saved layout shows up above the grid with **Use on this deck** and **Delete** options, so swapping a dead deck never means rebuilding its layout.
+
 ### Automatic Brightness
 
 The **Brightness** section below the grid controls the deck's backlight automatically:
