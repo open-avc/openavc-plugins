@@ -1689,6 +1689,69 @@ async def test_simulate_input_dials_and_touch_on_virtual_plus(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_simulate_touch_long_and_drag(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {
+        "virtual_decks": [{"model": "Stream Deck +", "serial": "VPLUS"}],
+        "touchscreen": {"zones": [{
+            "label": "A",
+            "touch": [{"action": "macro", "macro": "tap_a"}],
+            "long_touch": [{"action": "macro", "macro": "long_a"}],
+            "drag_adjust": {"key": "var.level", "step": 1, "min": 0, "max": 100},
+        }]},
+    }
+    plugin, state, macros, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    state.set("var.level", 50, source="test")
+    await plugin._watchdog()
+
+    await plugin._simulate_input(
+        {"serial": "VPLUS", "type": "touch", "x": 100, "touch_type": "long"}
+    )
+    assert macros.executed == ["long_a"]
+
+    # 80px of drag travel = 10 detents at 8px each, step 1.
+    await plugin._simulate_input(
+        {"serial": "VPLUS", "type": "touch", "x": 100, "x_out": 180,
+         "touch_type": "drag"}
+    )
+    assert state.get("var.level") == 60
+
+    # A drag without x_out is malformed and ignored.
+    await plugin._simulate_input(
+        {"serial": "VPLUS", "type": "touch", "x": 100, "touch_type": "drag"}
+    )
+    assert state.get("var.level") == 60
+    assert macros.executed == ["long_a"]
+
+
+@pytest.mark.asyncio
+async def test_simulate_dial_push_full_tap_and_edges(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {
+        "virtual_decks": [{"model": "Stream Deck +", "serial": "VPLUS"}],
+        "dials": [{"index": 1, "press": [{"action": "macro", "macro": "pushed"}]}],
+    }
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    await plugin._watchdog()
+
+    # No "pressed" -> a full tap (push + release) that fires press once.
+    await plugin._simulate_input({"serial": "VPLUS", "type": "dial_push", "index": 1})
+    assert macros.executed == ["pushed"]
+
+    # Explicit edges: press fires, release alone does not.
+    await plugin._simulate_input(
+        {"serial": "VPLUS", "type": "dial_push", "index": 1, "pressed": True}
+    )
+    assert macros.executed == ["pushed", "pushed"]
+    await plugin._simulate_input(
+        {"serial": "VPLUS", "type": "dial_push", "index": 1, "pressed": False}
+    )
+    assert macros.executed == ["pushed", "pushed"]
+
+
+@pytest.mark.asyncio
 async def test_ext_router_serves_mirror_blobs():
     plugin, _state = _make_plugin({})
     plugin._mirror_blobs[("VIRT-1", "key_0")] = (b"png-bytes", "image/png")

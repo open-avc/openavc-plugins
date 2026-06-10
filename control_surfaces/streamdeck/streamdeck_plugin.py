@@ -396,7 +396,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.23.0",
+        "version": "1.24.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1205,8 +1205,13 @@ class StreamDeckPlugin:
     async def _simulate_input(self, payload):
         """Dispatch a simulated key/dial/touch input into a session.
 
-        Used by the IDE Live View (clicking a virtual or physical deck's
+        Used by the IDE workbench (clicking a virtual or physical deck's
         image). Runs the exact same handler paths as hardware input.
+        Payload: ``{serial, type: key|dial_turn|dial_push|touch, index?,
+        pressed?, amount?, x?, y?, touch_type?: short|long|drag, x_out?}``.
+        A ``key`` or ``dial_push`` without ``pressed`` is a full tap
+        (press + release); ``touch`` defaults to a short tap and a drag
+        needs ``x_out``.
         """
         serial = str(payload.get("serial", ""))
         session = next(
@@ -1251,18 +1256,46 @@ class StreamDeckPlugin:
                 index = int(payload.get("index"))
             except (TypeError, ValueError):
                 return
-            await self._on_dial_event(
-                session, session.deck, index, SimpleNamespace(name="PUSH"), True
-            )
+            pressed = payload.get("pressed")
+            if pressed is None:
+                # Full tap: push then release, like a quick physical press.
+                await self._on_dial_event(
+                    session, session.deck, index, SimpleNamespace(name="PUSH"), True
+                )
+                await self._on_dial_event(
+                    session, session.deck, index, SimpleNamespace(name="PUSH"), False
+                )
+            else:
+                await self._on_dial_event(
+                    session, session.deck, index,
+                    SimpleNamespace(name="PUSH"), bool(pressed),
+                )
 
         elif kind == "touch":
             try:
                 x = int(payload.get("x"))
             except (TypeError, ValueError):
                 return
-            await self._on_touchscreen_event(
-                session, session.deck, SimpleNamespace(name="SHORT"), {"x": x, "y": 50}
-            )
+            try:
+                y = int(payload.get("y", 50))
+            except (TypeError, ValueError):
+                y = 50
+            touch_type = str(payload.get("touch_type", "short")).lower()
+            if touch_type == "drag":
+                try:
+                    x_out = int(payload.get("x_out"))
+                except (TypeError, ValueError):
+                    return
+                await self._on_touchscreen_event(
+                    session, session.deck, SimpleNamespace(name="DRAG"),
+                    {"x": x, "y": y, "x_out": x_out, "y_out": y},
+                )
+            else:
+                name = "LONG" if touch_type == "long" else "SHORT"
+                await self._on_touchscreen_event(
+                    session, session.deck, SimpleNamespace(name=name),
+                    {"x": x, "y": y},
+                )
 
     async def _set_live_mirror(self, payload):
         """Toggle mirroring of physical decks (virtual decks always mirror)."""
