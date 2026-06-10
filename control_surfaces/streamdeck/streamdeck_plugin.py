@@ -14,6 +14,7 @@ import json
 import os
 import platform as platform_mod
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -391,6 +392,7 @@ class _DeckSession:
         self.strip_render_task = None   # debounced strip-redraw task
         self.strip_dirty = None         # zone indexes pending redraw, or "all"
         self.flash_zones = {}           # zone index -> clear timer (touch flash)
+        self.clock_minute = -1          # last minute an idle clock rendered
         self.macro_keys = {}            # macro_id -> {(page, key_index), ...}
         self.macro_marks = {}           # (page, key_index) -> running|done|error
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
@@ -402,7 +404,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.27.0",
+        "version": "1.28.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1030,6 +1032,7 @@ class StreamDeckPlugin:
                 healthy = False
             if healthy:
                 await self._check_idle_dim(session)
+                await self._tick_clock(session)
             else:
                 await self._handle_deck_lost(session)
 
@@ -2275,12 +2278,103 @@ class StreamDeckPlugin:
         if zx > 0:
             draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)
 
+    # ──── Idle clock (unconfigured displays are never dead black) ────
+
+    @staticmethod
+    def _clock_text():
+        """Current time + date strings (12-hour where the locale has an
+        AM/PM notion, 24-hour elsewhere)."""
+        now = time.localtime()
+        ampm = time.strftime("%p", now)
+        if ampm:
+            hour = now.tm_hour % 12 or 12
+            time_str = f"{hour}:{now.tm_min:02d} {ampm}"
+        else:
+            time_str = time.strftime("%H:%M", now)
+        return time_str, time.strftime("%a %b %d", now)
+
+    def _draw_clock(self, img, width, height, fg):
+        """Draw the idle clock — proof the glass works, useful in a rack."""
+        time_str, date_str = self._clock_text()
+        split = max(10, int(height * 0.62))
+        self._paste_label(
+            img, time_str, fg,
+            (0, 2, width, split),
+            max_font=max(16, int(height * 0.5)), max_lines=1,
+        )
+        self._paste_label(
+            img, date_str, "#8a8a9a",
+            (0, split + 2, width, max(8, height - split - 4)),
+            max_font=max(10, int(height * 0.2)), max_lines=1,
+        )
+
+    def _strip_idle_mode(self, session):
+        """``"clock"``/``"blank"`` when nothing is configured for the touch
+        strip (no custom zones, no dial worth a readout), else None."""
+        cfg = self._deck_config(session)
+        ts = cfg.get("touchscreen", {})
+        ts = ts if isinstance(ts, dict) else {}
+        zones = ts.get("zones")
+        if isinstance(zones, list) and any(isinstance(z, dict) for z in zones):
+            return None
+        dials = cfg.get("dials", [])
+        if isinstance(dials, list):
+            for dial in dials:
+                if isinstance(dial, dict) and any(
+                    dial.get(field) for field in (
+                        "label", "icon", "adjust", "press", "long_press",
+                        "cw", "ccw", "touch", "long_touch",
+                        "pressed_adjust", "pressed_cw", "pressed_ccw",
+                    )
+                ):
+                    return None
+        return "blank" if ts.get("idle") == "blank" else "clock"
+
+    def _info_idle_mode(self, session):
+        """``"clock"``/``"blank"`` when the info screen has nothing
+        configured (or explicitly asks for the clock), else None."""
+        cfg = self._deck_config(session).get("info_strip")
+        if not isinstance(cfg, dict):
+            return "clock"
+        source = cfg.get("source")
+        if source == "clock":
+            return "clock"
+        if source == "blank":
+            return "blank"
+        items = cfg.get("items")
+        if isinstance(items, list) and any(isinstance(i, dict) for i in items):
+            return None
+        if any(
+            cfg.get(field) for field in (
+                "key", "text", "label", "label_source", "value_source",
+                "icon", "meter",
+            )
+        ):
+            return None
+        return "clock"
+
+    async def _tick_clock(self, session):
+        """Re-render idle clocks when the wall-clock minute changes
+        (rides the watchdog tick)."""
+        minute = time.localtime().tm_min
+        if minute == session.clock_minute:
+            return
+        session.clock_minute = minute
+        if not session.deck or not session.deck.is_visual():
+            return
+        if session.deck.is_touch() and self._strip_idle_mode(session) == "clock":
+            await self._render_touchscreen(session)
+        if self._info_idle_mode(session) == "clock":
+            await self._render_info_strip(session)
+
     async def _render_touchscreen(self, session):
         """Render the touchscreen strip: one display element per zone.
 
         Zones carry the full display schema (live label, icon, value + unit,
-        meter bar, conditional feedback styling). The rendered image is
-        cached on the session so a single-zone change can redraw partially.
+        meter bar, conditional feedback styling). With nothing configured
+        the strip shows the idle clock (or stays blank when asked). The
+        rendered image is cached on the session so a single-zone change can
+        redraw partially.
         """
         deck = session.deck
         if not deck or not deck.is_visual() or not deck.is_touch():
@@ -2291,12 +2385,22 @@ class StreamDeckPlugin:
             width, height = deck.touchscreen_image_format()["size"]
         except Exception:
             return
-        zones = self._touch_zones(session)
 
         bg = self._deck_setting(session, "button_color", "#1a1a2e")
         img = Image.new("RGB", (width, height), bg)
-        for zone in zones:
-            await self._draw_strip_zone(session, img, zone, height)
+
+        idle = self._strip_idle_mode(session)
+        if idle:
+            if idle == "clock":
+                fg = self._deck_setting(session, "text_color", "#e0e0e0")
+                self._draw_clock(img, width, height, fg)
+            if session.flash_zones:
+                # Touch acknowledgment while idle: lighten the whole strip.
+                overlay = Image.new("RGB", img.size, (255, 255, 255))
+                img = Image.blend(img, overlay, 0.18)
+        else:
+            for zone in self._touch_zones(session):
+                await self._draw_strip_zone(session, img, zone, height)
 
         session.strip_image = img
         self._mirror(session, "touchscreen", img)
@@ -2345,6 +2449,11 @@ class StreamDeckPlugin:
             return
         if session.overlay_active or session.strip_image is None:
             return
+        if self._strip_idle_mode(session):
+            # Idle clock/blank has no zone regions — repaint the whole strip
+            # (this is also how the idle touch flash draws and clears).
+            await self._render_touchscreen(session)
+            return
         try:
             fmt = deck.touchscreen_image_format()
             width, height = fmt["size"]
@@ -2389,12 +2498,28 @@ class StreamDeckPlugin:
         """
         if not isinstance(cfg, dict):
             return []
-        element = dict(cfg)
-        if element.get("source") == "text":
-            element["value_static"] = str(element.get("text", ""))
-            element.pop("value_source", None)
-        elif not element.get("value_source"):
-            element["value_source"] = element.get("key", "")
+
+        def _normalize(element):
+            if element.get("source") == "text":
+                element["value_static"] = str(element.get("text", ""))
+                element.pop("value_source", None)
+            elif not element.get("value_source"):
+                element["value_source"] = element.get("key", "")
+            return element
+
+        items = cfg.get("items")
+        if isinstance(items, list):
+            items = [_normalize(dict(i)) for i in items if isinstance(i, dict)]
+            # The screen physically fits two items side by side.
+            items = items[:2]
+            if items:
+                slot = width // len(items)
+                for idx, item in enumerate(items):
+                    item["x"] = idx * slot
+                    item["w"] = slot
+                return items
+
+        element = _normalize(dict(cfg))
         element["x"] = 0
         element["w"] = width
         return [element]
@@ -2422,9 +2547,15 @@ class StreamDeckPlugin:
         bg = self._deck_setting(session, "button_color", "#1a1a2e")
         img = Image.new("RGB", (width, height), bg)
 
-        cfg = self._deck_config(session).get("info_strip")
-        for element in self._info_strip_items(cfg, width):
-            await self._draw_strip_zone(session, img, element, height)
+        idle = self._info_idle_mode(session)
+        if idle == "clock":
+            fg = self._deck_setting(session, "text_color", "#e0e0e0")
+            self._draw_clock(img, width, height, fg)
+        elif idle is None:
+            cfg = self._deck_config(session).get("info_strip")
+            for element in self._info_strip_items(cfg, width):
+                await self._draw_strip_zone(session, img, element, height)
+        # idle == "blank": leave the plain background
 
         self._mirror(session, "screen", img)
         try:

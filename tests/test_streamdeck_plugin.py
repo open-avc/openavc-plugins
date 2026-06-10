@@ -1433,6 +1433,117 @@ async def test_scheduled_strip_render_coalesces_and_targets_zones(monkeypatch):
     assert writes == [((800, 100), 0, 0, 800, 100)]
 
 
+def test_clock_text_has_time_and_date():
+    time_str, date_str = StreamDeckPlugin._clock_text()
+    assert ":" in time_str
+    assert date_str  # e.g. "Wed Jun 10"
+
+
+@pytest.mark.asyncio
+async def test_strip_idle_modes():
+    # Nothing configured -> clock.
+    plugin, _state = _make_plugin({})
+    session = _session_for(plugin, _FakePlusDeck())
+    assert plugin._strip_idle_mode(session) == "clock"
+    # Explicit blank opt-out.
+    plugin2, _s2 = _make_plugin({"touchscreen": {"idle": "blank"}})
+    session2 = _session_for(plugin2, _FakePlusDeck())
+    assert plugin2._strip_idle_mode(session2) == "blank"
+    # Any configured dial wakes the zones up.
+    plugin3, _s3 = _make_plugin(
+        {"dials": [{"index": 0, "adjust": {"key": "var.v"}}]}
+    )
+    session3 = _session_for(plugin3, _FakePlusDeck())
+    assert plugin3._strip_idle_mode(session3) is None
+    # Custom zones too.
+    plugin4, _s4 = _make_plugin({"touchscreen": {"zones": [{"label": "A"}]}})
+    session4 = _session_for(plugin4, _FakePlusDeck())
+    assert plugin4._strip_idle_mode(session4) is None
+
+
+@pytest.mark.asyncio
+async def test_strip_idle_clock_renders_full_strip(monkeypatch):
+    plugin, _state, session, writes = _strip_render_rig(monkeypatch, {})
+    await plugin._render_touchscreen(session)
+    assert writes[-1] == ((800, 100), 0, 0, 800, 100)
+    # Partial zone renders redirect to the full idle repaint.
+    writes.clear()
+    await plugin._render_strip_zone(session, 0)
+    assert writes[-1] == ((800, 100), 0, 0, 800, 100)
+
+
+@pytest.mark.asyncio
+async def test_info_idle_modes():
+    plugin, _state = _make_plugin({})
+    session = _session_for(plugin)
+    assert plugin._info_idle_mode(session) == "clock"
+    plugin2, _s2 = _make_plugin({"info_strip": {"source": "blank"}})
+    session2 = _session_for(plugin2)
+    assert plugin2._info_idle_mode(session2) == "blank"
+    plugin3, _s3 = _make_plugin(
+        {"info_strip": {"source": "state", "key": "var.temp"}}
+    )
+    session3 = _session_for(plugin3)
+    assert plugin3._info_idle_mode(session3) is None
+    plugin4, _s4 = _make_plugin(
+        {"info_strip": {"items": [{"value_source": "var.a"}]}}
+    )
+    session4 = _session_for(plugin4)
+    assert plugin4._info_idle_mode(session4) is None
+    plugin5, _s5 = _make_plugin({"info_strip": {"source": "clock"}})
+    session5 = _session_for(plugin5)
+    assert plugin5._info_idle_mode(session5) == "clock"
+
+
+def test_info_strip_items_split_and_legacy():
+    # Two items split the screen; sources normalize like zones.
+    items = StreamDeckPlugin._info_strip_items(
+        {"items": [
+            {"label": "Temp", "key": "var.temp"},
+            {"source": "text", "text": "Room A"},
+        ]},
+        248,
+    )
+    assert [(i["x"], i["w"]) for i in items] == [(0, 124), (124, 124)]
+    assert items[0]["value_source"] == "var.temp"
+    assert items[1]["value_static"] == "Room A"
+    # More than two items: the screen fits two.
+    many = StreamDeckPlugin._info_strip_items(
+        {"items": [{"label": str(n)} for n in range(4)]}, 248
+    )
+    assert len(many) == 2
+    # Legacy single shape -> one full-width element.
+    legacy = StreamDeckPlugin._info_strip_items(
+        {"source": "state", "key": "var.x", "label": "X"}, 248
+    )
+    assert legacy[0]["x"] == 0 and legacy[0]["w"] == 248
+    assert legacy[0]["value_source"] == "var.x"
+
+
+@pytest.mark.asyncio
+async def test_clock_tick_rerenders_on_minute_change(monkeypatch):
+    plugin, _state, session, writes = _strip_render_rig(monkeypatch, {})
+    session.clock_minute = -1
+    await plugin._tick_clock(session)
+    assert writes  # idle clock painted
+    count = len(writes)
+    # Same minute again: no extra render.
+    await plugin._tick_clock(session)
+    assert len(writes) == count
+
+
+@pytest.mark.asyncio
+async def test_info_items_subscriptions_collected():
+    config = {"info_strip": {"items": [
+        {"value_source": "var.temp"},
+        {"label_source": "var.room", "feedback": {"key": "var.alert"}},
+    ]}}
+    plugin, _state = _make_plugin(config)
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    assert session.info_strip_keys == {"var.temp", "var.room", "var.alert"}
+
+
 # ──── Neo: touch keys (color-only) + info strip ────
 
 
