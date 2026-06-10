@@ -84,24 +84,32 @@ Example: hide the source-select and volume buttons unless the projector is on (`
 
 ### Dials (Stream Deck +)
 
-When a deck with dials is connected, they appear in the deck picture. Click a dial to configure it (the inspector also has turn/press test buttons):
+When a deck with dials is connected, they appear in the deck picture. Click a dial to configure it (the inspector also has turn, press, and long-press test buttons). The dial and the strip readout above it work as one instrument:
 
-- **Label** -- shown on the touchscreen under the dial
+- **Readout** -- the label, icon, and unit shown on the touchscreen under the dial, with a live **level bar** that appears automatically once the adjust below has a min and max.
 - **Turning Adjusts a Value** -- pick a variable; each detent adds or subtracts the step, clamped to min/max. Spin fast and the value moves proportionally faster. Have a macro or trigger watch the variable to drive a device (volume, mic gain, camera pan speed).
-- **Clockwise / Counter-Clockwise Turn Actions** -- actions that run on each turn event in that direction
-- **Press Actions** -- actions that run when the dial is pushed
+- **Push + Turn Adjusts (Fine)** -- a second, smaller step used while the dial is held: push-and-turn for fine trim. A push that turned never fires the press actions.
+- **Clockwise / Counter-Clockwise Turn Actions** -- run once per detent turned, so a "volume up" command tracks a fast spin.
+- **Press / Long-Press Actions** -- push the dial, or hold it past the threshold for a second action (mute on push, reset on hold).
+- **Touch** -- tapping the dial's readout presses the dial out of the box; override the tap and long-tap separately, or turn on **Touch fader** so touching the readout jumps the value straight to that position.
 
 Dials keep their assignment on every button page.
 
 ### Touchscreen (Stream Deck +)
 
-By default the touch strip shows one zone per dial with the dial's label and the live value of its adjusted variable -- no setup needed. To take over the strip, click it in the deck picture and add custom zones in the inspector. Each zone can show a label (static or from a state key), a live state value, custom colors, and run actions when tapped. A zone can also run separate **long-press actions**, and **swiping** across a zone can step a variable up and down like turning a dial (the default per-dial zones do this automatically with the dial's own variable). Zones split the strip evenly, or set explicit pixel positions.
+With nothing configured the strip shows a clock, and every tap flashes the touched zone -- the glass always responds. Configure a dial and its zone becomes a live readout (label, icon, value, level bar) whose tap presses the dial.
+
+To take over the whole strip, open the zone editor from the deck inspector's **Touch Strip** row (or *Customize the whole strip* in any dial inspector) and start from the current zones -- your dial readouts are carried over as editable zones, not wiped. Each zone can show a label (static or live from state), an icon, a live value with a unit, a **meter** with warning colors at thresholds, and state-driven colors (a zone that turns red while an amp clips). Zones run actions on tap and long-press, and **swiping** steps a variable like turning a dial -- or jumps straight to the touched position when the zone is a **touch fader**. Zones split the strip evenly, or set explicit pixel positions. Every zone has Tap / Long / Swipe test buttons in the editor.
 
 ### Touch Keys and Info Screen (Neo)
 
 The Neo's two side touch keys appear in the deck picture beside the info screen. They work like regular buttons (press actions, modes, feedback, visibility, per-page assignment, locking) but have no display -- each key glows with its background color, and feedback colors override it when active.
 
-The small info screen between the touch keys is configured by clicking it in the picture: show a live state value (with an optional heading) or static text. State-driven values refresh automatically.
+The small info screen between the touch keys is configured by clicking it in the picture: a clock (the default, so the screen is never dead black), a live state value, static text, or **two items side by side** (time and temperature; a label and a mic-level meter). Items take the same icon, unit, meter, and state-driven colors as touchscreen zones, and live values refresh automatically.
+
+### Live Values and Meters on Keys
+
+Any LCD key can carry live data: pick a **value from state** (with an optional unit) to render under the label, make the **label itself live**, and add a **meter** bar along the key's bottom edge with warning colors at thresholds. On a Stream Deck XL that turns a page into a room dashboard -- mic levels, temperatures, source names -- while every key still fires its actions.
 
 ### Page Automation
 
