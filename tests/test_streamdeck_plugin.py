@@ -809,7 +809,7 @@ TOUCH_DRAG = _Evt("DRAG")
 
 
 @pytest.mark.asyncio
-async def test_dial_turn_routes_cw_and_ccw():
+async def test_dial_turn_routes_cw_and_ccw_per_detent():
     config = {"dials": [{
         "index": 0,
         "cw": [{"action": "macro", "macro": "vol_up"}],
@@ -819,8 +819,87 @@ async def test_dial_turn_routes_cw_and_ccw():
     session = _session_for(plugin)
     await plugin._on_dial_event(session, None, 0, TURN, 1)
     assert macros.executed == ["vol_up"]
+    # A fast spin fires the action list once per detent moved.
     await plugin._on_dial_event(session, None, 0, TURN, -2)
-    assert macros.executed == ["vol_up", "vol_down"]
+    assert macros.executed == ["vol_up", "vol_down", "vol_down"]
+
+
+@pytest.mark.asyncio
+async def test_dial_per_detent_firing_is_capped():
+    config = {"dials": [{
+        "index": 0,
+        "cw": [{"action": "macro", "macro": "up"}],
+    }]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
+    await plugin._on_dial_event(session, None, 0, TURN, 20)
+    assert macros.executed == ["up"] * 8
+
+
+@pytest.mark.asyncio
+async def test_dial_long_press_vs_quick_press():
+    import asyncio as _asyncio
+    config = {"dials": [{
+        "index": 0,
+        "press": [{"action": "macro", "macro": "mute"}],
+        "long_press": [{"action": "macro", "macro": "reset"}],
+        "hold_threshold_ms": 50,
+    }]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
+    # Quick tap: push fires nothing (deferred), quick release fires press.
+    await plugin._on_dial_event(session, None, 0, PUSH, True)
+    assert macros.executed == []
+    await plugin._on_dial_event(session, None, 0, PUSH, False)
+    assert macros.executed == ["mute"]
+    # Held past the threshold: release fires long_press.
+    await plugin._on_dial_event(session, None, 0, PUSH, True)
+    await _asyncio.sleep(0.08)
+    await plugin._on_dial_event(session, None, 0, PUSH, False)
+    assert macros.executed == ["mute", "reset"]
+
+
+@pytest.mark.asyncio
+async def test_dial_push_and_turn_chords_fine_adjust():
+    config = {"dials": [{
+        "index": 0,
+        "adjust": {"key": "var.volume", "step": 5, "min": 0, "max": 100},
+        "pressed_adjust": {"key": "var.volume", "step": 1, "min": 0, "max": 100},
+        "press": [{"action": "macro", "macro": "mute"}],
+    }]}
+    plugin, state, macros, _d = _make_plugin_with_recorders(config)
+    state.set("var.volume", 50, source="test")
+    session = _session_for(plugin)
+    # Held + turn: the fine (pressed) adjust applies, not the coarse one.
+    await plugin._on_dial_event(session, None, 0, PUSH, True)
+    await plugin._on_dial_event(session, None, 0, TURN, 2)
+    assert state.get("var.volume") == 52
+    # Releasing after a turn is a grip, not a click: press never fires.
+    await plugin._on_dial_event(session, None, 0, PUSH, False)
+    assert macros.executed == []
+    # An ordinary turn still uses the coarse adjust.
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
+    assert state.get("var.volume") == 57
+
+
+@pytest.mark.asyncio
+async def test_dial_turn_while_held_suppresses_click_without_pressed_config():
+    config = {"dials": [{
+        "index": 0,
+        "adjust": {"key": "var.volume", "step": 2, "min": 0, "max": 100},
+        "press": [{"action": "macro", "macro": "mute"}],
+        "long_press": [{"action": "macro", "macro": "reset"}],
+    }]}
+    plugin, state, macros, _d = _make_plugin_with_recorders(config)
+    state.set("var.volume", 10, source="test")
+    session = _session_for(plugin)
+    await plugin._on_dial_event(session, None, 0, PUSH, True)
+    # No pressed_* config: the turn acts normally (coarse adjust)...
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
+    assert state.get("var.volume") == 12
+    # ...but the release still fires neither press nor long_press.
+    await plugin._on_dial_event(session, None, 0, PUSH, False)
+    assert macros.executed == []
 
 
 @pytest.mark.asyncio

@@ -372,6 +372,8 @@ class _DeckSession:
         self.pressed_keys = set()  # keys currently held (momentary highlight)
         self.hold_tasks = {}       # key_index -> periodic task ID (hold-repeat)
         self.press_times = {}      # key_index -> timestamp (tap/hold mode)
+        self.dial_press_times = {} # dial index -> push timestamp (deferred click)
+        self.dial_turned = set()   # dials that turned while held (chord, no click)
         self.feedback_subs = []    # state subscription IDs for this deck
         self.auto_page_keys = set()
         self.touch_strip_keys = set()
@@ -400,7 +402,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.26.0",
+        "version": "1.27.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1084,6 +1086,8 @@ class StreamDeckPlugin:
             self.api.cancel_task(task_id)
         session.hold_tasks.clear()
         session.press_times.clear()
+        session.dial_press_times.clear()
+        session.dial_turned.clear()
 
         for sub_id in session.feedback_subs:
             try:
@@ -1708,8 +1712,41 @@ class StreamDeckPlugin:
                 return dial
         return None
 
+    @classmethod
+    def _dial_push_deferred(cls, cfg):
+        """True when a dial's push must wait for the release.
+
+        Configuring ``long_press`` or any ``pressed_*`` (push-and-turn)
+        field defers the click to the release so the gesture can be told
+        apart; a plain ``press``-only dial keeps firing on push-down.
+        """
+        if not cfg:
+            return False
+        return bool(
+            cls._action_list(cfg.get("long_press"))
+            or isinstance(cfg.get("pressed_adjust"), dict)
+            or cls._action_list(cfg.get("pressed_cw"))
+            or cls._action_list(cfg.get("pressed_ccw"))
+        )
+
+    async def _execute_per_detent(self, session, actions, detents, source):
+        """Run a turn's action list once per detent moved (capped at 8 per
+        event) so a command-per-click mapping tracks fast spins."""
+        action_list = self._action_list(actions)
+        if not action_list:
+            return
+        for _ in range(min(abs(int(detents)), 8)):
+            await self._execute_actions(session, action_list, source)
+
     async def _on_dial_event(self, session, deck, dial, event, value):
         """Handle a dial turn or push.
+
+        Push semantics: a ``press``-only dial fires on push-down (snappy).
+        With ``long_press`` or push-and-turn (``pressed_adjust`` /
+        ``pressed_cw`` / ``pressed_ccw``) configured, the click defers to
+        the release — a quick release fires ``press``, a held release fires
+        ``long_press``, and a push during which the dial turned fires
+        neither (it was a grip, not a click).
 
         Event kinds are matched by enum name (``TURN``/``PUSH``) so this
         module never needs the StreamDeck enums at import time (they only
@@ -1725,12 +1762,36 @@ class StreamDeckPlugin:
         cfg = self._get_dial_config(session, dial)
 
         if kind == "PUSH":
-            if not value:
-                return  # release
-            await self.api.event_emit(
-                "dial.press", {"dial": dial, "serial": session.serial}
-            )
-            if cfg:
+            deferred = self._dial_push_deferred(cfg)
+            if value:
+                await self.api.event_emit(
+                    "dial.press", {"dial": dial, "serial": session.serial}
+                )
+                if not deferred:
+                    if cfg:
+                        await self._execute_actions(
+                            session, self._action_list(cfg.get("press")),
+                            f"dial {dial}",
+                        )
+                    return
+                session.dial_press_times[dial] = asyncio.get_running_loop().time()
+                session.dial_turned.discard(dial)
+                return
+            # Release
+            press_time = session.dial_press_times.pop(dial, None)
+            turned = dial in session.dial_turned
+            session.dial_turned.discard(dial)
+            if press_time is None or not deferred:
+                return
+            if turned:
+                return  # push-and-turn was a grip, not a click
+            held = asyncio.get_running_loop().time() - press_time
+            threshold = _coerce_numeric(cfg.get("hold_threshold_ms"))
+            threshold = (threshold if threshold and threshold > 0 else 500) / 1000.0
+            long_actions = self._action_list(cfg.get("long_press"))
+            if held >= threshold and long_actions:
+                await self._execute_actions(session, long_actions, f"dial {dial}")
+            else:
                 await self._execute_actions(
                     session, self._action_list(cfg.get("press")), f"dial {dial}"
                 )
@@ -1749,13 +1810,30 @@ class StreamDeckPlugin:
             )
             if not cfg:
                 return
+            if dial in session.dial_press_times:
+                # Turning while held: chord. Suppress the click, and route
+                # to the pressed_* config when any is set (fine adjust /
+                # alternate function); otherwise the turn acts normally.
+                session.dial_turned.add(dial)
+                pressed_adjust = cfg.get("pressed_adjust")
+                pressed_actions = (
+                    cfg.get("pressed_cw") if detents > 0 else cfg.get("pressed_ccw")
+                )
+                if (
+                    isinstance(pressed_adjust, dict) and pressed_adjust.get("key")
+                ) or self._action_list(cfg.get("pressed_cw")) \
+                        or self._action_list(cfg.get("pressed_ccw")):
+                    if isinstance(pressed_adjust, dict) and pressed_adjust.get("key"):
+                        await self._apply_dial_adjust(pressed_adjust, detents)
+                    await self._execute_per_detent(
+                        session, pressed_actions, detents, f"dial {dial}"
+                    )
+                    return
             adjust = cfg.get("adjust")
             if isinstance(adjust, dict) and adjust.get("key"):
                 await self._apply_dial_adjust(adjust, detents)
             actions = cfg.get("cw") if detents > 0 else cfg.get("ccw")
-            await self._execute_actions(
-                session, self._action_list(actions), f"dial {dial}"
-            )
+            await self._execute_per_detent(session, actions, detents, f"dial {dial}")
 
     async def _apply_dial_adjust(self, adjust, detents):
         """Increment a numeric state value by ``step * detents``, clamped.
