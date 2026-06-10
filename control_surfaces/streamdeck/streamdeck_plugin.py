@@ -383,6 +383,8 @@ class _DeckSession:
         self.render_version = 0    # bumped when mirrored images change
         self.touch_key_colors = {}  # key index -> current hex color (mirror)
         self.mirror_bump_handle = None  # debounce timer for render_version
+        self.overlay_active = False     # show_message overlay suppresses renders
+        self.overlay_handle = None      # auto-restore timer for the overlay
 
 
 class StreamDeckPlugin:
@@ -390,7 +392,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.14.0",
+        "version": "1.15.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -529,6 +531,16 @@ class StreamDeckPlugin:
         "per-deck sections (buttons, auto_page, dials, touchscreen, "
         "info_strip, auto_brightness, idle_dim) for that deck: "
         "{\"decks\": {\"ABC123\": {\"buttons\": [...]}}}. "
+        "Macros can drive the deck with an event.emit step targeting "
+        "plugin.streamdeck.action.<name> — actions: set_page {page}, "
+        "set_brightness {level} (holds until the next brightness rule, idle "
+        "dim, or wake), flash_key {index, times?}, show_message {text, "
+        "seconds?} (splashes the text across the whole deck; the first press "
+        "dismisses it without firing that key), identify_deck {}. All accept "
+        "an optional serial to target one deck; omitted means every deck. "
+        "Example macro step: {\"action\": \"event.emit\", \"event\": "
+        "\"plugin.streamdeck.action.show_message\", \"payload\": {\"text\": "
+        "\"Mics are LIVE\", \"seconds\": 10}}. "
         "To work with no hardware attached, add a top-level 'virtual_decks' "
         "array: [{\"model\": \"Stream Deck +\", \"serial\": \"VIRT-1\"}] — "
         "models: Stream Deck Neo, Stream Deck Mini, Stream Deck MK.2, Stream "
@@ -721,6 +733,9 @@ class StreamDeckPlugin:
             if session.mirror_bump_handle is not None:
                 session.mirror_bump_handle.cancel()
                 session.mirror_bump_handle = None
+            if session.overlay_handle is not None:
+                session.overlay_handle.cancel()
+                session.overlay_handle = None
             try:
                 session.deck.reset()
                 session.deck.close()
@@ -995,6 +1010,10 @@ class StreamDeckPlugin:
         if session.mirror_bump_handle is not None:
             session.mirror_bump_handle.cancel()
             session.mirror_bump_handle = None
+        if session.overlay_handle is not None:
+            session.overlay_handle.cancel()
+            session.overlay_handle = None
+        session.overlay_active = False
         self._drop_mirror_blobs(session.serial)
         await self._publish_deck_state()
         await self.api.event_emit("disconnected", {"serial": session.serial})
@@ -1177,11 +1196,145 @@ class StreamDeckPlugin:
                 if not session.is_virtual:
                     self._drop_mirror_blobs(session.serial)
 
+    # ──── Automation actions (driven by macro event.emit steps) ────
+
+    def _sessions_for(self, serial):
+        """Sessions an automation action targets: one serial, or every deck."""
+        sessions = list(self._sessions.values())
+        if serial:
+            return [s for s in sessions if s.serial == serial]
+        return sessions
+
+    async def _flash_key(self, session, index, times):
+        """Flash one key white to draw attention to it."""
+        deck = session.deck
+        if not deck or not deck.is_visual() or session.overlay_active:
+            return
+        if not 0 <= index < deck.key_count() + deck.touch_key_count():
+            return
+        is_touch = self._is_touch_key(session, index)
+        white = None
+        if not is_touch and Image is not None:
+            white = self._create_button_image(session, "", "#ffffff", "#ffffff")
+        for _ in range(times):
+            if is_touch:
+                self._apply_key_color(session, index, "#ffffff")
+            elif white is not None:
+                self._apply_key_image(session, index, white)
+            await asyncio.sleep(0.18)
+            await self._render_button(session, index)
+            await asyncio.sleep(0.12)
+
+    async def _show_message(self, session, text, seconds):
+        """Splash a message across the whole deck, restoring it afterwards.
+
+        While the overlay is up, normal renders are suppressed and the first
+        key/dial/touch input dismisses it without firing any action.
+        """
+        if session.overlay_handle is not None:
+            session.overlay_handle.cancel()
+            session.overlay_handle = None
+        session.overlay_active = True
+        await self._draw_overlay(session, text)
+        loop = asyncio.get_event_loop()
+        session.overlay_handle = loop.call_later(
+            seconds, lambda: asyncio.ensure_future(self._clear_overlay(session))
+        )
+
+    async def _clear_overlay(self, session):
+        """Drop a show_message overlay and restore the normal rendering."""
+        if session.overlay_handle is not None:
+            session.overlay_handle.cancel()
+            session.overlay_handle = None
+        if not session.overlay_active:
+            return
+        session.overlay_active = False
+        await self._render_all_buttons(session)
+        await self._render_touchscreen(session)
+        await self._render_info_strip(session)
+
+    async def _draw_overlay(self, session, text):
+        """Render ``text`` wrapped across the key grid (and strips) as one
+        canvas split into key tiles."""
+        deck = session.deck
+        if not deck or not deck.is_visual() or Image is None:
+            return
+        key_format = deck.key_image_format()
+        key_w, key_h = key_format["size"]
+        if not key_w or not key_h:
+            return
+        rows, cols = deck.key_layout()
+
+        canvas = Image.new("RGB", (cols * key_w, rows * key_h), "#101018")
+        self._paste_label(
+            canvas, text, "#ffffff",
+            (key_w // 4, key_h // 4, cols * key_w - key_w // 2, rows * key_h - key_h // 2),
+            max_font=key_h, max_lines=max(2, rows),
+        )
+        for index in range(deck.key_count()):
+            row, col = divmod(index, cols)
+            tile = canvas.crop(
+                (col * key_w, row * key_h, (col + 1) * key_w, (row + 1) * key_h)
+            )
+            self._apply_key_image(session, index, tile)
+
+        # Touch keys glow white while the message is up.
+        for index in range(
+            deck.key_count(), deck.key_count() + deck.touch_key_count()
+        ):
+            self._apply_key_color(session, index, "#ffffff")
+
+        # Strips carry the text too.
+        if deck.is_touch():
+            try:
+                strip_w, strip_h = deck.touchscreen_image_format()["size"]
+            except Exception:
+                strip_w = strip_h = 0
+            if strip_w and strip_h:
+                strip = Image.new("RGB", (strip_w, strip_h), "#101018")
+                self._paste_label(
+                    strip, text, "#ffffff", (8, 4, strip_w - 16, strip_h - 8),
+                    max_font=max(16, strip_h // 2), max_lines=2,
+                )
+                self._mirror(session, "touchscreen", strip)
+                try:
+                    native = PILHelper.to_native_touchscreen_format(deck, strip)
+                    with deck:
+                        deck.set_touchscreen_image(native, 0, 0, strip_w, strip_h)
+                except Exception:
+                    pass
+        try:
+            screen_w, screen_h = deck.screen_image_format()["size"]
+        except Exception:
+            screen_w = screen_h = 0
+        if screen_w and screen_h:
+            screen = Image.new("RGB", (screen_w, screen_h), "#101018")
+            self._paste_label(
+                screen, text, "#ffffff", (4, 2, screen_w - 8, screen_h - 4),
+                max_font=max(14, screen_h // 2), max_lines=2,
+            )
+            self._mirror(session, "screen", screen)
+            try:
+                native = PILHelper.to_native_screen_format(deck, screen)
+                with deck:
+                    deck.set_screen_image(native)
+            except Exception:
+                pass
+
     # ──── Key Handling ────
 
     async def _on_key_change(self, session, deck, key_index, pressed):
         """Handle a physical button press/release with mode support."""
         await self._note_input(session)
+
+        # A show_message overlay is dismissed by the first press, which is
+        # swallowed (it must not fire the key's own action). The matching
+        # release is swallowed too (overlay just cleared; nothing was pressed).
+        if session.overlay_active:
+            if pressed:
+                await self._clear_overlay(session)
+            return
+
         page = session.current_page
 
         event_type = "press" if pressed else "release"
@@ -1424,6 +1577,9 @@ class StreamDeckPlugin:
         exist after the lazy import, and tests run without the library).
         """
         await self._note_input(session)
+        if session.overlay_active:
+            await self._clear_overlay(session)
+            return  # the input that dismisses an overlay never fires actions
         kind = getattr(event, "name", None)
         cfg = self._get_dial_config(session, dial)
 
@@ -1543,6 +1699,9 @@ class StreamDeckPlugin:
     async def _on_touchscreen_event(self, session, deck, event, value):
         """Handle a touchscreen tap: map the x position to a zone's actions."""
         await self._note_input(session)
+        if session.overlay_active:
+            await self._clear_overlay(session)
+            return  # the input that dismisses an overlay never fires actions
         kind = getattr(event, "name", None)
         if kind not in ("SHORT", "LONG"):
             return  # DRAG is unused
@@ -1563,6 +1722,8 @@ class StreamDeckPlugin:
         deck = session.deck
         if not deck or not deck.is_visual() or not deck.is_touch():
             return
+        if session.overlay_active:
+            return  # a show_message overlay owns the display right now
         try:
             width, height = deck.touchscreen_image_format()["size"]
         except Exception:
@@ -1638,6 +1799,8 @@ class StreamDeckPlugin:
         deck = session.deck
         if not deck or not deck.is_visual():
             return
+        if session.overlay_active:
+            return  # a show_message overlay owns the display right now
         try:
             width, height = deck.screen_image_format()["size"]
         except Exception:
@@ -1785,6 +1948,8 @@ class StreamDeckPlugin:
         """Render a single button image based on its assignment and state."""
         if not session.deck or not session.deck.is_visual():
             return
+        if session.overlay_active:
+            return  # a show_message overlay owns the display right now
 
         is_touch_key = self._is_touch_key(session, key_index)
         assignment = self._get_button_assignment(
@@ -2433,6 +2598,40 @@ class StreamDeckPlugin:
             await self._simulate_input(data)
         elif "action.set_live_mirror" in event_name:
             await self._set_live_mirror(data)
+        elif event_name.endswith(".set_page"):
+            try:
+                page = int(data.get("page"))
+            except (TypeError, ValueError):
+                return
+            for session in self._sessions_for(data.get("serial")):
+                await self._change_page(session, page)
+        elif event_name.endswith(".set_brightness"):
+            level = _coerce_numeric(data.get("level"))
+            if level is None:
+                return
+            level = max(0, min(100, int(level)))
+            for session in self._sessions_for(data.get("serial")):
+                self._set_deck_brightness(session, level)
+        elif event_name.endswith(".flash_key"):
+            try:
+                index = int(data.get("index"))
+            except (TypeError, ValueError):
+                return
+            try:
+                times = max(1, min(10, int(data.get("times", 2))))
+            except (TypeError, ValueError):
+                times = 2
+            for session in self._sessions_for(data.get("serial")):
+                await self._flash_key(session, index, times)
+        elif event_name.endswith(".show_message"):
+            text = str(data.get("text", "")).strip()
+            if not text:
+                return
+            seconds = _coerce_numeric(data.get("seconds"))
+            seconds = float(seconds) if seconds is not None and seconds > 0 else 5.0
+            for session in self._sessions_for(data.get("serial")):
+                if session.deck and session.deck.is_visual():
+                    await self._show_message(session, text, seconds)
         elif "action.identify" in event_name:
             # A serial in the payload identifies one specific deck (the deck
             # picker's per-deck Identify); without one, flash every deck.

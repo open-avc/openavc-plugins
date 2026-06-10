@@ -9,7 +9,7 @@
             "format": "directory",
             "category": "control_surface",
             "manufacturer": "Elgato",
-            "version": "1.14.0",
+            "version": "1.15.0",
             "author": "OpenAVC",
             "license": "MIT",
             "platforms": ["win_x64", "linux_x64", "linux_arm64"],

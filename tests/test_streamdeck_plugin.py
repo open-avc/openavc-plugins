@@ -1711,6 +1711,130 @@ async def test_set_live_mirror_toggles_physical_mirroring(monkeypatch):
     assert not any(k[0] == "NEO01" for k in plugin._mirror_blobs)
 
 
+# ──── Automation actions: set_page / set_brightness / flash / show_message ────
+
+
+@pytest.mark.asyncio
+async def test_action_set_page_targets_one_or_all_decks(monkeypatch):
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    deck_a = _FakeDeck(serial="AAA")
+    deck_b = _FakeDeck(serial="BBB")
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck_a, deck_b]))
+    await plugin._watchdog()
+    sess_a, sess_b = plugin._sessions.values()
+
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.set_page", {"page": 2, "serial": "BBB"}
+    )
+    assert sess_a.current_page == 0
+    assert sess_b.current_page == 2
+
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.set_page", {"page": 1}
+    )
+    assert sess_a.current_page == 1
+    assert sess_b.current_page == 1
+    assert state.get("plugin.streamdeck.AAA.current_page") == 1
+
+
+@pytest.mark.asyncio
+async def test_action_set_brightness_clamps_and_applies(monkeypatch):
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    deck = _FakeDeck(serial="AAA")
+    monkeypatch.setattr(sd_module, "StreamDeck", _FakeStreamDeck([deck]))
+    await plugin._watchdog()
+
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.set_brightness", {"level": 250}
+    )
+    assert deck.brightness == 100
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.set_brightness", {"level": 15}
+    )
+    assert deck.brightness == 15
+
+
+@pytest.mark.asyncio
+async def test_show_message_overlay_suppresses_and_dismisses(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "m"}]}}]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.show_message", {"text": "Mics are LIVE"}
+    )
+    assert session.overlay_active is True
+    # The message was tiled across the LCD keys and the touch keys glow white.
+    assert sorted(session.deck.key_images) == list(range(8))
+    assert session.deck.key_colors[8] == (255, 255, 255)
+    # The info screen carries the text too.
+    assert session.deck.screen_image == b"native-screen"
+
+    # Normal renders are suppressed while the overlay is up.
+    session.deck.key_images.clear()
+    await plugin._render_all_buttons(session)
+    assert session.deck.key_images == {}
+
+    # First press dismisses without firing; the next press acts normally.
+    await plugin._on_key_change(session, None, 0, True)
+    assert macros.executed == []
+    assert session.overlay_active is False
+    await plugin._on_key_change(session, None, 0, False)
+    await plugin._on_key_change(session, None, 0, True)
+    assert macros.executed == ["m"]
+
+
+@pytest.mark.asyncio
+async def test_show_message_auto_restores_after_timeout(monkeypatch):
+    import asyncio as _a
+    _patch_pil(monkeypatch)
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.show_message", {"text": "Hi", "seconds": 0.05}
+    )
+    assert session.overlay_active is True
+    await _a.sleep(0.12)
+    assert session.overlay_active is False
+    # Restore re-rendered the page.
+    assert sorted(session.deck.key_images) == list(range(8))
+
+
+@pytest.mark.asyncio
+async def test_dial_input_dismisses_overlay_without_actions(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {"dials": [{"index": 0, "cw": [{"action": "macro", "macro": "vol"}]}]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+
+    await plugin._show_message(session, "Hello", 5.0)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
+    assert session.overlay_active is False
+    assert macros.executed == []  # the dismissing input never fires actions
+
+
+@pytest.mark.asyncio
+async def test_flash_key_writes_white_then_restores(monkeypatch):
+    _patch_pil(monkeypatch)
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+
+    writes_before = len(session.deck.key_images)
+    await plugin._on_context_action(
+        "plugin.streamdeck.action.flash_key", {"index": 0, "times": 1}
+    )
+    # White write + restore render both landed on key 0.
+    assert 0 in session.deck.key_images
+    assert len(session.deck.key_images) >= writes_before
+
+
 # ──── Bundled text font + button image rendering ────
 
 

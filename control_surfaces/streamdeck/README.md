@@ -152,6 +152,20 @@ The hardware layout is detected when a deck connects, so the Surface Configurato
 
 - **Identify Stream Deck** -- Flashes all buttons white three times so you can identify which physical deck is connected.
 
+## Controlling the Deck from Macros
+
+Macros (and therefore triggers, schedules, and scripts that run macros) can drive the deck with an **Emit Event** step targeting `plugin.streamdeck.action.<name>`:
+
+| Event | Payload | What it does |
+|-------|---------|--------------|
+| `...action.set_page` | `{"page": 2}` | Switch to a page (0-based) |
+| `...action.set_brightness` | `{"level": 30}` | Set brightness; holds until the next brightness rule, idle dim, or wake |
+| `...action.flash_key` | `{"index": 3, "times": 2}` | Flash one key white to draw attention |
+| `...action.show_message` | `{"text": "Mics are LIVE", "seconds": 10}` | Splash a message across the whole deck (and strips); the first press dismisses it without firing that key |
+| `...action.identify_deck` | `{}` | Flash every key |
+
+Every payload accepts an optional `"serial"` to target one specific deck; leave it out to address all of them. Example: a trigger on `device.mic_1.mute` becoming `false` runs a macro whose only step emits `plugin.streamdeck.action.show_message` with `{"text": "Mics are LIVE"}` -- every deck in the space lights up with the warning.
+
 ## Troubleshooting
 
 - **No Stream Deck found:** Make sure the deck is connected via USB. On Linux, check that the udev rule is installed (see Requirements above).
