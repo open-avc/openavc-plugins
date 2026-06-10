@@ -1001,6 +1001,121 @@ async def test_touch_event_runs_zone_actions():
     assert macros.executed == ["zone_b"]
 
 
+def test_meter_resolution_rules():
+    plugin, _state = _make_plugin({})
+    # Explicit meter with explicit bounds.
+    assert plugin._resolve_meter({"min": 0, "max": 200}, 50) == (
+        0.25, plugin._METER_DEFAULT_COLOR)
+    # Bounds default from the surrounding adjust when the meter is implicit.
+    assert plugin._resolve_meter(
+        None, 25, {"key": "var.v", "min": 0, "max": 50}) == (
+        0.5, plugin._METER_DEFAULT_COLOR)
+    # Implicit meter with no adjust bounds never draws.
+    assert plugin._resolve_meter(None, 25, {"key": "var.v"}) is None
+    assert plugin._resolve_meter(None, 25, None) is None
+    # Explicit meter without bounds anywhere defaults to 0..100.
+    assert plugin._resolve_meter({}, 50) == (0.5, plugin._METER_DEFAULT_COLOR)
+    assert plugin._resolve_meter(True, 150) == (1.0, plugin._METER_DEFAULT_COLOR)
+    # meter: false always disables; non-numeric values never draw.
+    assert plugin._resolve_meter(False, 50, {"min": 0, "max": 100}) is None
+    assert plugin._resolve_meter({}, "HDMI 1") is None
+    assert plugin._resolve_meter({}, None) is None
+    # Clamping below min.
+    assert plugin._resolve_meter({"min": 10, "max": 20}, 5)[0] == 0.0
+
+
+def test_meter_threshold_colors():
+    plugin, _state = _make_plugin({})
+    meter = {
+        "min": 0, "max": 100, "color": "#00ff00",
+        "thresholds": [
+            {"above": 80, "color": "#ffaa00"},
+            {"above": 95, "color": "#ff0000"},
+        ],
+    }
+    assert plugin._resolve_meter(meter, 50)[1] == "#00ff00"
+    assert plugin._resolve_meter(meter, 85)[1] == "#ffaa00"
+    assert plugin._resolve_meter(meter, 99)[1] == "#ff0000"
+
+
+@pytest.mark.asyncio
+async def test_default_zone_carries_dial_display_fields():
+    config = {"dials": [{
+        "index": 0, "label": "Volume", "icon": "volume-2", "unit": "%",
+        "adjust": {"key": "var.volume", "min": 0, "max": 100},
+    }]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, _FakePlusDeck())
+    zones = plugin._touch_zones(session)
+    assert zones[0]["icon"] == "volume-2"
+    assert zones[0]["unit"] == "%"
+    # The adjust declares bounds, so the zone meters automatically once the
+    # value exists; with the value unset there is no bar yet.
+    resolved = await plugin._resolve_display(zones[0], "#000", "#fff")
+    assert resolved["meter"] is None
+    state.set("var.volume", 70, source="test")
+    resolved = await plugin._resolve_display(zones[0], "#000", "#fff")
+    assert resolved["meter"] == (0.7, plugin._METER_DEFAULT_COLOR)
+
+
+@pytest.mark.asyncio
+async def test_resolve_display_value_unit_and_feedback():
+    plugin, state = _make_plugin({})
+    state.set("var.mic_gain", 42, source="test")
+    state.set("device.amp.clip", True, source="test")
+    element = {
+        "label": "Mics", "value_source": "var.mic_gain", "unit": "dB",
+        "drag_adjust": {"key": "var.mic_gain", "min": 0, "max": 100},
+        "feedback": {
+            "key": "device.amp.clip",
+            "style_active": {"bg_color": "#ff0000"},
+            "style_inactive": {"bg_color": "#101010"},
+        },
+    }
+    resolved = await plugin._resolve_display(element, "#000", "#fff")
+    assert resolved["value_text"] == "42 dB"
+    assert resolved["bg"] == "#ff0000"          # clip active -> red zone
+    assert resolved["meter"] == (0.42, plugin._METER_DEFAULT_COLOR)
+    state.set("device.amp.clip", False, source="test")
+    resolved = await plugin._resolve_display(element, "#000", "#fff")
+    assert resolved["bg"] == "#101010"
+    # Percent units attach without a space.
+    state.set("var.mic_gain", 50, source="test")
+    element2 = {"value_source": "var.mic_gain", "unit": "%"}
+    resolved2 = await plugin._resolve_display(element2, "#000", "#fff")
+    assert resolved2["value_text"] == "50%"
+
+
+@pytest.mark.asyncio
+async def test_key_live_sources_watched_and_rendered():
+    config = {"buttons": [{
+        "index": 0, "page": 0, "label": "Mic 2",
+        "label_source": "var.mic_name", "value_source": "var.mic_level",
+        "meter": {"min": 0, "max": 100},
+        "bindings": {"press": [{"action": "macro", "macro": "m"}]},
+    }]}
+    plugin, _state = _make_plugin(config)
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    btn = config["buttons"][0]
+    assert plugin._button_watches_key(btn, "var.mic_name")
+    assert plugin._button_watches_key(btn, "var.mic_level")
+    assert not plugin._button_watches_key(btn, "var.other")
+    # Both live sources are subscribed for re-render.
+    assert len(session.feedback_subs) == 2
+
+
+@pytest.mark.asyncio
+async def test_zone_feedback_key_watched():
+    config = {"touchscreen": {"zones": [{
+        "label": "Amp", "feedback": {"key": "device.amp.clip"},
+    }]}}
+    plugin, _state = _make_plugin(config)
+    session = _session_for(plugin)
+    await plugin._setup_feedback_subscriptions(session)
+    assert "device.amp.clip" in session.touch_strip_keys
+
+
 @pytest.mark.asyncio
 async def test_subscriptions_include_touch_strip_keys():
     config = {
@@ -1058,6 +1173,89 @@ async def test_render_touchscreen_draws_zones(monkeypatch):
     assert sent["image"] == b"native-strip"
     assert sent["size"] == (800, 100)
     assert sent["rect"] == (0, 0, 800, 100)
+
+
+def _strip_render_rig(monkeypatch, config):
+    """Visual Plus deck + PIL patched in, recording every strip write."""
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    monkeypatch.setattr(sd_module, "ImageFont", ImageFont)
+
+    writes = []
+
+    class _FakePILHelper:
+        @staticmethod
+        def to_native_touchscreen_format(deck, img):
+            return img.size
+
+        @staticmethod
+        def to_native_screen_format(deck, img):
+            return img.size
+
+    monkeypatch.setattr(sd_module, "PILHelper", _FakePILHelper)
+
+    class _VisualPlusDeck(_FakePlusDeck):
+        def is_visual(self):
+            return True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def set_touchscreen_image(self, image, x=0, y=0, w=0, h=0):
+            writes.append((image, x, y, w, h))
+
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _VisualPlusDeck())
+    return plugin, state, session, writes
+
+
+@pytest.mark.asyncio
+async def test_partial_strip_render_ships_one_zone_region(monkeypatch):
+    config = {"touchscreen": {"zones": [
+        {"label": "A"}, {"label": "B", "value_source": "var.b"},
+        {"label": "C"}, {"label": "D"},
+    ]}}
+    plugin, state, session, writes = _strip_render_rig(monkeypatch, config)
+    state.set("var.b", 5, source="test")
+
+    await plugin._render_touchscreen(session)
+    assert writes[-1] == ((800, 100), 0, 0, 800, 100)
+    assert session.strip_image is not None
+
+    await plugin._render_strip_zone(session, 1)
+    # Only zone 1's 200px region was encoded and shipped at its x offset.
+    assert writes[-1] == ((200, 100), 200, 0, 200, 100)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_strip_render_coalesces_and_targets_zones(monkeypatch):
+    import asyncio as _asyncio
+    config = {"touchscreen": {"zones": [
+        {"label": "A", "value_source": "var.a"},
+        {"label": "B", "value_source": "var.b"},
+    ]}}
+    plugin, state, session, writes = _strip_render_rig(monkeypatch, config)
+    await plugin._render_touchscreen(session)
+    writes.clear()
+
+    # Two rapid changes to the same zone coalesce into one partial write.
+    plugin._schedule_strip_render(session, [1])
+    plugin._schedule_strip_render(session, [1])
+    assert session.strip_render_task is not None
+    await _asyncio.wait_for(session.strip_render_task, timeout=2)
+    assert writes == [((400, 100), 400, 0, 400, 100)]
+
+    # A full-strip request redraws everything once.
+    writes.clear()
+    plugin._schedule_strip_render(session, None)
+    await _asyncio.wait_for(session.strip_render_task, timeout=2)
+    assert writes == [((800, 100), 0, 0, 800, 100)]
 
 
 # ──── Neo: touch keys (color-only) + info strip ────

@@ -385,6 +385,9 @@ class _DeckSession:
         self.mirror_bump_handle = None  # debounce timer for render_version
         self.overlay_active = False     # show_message overlay suppresses renders
         self.overlay_handle = None      # auto-restore timer for the overlay
+        self.strip_image = None         # cached full-strip PIL render (partial updates)
+        self.strip_render_task = None   # debounced strip-redraw task
+        self.strip_dirty = None         # zone indexes pending redraw, or "all"
         self.macro_keys = {}            # macro_id -> {(page, key_index), ...}
         self.macro_marks = {}           # (page, key_index) -> running|done|error
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
@@ -396,7 +399,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.24.0",
+        "version": "1.25.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -765,6 +768,9 @@ class StreamDeckPlugin:
             if session.overlay_handle is not None:
                 session.overlay_handle.cancel()
                 session.overlay_handle = None
+            if session.strip_render_task is not None:
+                session.strip_render_task.cancel()
+                session.strip_render_task = None
             for handle in session.macro_clear_handles.values():
                 handle.cancel()
             session.macro_clear_handles.clear()
@@ -1095,6 +1101,11 @@ class StreamDeckPlugin:
         if session.overlay_handle is not None:
             session.overlay_handle.cancel()
             session.overlay_handle = None
+        if session.strip_render_task is not None:
+            session.strip_render_task.cancel()
+            session.strip_render_task = None
+        session.strip_image = None
+        session.strip_dirty = None
         session.overlay_active = False
         for handle in session.macro_clear_handles.values():
             handle.cancel()
@@ -1796,6 +1807,9 @@ class StreamDeckPlugin:
                 adjust = adjust if isinstance(adjust, dict) else {}
                 zones.append({
                     "label": cfg.get("label", ""),
+                    "icon": cfg.get("icon"),
+                    "unit": cfg.get("unit"),
+                    "meter": cfg.get("meter"),
                     "value_source": adjust.get("key", ""),
                     # Swiping under a dial does what turning it does.
                     "drag_adjust": dict(adjust) if adjust.get("key") else None,
@@ -1872,8 +1886,226 @@ class StreamDeckPlugin:
                 session, self._action_list(actions), "touchscreen"
             )
 
+    # ──── Display elements (shared by zones, info items, and keys) ────
+
+    _METER_DEFAULT_COLOR = "#8ab493"
+
+    @staticmethod
+    def _meter_bounds(meter, bounds_source):
+        """Resolve a meter's min/max: explicit > surrounding adjust > 0..100."""
+        meter = meter if isinstance(meter, dict) else {}
+        bounds = bounds_source if isinstance(bounds_source, dict) else {}
+        minimum = _coerce_numeric(meter.get("min"))
+        maximum = _coerce_numeric(meter.get("max"))
+        if minimum is None:
+            minimum = _coerce_numeric(bounds.get("min"))
+        if maximum is None:
+            maximum = _coerce_numeric(bounds.get("max"))
+        if minimum is None:
+            minimum = 0
+        if maximum is None:
+            maximum = 100
+        return (minimum, maximum) if maximum > minimum else (0, 100)
+
+    def _resolve_meter(self, meter, raw_value, bounds_source=None):
+        """Resolve a meter config to ``(fill_fraction, color)`` or None.
+
+        A meter draws when explicitly enabled (``"meter": {}``/``true``), or
+        automatically when the surrounding adjust/drag_adjust declares both
+        bounds — so a volume dial gets a level bar with zero extra config.
+        ``"meter": false`` always disables; a non-numeric value never draws.
+        Color: the highest matching ``thresholds`` entry ({above, color})
+        wins, else ``color``, else the accent default.
+        """
+        if meter is False:
+            return None
+        explicit = meter is True or isinstance(meter, dict)
+        bounds = bounds_source if isinstance(bounds_source, dict) else {}
+        auto = (
+            _coerce_numeric(bounds.get("min")) is not None
+            and _coerce_numeric(bounds.get("max")) is not None
+        )
+        if not explicit and not auto:
+            return None
+        value = _coerce_numeric(raw_value)
+        if value is None:
+            return None
+        minimum, maximum = self._meter_bounds(meter, bounds_source)
+        frac = max(0.0, min(1.0, (value - minimum) / (maximum - minimum)))
+        meter = meter if isinstance(meter, dict) else {}
+        color = meter.get("color") or self._METER_DEFAULT_COLOR
+        thresholds = meter.get("thresholds")
+        if isinstance(thresholds, list):
+            best = None
+            for rule in thresholds:
+                if not isinstance(rule, dict) or not rule.get("color"):
+                    continue
+                above = _coerce_numeric(rule.get("above"))
+                if above is None or value < above:
+                    continue
+                if best is None or above > best[0]:
+                    best = (above, rule["color"])
+            if best:
+                color = best[1]
+        return frac, color
+
+    async def _apply_feedback_styles(self, feedback, label, icon, bg_color, text_color):
+        """Evaluate a feedback config and return the styled
+        ``(label, icon, bg_color, text_color)``.
+
+        The one conditional-styling path, shared by keys, touchscreen zones,
+        and info items: a multi-state ``states`` map keyed by the watched
+        value, or the simple active/inactive condition pair.
+        """
+        if not (isinstance(feedback, dict) and feedback.get("key")):
+            return label, icon, bg_color, text_color
+        value = await self.api.state_get(feedback["key"])
+
+        states = feedback.get("states")
+        if states and isinstance(states, dict):
+            state_str = str(value) if value is not None else ""
+            appearance = states.get(state_str) or states.get(
+                feedback.get("default_state", "")
+            )
+            if appearance and isinstance(appearance, dict):
+                bg_color = appearance.get("bg_color", bg_color) or bg_color
+                text_color = appearance.get("text_color", text_color) or text_color
+                if appearance.get("label"):
+                    label = appearance["label"]
+                if appearance.get("icon"):
+                    icon = appearance["icon"]
+            return label, icon, bg_color, text_color
+
+        condition = feedback.get("condition", {})
+        style_active = feedback.get("style_active", {})
+        style_inactive = feedback.get("style_inactive", {})
+        expected = condition.get("equals") if isinstance(condition, dict) else None
+        is_active = (
+            (str(value).lower() == str(expected).lower())
+            if expected is not None else bool(value)
+        )
+        if is_active and isinstance(style_active, dict):
+            bg_color = style_active.get("bg_color", bg_color) or bg_color
+            text_color = style_active.get("text_color", text_color) or text_color
+            if feedback.get("label_active"):
+                label = feedback["label_active"]
+            if style_active.get("icon"):
+                icon = style_active["icon"]
+        elif not is_active and isinstance(style_inactive, dict):
+            bg_color = style_inactive.get("bg_color", bg_color) or bg_color
+            text_color = style_inactive.get("text_color", text_color) or text_color
+            if feedback.get("label_inactive"):
+                label = feedback["label_inactive"]
+            if style_inactive.get("icon"):
+                icon = style_inactive["icon"]
+        return label, icon, bg_color, text_color
+
+    async def _resolve_display(self, element, default_bg, default_fg):
+        """Resolve a display element (zone / info item) to drawables.
+
+        Shared schema: ``label`` / ``label_source`` (live override), ``icon``
+        (Lucide or asset://), ``value_source`` + ``unit`` (live value text;
+        ``value_static`` for fixed text), ``meter`` (bounds defaulting from
+        the element's drag_adjust), and ``feedback`` (conditional styling).
+        """
+        label = element.get("label", "")
+        if element.get("label_source"):
+            live = await self.api.state_get(element["label_source"])
+            if live is not None:
+                label = str(live)
+        icon = element.get("icon") or None
+        bg = element.get("bg_color") or default_bg
+        fg = element.get("text_color") or default_fg
+
+        raw_value = None
+        value_text = ""
+        if element.get("value_static") is not None:
+            value_text = str(element["value_static"])
+        elif element.get("value_source"):
+            raw_value = await self.api.state_get(element["value_source"])
+            if raw_value is not None:
+                value_text = str(raw_value)
+                unit = str(element.get("unit") or "")
+                if unit:
+                    value_text += unit if unit == "%" else f" {unit}"
+
+        label, icon, bg, fg = await self._apply_feedback_styles(
+            element.get("feedback"), label, icon, bg, fg
+        )
+        meter = self._resolve_meter(
+            element.get("meter"), raw_value, element.get("drag_adjust")
+        )
+        return {
+            "label": label, "icon": icon, "value_text": value_text,
+            "bg": bg, "fg": fg, "meter": meter,
+        }
+
+    async def _draw_strip_zone(self, session, img, zone, height):
+        """Draw one display element (background, icon, label, value, meter)
+        into a strip image at the element's pixel bounds."""
+        draw = ImageDraw.Draw(img)
+        zx, zw = zone["x"], zone["w"]
+        bg = self._deck_setting(session, "button_color", "#1a1a2e")
+        fg = self._deck_setting(session, "text_color", "#e0e0e0")
+        resolved = await self._resolve_display(zone, bg, fg)
+
+        draw.rectangle([zx, 0, zx + zw - 1, height - 1], fill=resolved["bg"])
+
+        meter = resolved["meter"]
+        text_bottom = height - 18 if meter else height - 4
+
+        text_x = zx + 4
+        if resolved["icon"]:
+            icon_img = self._render_icon(resolved["icon"], resolved["fg"], 72)
+            if icon_img:
+                icon_size = max(16, min(40, zw // 4, text_bottom - 8))
+                icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
+                icon_y = max(2, (text_bottom - icon_size) // 2)
+                img.paste(icon_img, (zx + 8, icon_y), icon_img)
+                text_x = zx + 8 + icon_size + 6
+        text_w = zx + zw - 4 - text_x
+
+        label = resolved["label"]
+        value_text = resolved["value_text"]
+        if label and value_text:
+            self._paste_label(
+                img, label, resolved["fg"],
+                (text_x, 4, text_w, height // 3),
+                max_font=16, max_lines=1,
+            )
+            self._paste_label(
+                img, value_text, resolved["fg"],
+                (text_x, height // 3 + 2, text_w, text_bottom - height // 3 - 4),
+                max_font=30, max_lines=1,
+            )
+        elif label or value_text:
+            self._paste_label(
+                img, label or value_text, resolved["fg"],
+                (text_x, 4, text_w, text_bottom - 8),
+                max_font=24, max_lines=2,
+            )
+
+        if meter:
+            frac, color = meter
+            draw.rectangle(
+                [zx + 8, height - 14, zx + zw - 9, height - 7], fill="#2a2a3e"
+            )
+            fill_w = int((zw - 17) * frac)
+            if fill_w > 0:
+                draw.rectangle(
+                    [zx + 8, height - 14, zx + 8 + fill_w, height - 7], fill=color
+                )
+
+        if zx > 0:
+            draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)
+
     async def _render_touchscreen(self, session):
-        """Render the touchscreen strip: one cell per zone (label + value)."""
+        """Render the touchscreen strip: one display element per zone.
+
+        Zones carry the full display schema (live label, icon, value + unit,
+        meter bar, conditional feedback styling). The rendered image is
+        cached on the session so a single-zone change can redraw partially.
+        """
         deck = session.deck
         if not deck or not deck.is_visual() or not deck.is_touch():
             return
@@ -1886,54 +2118,11 @@ class StreamDeckPlugin:
         zones = self._touch_zones(session)
 
         bg = self._deck_setting(session, "button_color", "#1a1a2e")
-        fg = self._deck_setting(session, "text_color", "#e0e0e0")
         img = Image.new("RGB", (width, height), bg)
-        draw = ImageDraw.Draw(img)
-
         for zone in zones:
-            zx, zw = zone["x"], zone["w"]
+            await self._draw_strip_zone(session, img, zone, height)
 
-            label = zone.get("label", "")
-            label_source = zone.get("label_source", "")
-            if label_source:
-                live_label = await self.api.state_get(label_source)
-                if live_label is not None:
-                    label = str(live_label)
-
-            value_text = ""
-            value_source = zone.get("value_source", "")
-            if value_source:
-                live_value = await self.api.state_get(value_source)
-                if live_value is not None:
-                    value_text = str(live_value)
-
-            zone_fg = zone.get("text_color") or fg
-            if zone.get("bg_color"):
-                draw.rectangle(
-                    [zx, 0, zx + zw - 1, height - 1], fill=zone["bg_color"]
-                )
-
-            if label and value_text:
-                self._paste_label(
-                    img, label, zone_fg,
-                    (zx + 4, 4, zw - 8, height // 3),
-                    max_font=16, max_lines=1,
-                )
-                self._paste_label(
-                    img, value_text, zone_fg,
-                    (zx + 4, height // 3 + 4, zw - 8, height - height // 3 - 8),
-                    max_font=30, max_lines=1,
-                )
-            elif label or value_text:
-                self._paste_label(
-                    img, label or value_text, zone_fg,
-                    (zx + 4, 4, zw - 8, height - 8),
-                    max_font=24, max_lines=2,
-                )
-
-            if zx > 0:
-                draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)
-
+        session.strip_image = img
         self._mirror(session, "touchscreen", img)
         try:
             native = PILHelper.to_native_touchscreen_format(deck, img)
@@ -1942,14 +2131,105 @@ class StreamDeckPlugin:
         except Exception as e:
             self.api.log(f"Error setting touchscreen image: {e}", level="debug")
 
+    def _schedule_strip_render(self, session, zones=None):
+        """Coalesce strip redraws (~40 ms debounce): collect dirty zones,
+        then redraw only those regions when possible, the whole strip when
+        not (``zones=None`` means everything)."""
+        if zones is None or session.strip_dirty == "all":
+            session.strip_dirty = "all"
+        else:
+            if not isinstance(session.strip_dirty, set):
+                session.strip_dirty = set()
+            session.strip_dirty.update(zones)
+        if session.strip_render_task and not session.strip_render_task.done():
+            return
+        session.strip_render_task = asyncio.create_task(
+            self._flush_strip_render(session)
+        )
+
+    async def _flush_strip_render(self, session):
+        try:
+            while session.strip_dirty:
+                await asyncio.sleep(0.04)
+                dirty = session.strip_dirty
+                session.strip_dirty = None
+                if dirty == "all" or session.strip_image is None:
+                    await self._render_touchscreen(session)
+                else:
+                    for index in sorted(dirty):
+                        await self._render_strip_zone(session, index)
+        finally:
+            session.strip_render_task = None
+
+    async def _render_strip_zone(self, session, zone_index):
+        """Redraw one zone into the cached strip image and ship only that
+        region to the deck (the hardware accepts partial-region updates)."""
+        deck = session.deck
+        if not deck or not deck.is_visual() or not deck.is_touch():
+            return
+        if session.overlay_active or session.strip_image is None:
+            return
+        try:
+            fmt = deck.touchscreen_image_format()
+            width, height = fmt["size"]
+        except Exception:
+            return
+        # A flipped/rotated native format transforms whole-image coordinates;
+        # partial regions would land in the wrong place, so redraw fully.
+        if fmt.get("flip", (False, False)) != (False, False) or fmt.get("rotation", 0):
+            await self._render_touchscreen(session)
+            return
+        zones = self._touch_zones(session)
+        if not 0 <= zone_index < len(zones):
+            await self._render_touchscreen(session)
+            return
+        zone = zones[zone_index]
+        img = session.strip_image
+        await self._draw_strip_zone(session, img, zone, height)
+        self._mirror(session, "touchscreen", img)
+        zx = max(0, int(zone["x"]))
+        zw = min(int(zone["w"]), width - zx)
+        if zw <= 0:
+            return
+        region = img.crop((zx, 0, zx + zw, height))
+        try:
+            native = PILHelper.to_native_touchscreen_format(deck, region)
+            with deck:
+                deck.set_touchscreen_image(native, zx, 0, zw, height)
+        except Exception as e:
+            self.api.log(f"Error setting touchscreen region: {e}", level="debug")
+
     # ──── Info strip (decks with a secondary info screen) ────
+
+    @staticmethod
+    def _info_strip_items(cfg, width):
+        """Normalize ``info_strip`` config to display elements with pixel
+        bounds across the screen.
+
+        Accepts the display-element shape directly ({label, label_source,
+        icon, value_source, unit, meter, feedback, ...}); the legacy
+        ``{source: "state"|"text", key, text}`` shape maps onto it (a text
+        source becomes a static value).
+        """
+        if not isinstance(cfg, dict):
+            return []
+        element = dict(cfg)
+        if element.get("source") == "text":
+            element["value_static"] = str(element.get("text", ""))
+            element.pop("value_source", None)
+        elif not element.get("value_source"):
+            element["value_source"] = element.get("key", "")
+        element["x"] = 0
+        element["w"] = width
+        return [element]
 
     async def _render_info_strip(self, session):
         """Render the secondary info screen from the ``info_strip`` config.
 
-        Config shape: ``{"source": "state"|"text", "key": "<state key>",
-        "text": "<static text>", "label": "<small heading>"}``. A state
-        source shows the key's live value; re-rendered on change.
+        The config is a display element (live label, icon, value + unit,
+        meter, feedback styling); the legacy ``{"source": "state"|"text",
+        "key"/"text", "label"}`` shape still works. Re-rendered when a
+        watched key changes.
         """
         deck = session.deck
         if not deck or not deck.is_visual():
@@ -1964,34 +2244,11 @@ class StreamDeckPlugin:
             return  # this deck has no info screen
 
         bg = self._deck_setting(session, "button_color", "#1a1a2e")
-        fg = self._deck_setting(session, "text_color", "#e0e0e0")
         img = Image.new("RGB", (width, height), bg)
 
         cfg = self._deck_config(session).get("info_strip")
-        if isinstance(cfg, dict):
-            label = cfg.get("label", "")
-            if cfg.get("source") == "text":
-                value = str(cfg.get("text", ""))
-            else:
-                key = cfg.get("key", "")
-                live = await self.api.state_get(key) if key else None
-                value = str(live) if live is not None else ""
-
-            if label and value:
-                self._paste_label(
-                    img, label, fg, (4, 2, width - 8, height // 3),
-                    max_font=14, max_lines=1,
-                )
-                self._paste_label(
-                    img, value, fg,
-                    (4, height // 3 + 2, width - 8, height - height // 3 - 4),
-                    max_font=24, max_lines=1,
-                )
-            elif label or value:
-                self._paste_label(
-                    img, label or value, fg, (4, 2, width - 8, height - 4),
-                    max_font=22, max_lines=2,
-                )
+        for element in self._info_strip_items(cfg, width):
+            await self._draw_strip_zone(session, img, element, height)
 
         self._mirror(session, "screen", img)
         try:
@@ -2218,6 +2475,8 @@ class StreamDeckPlugin:
         icon = None
         bg_color = global_bg
         text_color = global_text
+        value_text = ""
+        meter = None
 
         if assignment:
             # Hidden by visible_when → blank black key; render nothing else.
@@ -2235,6 +2494,23 @@ class StreamDeckPlugin:
 
             label = assignment.get("label", "")
             icon = assignment.get("icon") or None
+
+            # Live label / live value lines (display-element fields)
+            if assignment.get("label_source"):
+                live_label = await self.api.state_get(assignment["label_source"])
+                if live_label is not None:
+                    label = str(live_label)
+            raw_value = None
+            if assignment.get("value_source"):
+                raw_value = await self.api.state_get(assignment["value_source"])
+                if raw_value is not None:
+                    value_text = str(raw_value)
+                    unit = str(assignment.get("unit") or "")
+                    if unit:
+                        value_text += unit if unit == "%" else f" {unit}"
+            # Keys have no surrounding adjust, so a key meter renders only
+            # when explicitly enabled (bounds default to 0..100).
+            meter = self._resolve_meter(assignment.get("meter"), raw_value)
 
             # Per-button default colors (override global defaults)
             bg_color = assignment.get("bg_color") or global_bg
@@ -2255,49 +2531,11 @@ class StreamDeckPlugin:
                     elif not t_active and off_lbl:
                         label = off_lbl
 
-            # Read feedback config from bindings
+            # Conditional feedback styling (shared resolver)
             feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
-
-            if feedback and isinstance(feedback, dict):
-                fk = feedback.get("key", "")
-                condition = feedback.get("condition", {})
-                style_active = feedback.get("style_active", {})
-                style_inactive = feedback.get("style_inactive", {})
-
-                if fk:
-                    value = await self.api.state_get(fk)
-
-                    # Multi-state feedback
-                    states = feedback.get("states")
-                    if states and isinstance(states, dict):
-                        state_str = str(value) if value is not None else ""
-                        appearance = states.get(state_str) or states.get(feedback.get("default_state", ""))
-                        if appearance and isinstance(appearance, dict):
-                            bg_color = appearance.get("bg_color", bg_color) or bg_color
-                            text_color = appearance.get("text_color", text_color) or text_color
-                            if appearance.get("label"):
-                                label = appearance["label"]
-                            if appearance.get("icon"):
-                                icon = appearance["icon"]
-                    else:
-                        # Simple active/inactive feedback
-                        expected = condition.get("equals") if isinstance(condition, dict) else None
-                        is_active = (str(value).lower() == str(expected).lower()) if expected is not None else bool(value)
-
-                        if is_active and isinstance(style_active, dict):
-                            bg_color = style_active.get("bg_color", bg_color) or bg_color
-                            text_color = style_active.get("text_color", text_color) or text_color
-                            if feedback.get("label_active"):
-                                label = feedback["label_active"]
-                            if style_active.get("icon"):
-                                icon = style_active["icon"]
-                        elif not is_active and isinstance(style_inactive, dict):
-                            bg_color = style_inactive.get("bg_color", bg_color) or bg_color
-                            text_color = style_inactive.get("text_color", text_color) or text_color
-                            if feedback.get("label_inactive"):
-                                label = feedback["label_inactive"]
-                            if style_inactive.get("icon"):
-                                icon = style_inactive["icon"]
+            label, icon, bg_color, text_color = await self._apply_feedback_styles(
+                feedback, label, icon, bg_color, text_color
+            )
 
         # Locked keys store their macro mark under page None (lit on every
         # page); page keys under their page.
@@ -2325,7 +2563,10 @@ class StreamDeckPlugin:
         # Generate the button image and set it on the deck. While the key is
         # physically held, draw the momentary-press highlight on top; a macro
         # run/result mark draws a colored border (+ loader glyph).
-        image = self._create_button_image(session, label, bg_color, text_color, icon)
+        image = self._create_button_image(
+            session, label, bg_color, text_color, icon,
+            value_text=value_text, meter=meter,
+        )
         if nav_active:
             image = self._apply_nav_active(image)
         if key_index in session.pressed_keys:
@@ -2424,48 +2665,82 @@ class StreamDeckPlugin:
         except Exception as e:
             self.api.log(f"Error setting key {key_index} image: {e}", level="debug")
 
-    def _create_button_image(self, session, label, bg_color, text_color, icon_name=None):
-        """Create a PIL image for a button with optional icon and wrapped label."""
+    def _create_button_image(self, session, label, bg_color, text_color,
+                             icon_name=None, value_text="", meter=None):
+        """Create a PIL image for a button: icon, wrapped label, optional
+        live value line, optional meter bar along the bottom."""
         image_format = session.deck.key_image_format()
         width = image_format["size"][0]
         height = image_format["size"][1]
 
         img = Image.new("RGB", (width, height), bg_color)
 
+        # A meter reserves a strip along the bottom edge.
+        usable_h = height - 10 if meter else height
+
         # Load icon image if specified
         icon_img = self._render_icon(icon_name, text_color, width) if icon_name else None
 
+        # An icon carries the identity, so with an icon plus both texts the
+        # live value wins the text slot (two text lines + icon turn to mush
+        # on a small key).
+        if icon_img and value_text:
+            label = value_text
+            value_text = ""
+
         if icon_img and label:
             # Icon in the upper area, wrapped label below it.
-            icon_size = min(width, height) // 2
+            icon_size = min(width, usable_h) // 2
             icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
             icon_x = (width - icon_size) // 2
-            icon_y = max(4, (height // 2) - icon_size + 4)
+            icon_y = max(4, (usable_h // 2) - icon_size + 4)
             img.paste(icon_img, (icon_x, icon_y), icon_img)
 
             text_top = icon_y + icon_size + 2
             self._paste_label(
                 img, label, text_color,
-                (2, text_top, width - 4, max(0, height - text_top - 2)),
+                (2, text_top, width - 4, max(0, usable_h - text_top - 2)),
                 max_font=14, max_lines=2,
             )
 
         elif icon_img:
             # Icon only, centered
-            icon_size = int(min(width, height) * 0.6)
+            icon_size = int(min(width, usable_h) * 0.6)
             icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
             icon_x = (width - icon_size) // 2
-            icon_y = (height - icon_size) // 2
+            icon_y = (usable_h - icon_size) // 2
             img.paste(icon_img, (icon_x, icon_y), icon_img)
 
-        elif label:
-            # Label only — wrapped and shrunk to fill the key.
-            pad = max(2, width // 12)
+        elif label and value_text:
+            # Name on top, live value as the main element below it.
             self._paste_label(
                 img, label, text_color,
-                (pad, pad, width - 2 * pad, height - 2 * pad),
-                max_font=max(14, height // 4), max_lines=3,
+                (2, 2, width - 4, usable_h // 3),
+                max_font=14, max_lines=1,
             )
+            self._paste_label(
+                img, value_text, text_color,
+                (2, usable_h // 3 + 2, width - 4,
+                 max(0, usable_h - usable_h // 3 - 4)),
+                max_font=max(16, usable_h // 3), max_lines=1,
+            )
+
+        elif label or value_text:
+            # Single text — wrapped and shrunk to fill the key.
+            pad = max(2, width // 12)
+            self._paste_label(
+                img, label or value_text, text_color,
+                (pad, pad, width - 2 * pad, usable_h - 2 * pad),
+                max_font=max(14, usable_h // 4), max_lines=3,
+            )
+
+        if meter:
+            frac, color = meter
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([3, height - 8, width - 4, height - 3], fill="#2a2a3e")
+            fill_w = int((width - 7) * frac)
+            if fill_w > 0:
+                draw.rectangle([3, height - 8, 3 + fill_w, height - 3], fill=color)
 
         return img
 
@@ -2777,6 +3052,10 @@ class StreamDeckPlugin:
         session.auto_page_keys = set()
 
         for btn in page_buttons + global_buttons:
+            # Live display sources (entry level, like label/icon)
+            for field in ("label_source", "value_source"):
+                if btn.get(field):
+                    watch_keys.add(btn[field])
             bindings = btn.get("bindings", {})
             if isinstance(bindings, dict):
                 # Feedback key
@@ -2810,6 +3089,9 @@ class StreamDeckPlugin:
                     for field in ("label_source", "value_source"):
                         if zone.get(field):
                             session.touch_strip_keys.add(zone[field])
+                    zone_fb = zone.get("feedback")
+                    if isinstance(zone_fb, dict) and zone_fb.get("key"):
+                        session.touch_strip_keys.add(zone_fb["key"])
         dials = cfg.get("dials", [])
         if isinstance(dials, list):
             for dial in dials:
@@ -2819,15 +3101,16 @@ class StreamDeckPlugin:
                         session.touch_strip_keys.add(adjust["key"])
         watch_keys |= session.touch_strip_keys
 
-        # Info-strip key (tracked separately — a change re-renders the strip)
+        # Info-strip keys (tracked separately — a change re-renders the strip)
         session.info_strip_keys = set()
         info_strip = cfg.get("info_strip")
-        if (
-            isinstance(info_strip, dict)
-            and info_strip.get("source", "state") == "state"
-            and info_strip.get("key")
-        ):
-            session.info_strip_keys.add(info_strip["key"])
+        for element in self._info_strip_items(info_strip, 0):
+            for field in ("label_source", "value_source"):
+                if element.get(field):
+                    session.info_strip_keys.add(element[field])
+            item_fb = element.get("feedback")
+            if isinstance(item_fb, dict) and item_fb.get("key"):
+                session.info_strip_keys.add(item_fb["key"])
         watch_keys |= session.info_strip_keys
 
         # Auto-brightness rule keys (tracked separately — a change re-applies
@@ -2890,9 +3173,14 @@ class StreamDeckPlugin:
                 await self._change_page(session, target)
                 return  # _change_page re-rendered the whole new page
 
-        # Touchscreen strip shows live values — re-render it on change
+        # Touchscreen strip shows live values — schedule a debounced redraw
+        # of just the zones that watch this key (partial-region update).
         if key in session.touch_strip_keys:
-            await self._render_touchscreen(session)
+            zones = [
+                i for i, z in enumerate(self._touch_zones(session))
+                if self._zone_watches_key(z, key)
+            ]
+            self._schedule_strip_render(session, zones or None)
 
         # Info strip shows a live value — re-render it on change
         if key in session.info_strip_keys:
@@ -2920,10 +3208,29 @@ class StreamDeckPlugin:
             to_render.append(btn)
 
         for btn in to_render:
-            if self._binding_watches_key(btn.get("bindings", {}), key):
+            if self._button_watches_key(btn, key):
                 key_index = btn.get("index")
                 if key_index is not None:
                     await self._render_button(session, key_index)
+
+    @staticmethod
+    def _zone_watches_key(zone, key):
+        """True when a zone's rendering depends on a state key."""
+        if key in (zone.get("label_source"), zone.get("value_source")):
+            return True
+        feedback = zone.get("feedback")
+        if isinstance(feedback, dict) and feedback.get("key") == key:
+            return True
+        drag = zone.get("drag_adjust")
+        return isinstance(drag, dict) and drag.get("key") == key
+
+    @classmethod
+    def _button_watches_key(cls, btn, key):
+        """True when a button entry's rendering depends on a state key
+        (entry-level live sources or its binding's watch keys)."""
+        if key in (btn.get("label_source"), btn.get("value_source")):
+            return True
+        return cls._binding_watches_key(btn.get("bindings", {}), key)
 
     @staticmethod
     def _binding_watches_key(bindings, key):
