@@ -1905,6 +1905,42 @@ async def test_flash_key_writes_white_then_restores(monkeypatch):
     assert len(session.deck.key_images) >= writes_before
 
 
+# ──── Hot config apply (on_config_changed) ────
+
+
+@pytest.mark.asyncio
+async def test_on_config_changed_hot_applies_without_closing_decks(monkeypatch):
+    _patch_pil(monkeypatch)
+    config = {
+        "buttons": [{"index": 0, "page": 0, "bindings": {"feedback": {"key": "var.a"}}}],
+        "brightness": 70,
+        "max_pages": 10,
+    }
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._setup_feedback_subscriptions(session)
+    assert len(session.feedback_subs) == 1
+    session.current_page = 7
+
+    new_config = {
+        "buttons": [{"index": 1, "page": 0, "bindings": {"feedback": {"key": "var.b"}}}],
+        "brightness": 30,
+        "max_pages": 3,
+    }
+    plugin.api._update_config(new_config)
+    assert await plugin.on_config_changed(new_config) is True
+
+    # Re-subscribed against the new config view (one feedback key again).
+    assert len(session.feedback_subs) == 1
+    # Page clamped to the new max_pages.
+    assert session.current_page == 2
+    # Brightness re-applied from the new base level.
+    assert session.deck.brightness == 30
+    # The deck handle was never closed — no blank/reconnect flicker.
+    assert session.deck.closed is False
+
+
 # ──── Deck names ────
 
 

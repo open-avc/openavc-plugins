@@ -445,6 +445,20 @@ class MyPlugin:
         if self.connected:
             return {"status": "ok", "message": "Connected to broker"}
         return {"status": "error", "message": "Broker connection lost"}
+
+    async def on_config_changed(self, new_config):
+        """Optional. Hot-apply a config change without a restart.
+
+        Without this hook, saving config stops and restarts the plugin.
+        With it, the platform swaps self.api.config to the new values and
+        awaits the hook. Return True = handled (no restart); False or an
+        exception = the platform falls back to the normal restart. Define
+        it when a restart is disruptive (open hardware handles, live
+        connections) — rebuild subscriptions/renders from the new config
+        and keep the hardware open.
+        """
+        await self.rebuild_from_config()
+        return True
 ```
 
 ### 6.3 Lifecycle Flow
@@ -453,7 +467,7 @@ class MyPlugin:
 2. **Validation:** `PLUGIN_INFO` checked for required fields, valid capabilities, compatible license, platform support.
 3. **Enable:** User enables plugin in IDE. If required config fields lack defaults, a Setup Dialog appears.
 4. **Start:** `PluginAPI` created with declared capabilities. `start(api)` called.
-5. **Running:** Plugin responds to state changes, events, etc. Config changes trigger restart.
+5. **Running:** Plugin responds to state changes, events, etc. Config changes call `on_config_changed` when defined (hot apply); otherwise they trigger a restart.
 6. **Stop:** `stop()` called. All subscriptions, state keys, and background tasks automatically cleaned up.
 
 ### 6.4 Automatic Cleanup

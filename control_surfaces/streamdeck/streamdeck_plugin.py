@@ -396,7 +396,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.19.0",
+        "version": "1.20.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -774,6 +774,41 @@ class StreamDeckPlugin:
             models = ", ".join(f"{s.model} ({s.serial})" for s in connected)
             return {"status": "ok", "message": f"Connected: {models}"}
         return {"status": "degraded", "message": "No Stream Deck connected"}
+
+    async def on_config_changed(self, new_config):
+        """Hot-apply a config change without restarting (no USB churn).
+
+        The platform has already swapped ``self.api.config`` when this runs.
+        Each session rebuilds its subscriptions against the new config view,
+        clamps/re-evaluates its page, re-applies brightness, and re-renders —
+        physical deck handles are never closed, so the deck doesn't blank.
+        Virtual deck additions/removals reconcile on the next watchdog tick
+        (within seconds). Returning True tells the platform to skip the
+        stop/start restart.
+        """
+        for session in list(self._sessions.values()):
+            for sub_id in session.feedback_subs:
+                try:
+                    await self.api.state_unsubscribe(sub_id)
+                except Exception:
+                    pass
+            session.feedback_subs = []
+            await self._setup_feedback_subscriptions(session)
+
+            max_pages = self.api.config.get("max_pages", 10)
+            if session.current_page >= max_pages:
+                await self._change_page(session, max_pages - 1)
+            target = await self._evaluate_auto_page(session)
+            if target is not None and target != session.current_page:
+                await self._change_page(session, target)
+
+            await self._apply_active_brightness(session)
+            await self._render_all_buttons(session)
+            await self._render_touchscreen(session)
+            await self._render_info_strip(session)
+
+        await self._publish_deck_state()
+        return True
 
     # ──── Device Management ────
 

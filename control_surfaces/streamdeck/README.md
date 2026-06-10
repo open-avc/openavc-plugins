@@ -35,6 +35,8 @@ Use any Elgato Stream Deck as a physical control surface for OpenAVC. Assign mac
 
 A deck that's been customized separately (see Multiple Decks below) can override Brightness and the two colors just for itself — the **This deck's settings** row appears above the grid; blank values inherit the main settings.
 
+Configuration changes apply live: saving updates the running decks in place, so they never blank or reconnect while you edit.
+
 ## Configuring Buttons
 
 Use the **Surface Configurator** in the Programmer IDE:
