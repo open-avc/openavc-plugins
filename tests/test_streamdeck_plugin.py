@@ -1905,6 +1905,50 @@ async def test_flash_key_writes_white_then_restores(monkeypatch):
     assert len(session.deck.key_images) >= writes_before
 
 
+# ──── Input echo (last_input convention) ────
+
+
+@pytest.mark.asyncio
+async def test_input_echo_published_with_monotonic_seq():
+    config = {"buttons": [{"index": 0, "page": 0, "bindings": {"press": [
+        {"action": "macro", "macro": "m"}]}}]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin)
+
+    await plugin._on_key_change(session, None, 0, True)
+    assert state.get("plugin.streamdeck.unknown.last_input") == "key:0:1"
+    # Release is not an echo; a second press of the SAME key still changes
+    # state because the seq increments.
+    await plugin._on_key_change(session, None, 0, False)
+    assert state.get("plugin.streamdeck.unknown.last_input") == "key:0:1"
+    await plugin._on_key_change(session, None, 0, True)
+    assert state.get("plugin.streamdeck.unknown.last_input") == "key:0:2"
+
+
+@pytest.mark.asyncio
+async def test_input_echo_for_dials_and_touch():
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    session = _session_for(plugin, _FakePlusDeck())
+
+    await plugin._on_dial_event(session, None, 2, TURN, 1)
+    assert state.get("plugin.streamdeck.PLUS01.last_input") == "dial:2:1"
+    await plugin._on_dial_event(session, None, 2, PUSH, False)  # release: no echo
+    assert state.get("plugin.streamdeck.PLUS01.last_input") == "dial:2:1"
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 412, "y": 50})
+    assert state.get("plugin.streamdeck.PLUS01.last_input") == "touch:412:2"
+
+
+@pytest.mark.asyncio
+async def test_overlay_dismissing_input_is_not_echoed(monkeypatch):
+    _patch_pil(monkeypatch)
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    plugin._load_text_font()
+    session = _session_for(plugin, _FakeNeoDeck())
+    await plugin._show_message(session, "Hi", 5.0)
+    await plugin._on_key_change(session, None, 0, True)
+    assert state.get("plugin.streamdeck.NEO01.last_input") is None
+
+
 # ──── Macro run feedback on keys ────
 
 

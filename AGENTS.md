@@ -922,6 +922,8 @@ The actual layout may be detected from hardware at runtime. The static definitio
 - Accept a `simulate_input` context action (`{serial, type: key|dial_turn|dial_push|touch, index?, pressed?, amount?, x?}`) that dispatches into the same handler paths as hardware input, and a `set_live_mirror` action (`{on: bool}`) so physical units only pay the mirror cost while a Live View is open.
 - Software-only units are declared in config (`virtual_decks: [{model, serial}]` in the Stream Deck plugin), open through the normal session path, and publish `plugin.<id>.<serial>.virtual = true` so pickers can mark them.
 
+**Input echo:** publishing `plugin.<id>.<serial>.last_input = "<kind>:<index>:<seq>"` on each physical input (`key`/`dial`/`touch`; `seq` is a monotonic counter because the state store dedupes unchanged writes) lets the Surface Configurator flash the matching control while a user maps hardware to assignments.
+
 **Source reference for control surface implementation:** [`control_surfaces/streamdeck/streamdeck_plugin.py`](https://github.com/open-avc/openavc-plugins/blob/main/control_surfaces/streamdeck/streamdeck_plugin.py)
 
 ---

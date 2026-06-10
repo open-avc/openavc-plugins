@@ -388,6 +388,7 @@ class _DeckSession:
         self.macro_keys = {}            # macro_id -> {(page, key_index), ...}
         self.macro_marks = {}           # (page, key_index) -> running|done|error
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
+        self.input_seq = 0              # monotonic counter for the input echo
 
 
 class StreamDeckPlugin:
@@ -395,7 +396,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.17.0",
+        "version": "1.18.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -1353,6 +1354,9 @@ class StreamDeckPlugin:
                 await self._clear_overlay(session)
             return
 
+        if pressed:
+            await self._publish_input_echo(session, "key", key_index)
+
         page = session.current_page
 
         event_type = "press" if pressed else "release"
@@ -1599,6 +1603,8 @@ class StreamDeckPlugin:
             await self._clear_overlay(session)
             return  # the input that dismisses an overlay never fires actions
         kind = getattr(event, "name", None)
+        if kind == "TURN" or (kind == "PUSH" and value):
+            await self._publish_input_echo(session, "dial", dial)
         cfg = self._get_dial_config(session, dial)
 
         if kind == "PUSH":
@@ -1730,6 +1736,10 @@ class StreamDeckPlugin:
             await self._clear_overlay(session)
             return  # the input that dismisses an overlay never fires actions
         kind = getattr(event, "name", None)
+        if kind in ("SHORT", "LONG", "DRAG") and isinstance(value, dict):
+            touch_x = value.get("x")
+            if isinstance(touch_x, (int, float)):
+                await self._publish_input_echo(session, "touch", int(touch_x))
 
         if kind == "DRAG":
             if not isinstance(value, dict):
@@ -1950,6 +1960,18 @@ class StreamDeckPlugin:
         if session.idle_dimmed:
             session.idle_dimmed = False
             await self._apply_active_brightness(session)
+
+    async def _publish_input_echo(self, session, kind, index):
+        """Publish ``<serial>.last_input`` so the IDE can flash the control.
+
+        Format ``"<kind>:<index>:<seq>"`` — the monotonic seq makes repeated
+        presses of the same control still produce a state change (the state
+        store dedupes writes of an unchanged value).
+        """
+        session.input_seq += 1
+        await self.api.state_set(
+            f"{session.serial}.last_input", f"{kind}:{int(index)}:{session.input_seq}"
+        )
 
     # ──── Page Navigation ────
 
