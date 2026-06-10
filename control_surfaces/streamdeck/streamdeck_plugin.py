@@ -388,6 +388,7 @@ class _DeckSession:
         self.strip_image = None         # cached full-strip PIL render (partial updates)
         self.strip_render_task = None   # debounced strip-redraw task
         self.strip_dirty = None         # zone indexes pending redraw, or "all"
+        self.flash_zones = {}           # zone index -> clear timer (touch flash)
         self.macro_keys = {}            # macro_id -> {(page, key_index), ...}
         self.macro_marks = {}           # (page, key_index) -> running|done|error
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
@@ -399,7 +400,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.25.0",
+        "version": "1.26.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -771,6 +772,9 @@ class StreamDeckPlugin:
             if session.strip_render_task is not None:
                 session.strip_render_task.cancel()
                 session.strip_render_task = None
+            for handle in session.flash_zones.values():
+                handle.cancel()
+            session.flash_zones.clear()
             for handle in session.macro_clear_handles.values():
                 handle.cancel()
             session.macro_clear_handles.clear()
@@ -1106,6 +1110,9 @@ class StreamDeckPlugin:
             session.strip_render_task = None
         session.strip_image = None
         session.strip_dirty = None
+        for handle in session.flash_zones.values():
+            handle.cancel()
+        session.flash_zones.clear()
         session.overlay_active = False
         for handle in session.macro_clear_handles.values():
             handle.cancel()
@@ -1805,14 +1812,26 @@ class StreamDeckPlugin:
                 cfg = self._get_dial_config(session, i) or {}
                 adjust = cfg.get("adjust")
                 adjust = adjust if isinstance(adjust, dict) else {}
+                drag = None
+                if adjust.get("key"):
+                    drag = dict(adjust)
+                    if cfg.get("fader"):
+                        drag["fader"] = True
                 zones.append({
                     "label": cfg.get("label", ""),
                     "icon": cfg.get("icon"),
                     "unit": cfg.get("unit"),
                     "meter": cfg.get("meter"),
                     "value_source": adjust.get("key", ""),
+                    # The zone is the dial's touch surface: tapping it presses
+                    # the dial unless the dial declares its own touch actions.
+                    "touch": cfg.get("touch") if cfg.get("touch") is not None
+                    else cfg.get("press"),
+                    "long_touch": cfg.get("long_touch")
+                    if cfg.get("long_touch") is not None
+                    else cfg.get("long_press"),
                     # Swiping under a dial does what turning it does.
-                    "drag_adjust": dict(adjust) if adjust.get("key") else None,
+                    "drag_adjust": drag,
                 })
 
         if not zones:
@@ -1825,7 +1844,7 @@ class StreamDeckPlugin:
             w = zone.get("w")
             x = int(x) if isinstance(x, (int, float)) else i * slot
             w = int(w) if isinstance(w, (int, float)) else slot
-            resolved.append({**zone, "x": x, "w": w})
+            resolved.append({**zone, "x": x, "w": w, "index": i})
         return resolved
 
     def _zone_at(self, session, x):
@@ -1834,6 +1853,56 @@ class StreamDeckPlugin:
             if zone["x"] <= x < zone["x"] + zone["w"]:
                 return zone
         return None
+
+    async def _apply_touch_fader(self, drag, zone, x_px):
+        """Set a drag_adjust value absolutely from a touch position.
+
+        A fader zone maps the touched fraction of its width linearly onto
+        min..max (snapped to the step grid). Returns True when applied;
+        False (with a debug log) when the bounds are missing, so the caller
+        can fall back to relative stepping.
+        """
+        minimum = _coerce_numeric(drag.get("min"))
+        maximum = _coerce_numeric(drag.get("max"))
+        if minimum is None or maximum is None or maximum <= minimum:
+            self.api.log(
+                "Touch fader needs min and max on its adjust; ignoring touch",
+                level="debug",
+            )
+            return False
+        step = _coerce_numeric(drag.get("step"))
+        if step is None or step <= 0:
+            step = 1
+        zx = zone.get("x", 0)
+        zw = max(1, zone.get("w", 1))
+        frac = max(0.0, min(1.0, (x_px - zx) / zw))
+        value = minimum + frac * (maximum - minimum)
+        value = minimum + round((value - minimum) / step) * step
+        value = max(minimum, min(maximum, value))
+        if float(value).is_integer():
+            value = int(value)
+        await self._apply_state_set(drag.get("key", ""), value)
+        return True
+
+    async def _flash_touch_zone(self, session, zone_index):
+        """Brief lighten + border flash on a touched zone.
+
+        The glass always acknowledges a touch, configured or not — the same
+        role the momentary press highlight plays on keys.
+        """
+        if not session.deck or not session.deck.is_visual():
+            return
+        old = session.flash_zones.pop(zone_index, None)
+        if old is not None:
+            old.cancel()
+        session.flash_zones[zone_index] = asyncio.get_running_loop().call_later(
+            0.15, self._end_zone_flash, session, zone_index
+        )
+        await self._render_strip_zone(session, zone_index)
+
+    def _end_zone_flash(self, session, zone_index):
+        session.flash_zones.pop(zone_index, None)
+        self._schedule_strip_render(session, [zone_index])
 
     async def _on_touchscreen_event(self, session, deck, event, value):
         """Handle a touchscreen tap, long-press, or drag.
@@ -1862,11 +1931,18 @@ class StreamDeckPlugin:
             if not isinstance(x, (int, float)) or not isinstance(x_out, (int, float)):
                 return
             zone = self._zone_at(session, int(x))
+            if zone:
+                await self._flash_touch_zone(session, zone["index"])
             drag = zone.get("drag_adjust") if zone else None
             if isinstance(drag, dict) and drag.get("key"):
-                detents = int((x_out - x) / 8)  # truncate toward zero
-                if detents:
-                    await self._apply_dial_adjust(drag, detents)
+                applied = False
+                if drag.get("fader"):
+                    # Fader zones: the swipe end position sets the value.
+                    applied = await self._apply_touch_fader(drag, zone, int(x_out))
+                if not applied:
+                    detents = int((x_out - x) / 8)  # truncate toward zero
+                    if detents:
+                        await self._apply_dial_adjust(drag, detents)
             return
 
         if kind not in ("SHORT", "LONG"):
@@ -1879,6 +1955,18 @@ class StreamDeckPlugin:
         )
         zone = self._zone_at(session, int(x))
         if zone:
+            await self._flash_touch_zone(session, zone["index"])
+            drag = zone.get("drag_adjust")
+            if (
+                kind == "SHORT"
+                and isinstance(drag, dict)
+                and drag.get("key")
+                and drag.get("fader")
+            ):
+                # Fader zones: a tap jumps the value to the tapped position
+                # (replaces the tap action for this zone).
+                if await self._apply_touch_fader(drag, zone, int(x)):
+                    return
             actions = zone.get("long_touch") if kind == "LONG" else None
             if not actions:
                 actions = zone.get("touch")
@@ -2095,6 +2183,16 @@ class StreamDeckPlugin:
                 draw.rectangle(
                     [zx + 8, height - 14, zx + 8 + fill_w, height - 7], fill=color
                 )
+
+        # Momentary touch flash (the strip's press highlight).
+        if zone.get("index") in session.flash_zones:
+            region = img.crop((zx, 0, zx + zw, height))
+            overlay = Image.new("RGB", region.size, (255, 255, 255))
+            img.paste(Image.blend(region, overlay, 0.22), (zx, 0))
+            draw.rectangle(
+                [zx + 1, 1, zx + zw - 2, height - 2],
+                outline=(255, 255, 255), width=2,
+            )
 
         if zx > 0:
             draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)

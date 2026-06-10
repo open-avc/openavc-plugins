@@ -1001,6 +1001,102 @@ async def test_touch_event_runs_zone_actions():
     assert macros.executed == ["zone_b"]
 
 
+@pytest.mark.asyncio
+async def test_default_zone_tap_mirrors_dial_press():
+    config = {"dials": [{
+        "index": 0, "label": "Volume",
+        "adjust": {"key": "var.volume", "min": 0, "max": 100},
+        "press": [{"action": "macro", "macro": "mute"}],
+    }]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, _FakePlusDeck())
+    # Tap in dial 0's zone (x 0-199): fires the dial's press actions.
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 50, "y": 50})
+    assert macros.executed == ["mute"]
+    # Long-press with nothing configured falls back the same way.
+    await plugin._on_touchscreen_event(session, None, _Evt("LONG"), {"x": 50, "y": 50})
+    assert macros.executed == ["mute", "mute"]
+    # An unconfigured dial's zone still fires nothing.
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 300, "y": 50})
+    assert macros.executed == ["mute", "mute"]
+
+
+@pytest.mark.asyncio
+async def test_default_zone_touch_override_beats_press():
+    config = {"dials": [{
+        "index": 0,
+        "press": [{"action": "macro", "macro": "mute"}],
+        "touch": [{"action": "macro", "macro": "tap_action"}],
+    }]}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, _FakePlusDeck())
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 50, "y": 50})
+    assert macros.executed == ["tap_action"]
+
+
+@pytest.mark.asyncio
+async def test_touch_fader_tap_and_drag_set_absolute():
+    config = {"touchscreen": {"zones": [{
+        "label": "Vol",
+        "drag_adjust": {
+            "key": "var.volume", "step": 5, "min": 0, "max": 100, "fader": True,
+        },
+    }]}}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, _FakePlusDeck())
+    # One full-width zone: tapping at 3/4 of it sets 75.
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 600, "y": 50})
+    assert state.get("var.volume") == 75
+    # Positions snap to the step grid.
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 423, "y": 50})
+    assert state.get("var.volume") == 55
+    # A drag lands on its end position (absolute), not relative detents.
+    await plugin._on_touchscreen_event(
+        session, None, TOUCH_DRAG, {"x": 600, "y": 50, "x_out": 0, "y_out": 50}
+    )
+    assert state.get("var.volume") == 0
+
+
+@pytest.mark.asyncio
+async def test_touch_fader_without_bounds_falls_back():
+    config = {"touchscreen": {"zones": [{
+        "drag_adjust": {"key": "var.volume", "step": 1, "fader": True},
+    }]}}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    state.set("var.volume", 50, source="test")
+    session = _session_for(plugin, _FakePlusDeck())
+    # Tap: without bounds a position can't map to a value; nothing fires.
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 600, "y": 50})
+    assert state.get("var.volume") == 50
+    # Drag falls back to relative stepping (80 px = 10 detents at step 1).
+    await plugin._on_touchscreen_event(
+        session, None, TOUCH_DRAG, {"x": 100, "y": 50, "x_out": 180, "y_out": 50}
+    )
+    assert state.get("var.volume") == 60
+
+
+@pytest.mark.asyncio
+async def test_touch_flash_marks_zone_and_clear_redraws(monkeypatch):
+    import asyncio as _asyncio
+    config = {"touchscreen": {"zones": [{"label": "A"}, {"label": "B"}]}}
+    plugin, state, session, writes = _strip_render_rig(monkeypatch, config)
+    await plugin._render_touchscreen(session)
+    writes.clear()
+
+    await plugin._flash_touch_zone(session, 1)
+    assert 1 in session.flash_zones
+    # The flash painted zone 1 immediately (partial write at its x offset).
+    assert writes and writes[-1][1] == 400
+    session.flash_zones[1].cancel()
+
+    writes.clear()
+    plugin._end_zone_flash(session, 1)
+    assert 1 not in session.flash_zones
+    # The clear scheduled a redraw of the same zone.
+    await _asyncio.wait_for(session.strip_render_task, timeout=2)
+    assert writes and writes[-1][1] == 400
+
+
 def test_meter_resolution_rules():
     plugin, _state = _make_plugin({})
     # Explicit meter with explicit bounds.
