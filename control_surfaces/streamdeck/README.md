@@ -49,6 +49,8 @@ Use the **Surface Configurator** in the Programmer IDE:
    - **Visibility** -- optionally hide the button unless a state condition is met
 4. Use **page tabs** to set up multiple pages of buttons
 
+The assignment panel's **Arrange** row copies, pastes, moves, or swaps button assignments between keys and pages, and the **&#8943;** menu next to the page tabs duplicates a whole page to the first empty one or clears it.
+
 ### Button Modes
 
 | Mode | Behavior | Use Case |
