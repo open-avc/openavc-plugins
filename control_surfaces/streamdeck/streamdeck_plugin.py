@@ -392,7 +392,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.15.0",
+        "version": "1.16.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "category": "control_surface",
@@ -591,9 +591,14 @@ class StreamDeckPlugin:
         "needed). To customize, set a top-level 'touchscreen' object: "
         "{\"zones\": [{\"label\": \"Mics\", \"value_source\": \"var.mic_gain\", "
         "\"label_source\": \"(optional state key)\", \"touch\": [actions], "
+        "\"long_touch\": [actions], \"drag_adjust\": {\"key\": \"var.x\", "
+        "\"step\": 1, \"min\": 0, \"max\": 100}, "
         "\"bg_color\": \"#1a1a2e\", \"text_color\": \"#e0e0e0\"}]}. Zones "
         "split the strip evenly (or set explicit 'x'/'w' pixel bounds, strip "
-        "is 800x100); 'touch' actions run when the zone is tapped."
+        "is 800x100); 'touch' runs on tap, 'long_touch' on long-press "
+        "(falls back to 'touch' when absent), and a horizontal swipe steps "
+        "'drag_adjust' like turning a dial. Default per-dial zones wire "
+        "drag_adjust to the dial's adjust automatically."
     )
 
     EXTENSIONS = {
@@ -1674,6 +1679,8 @@ class StreamDeckPlugin:
                 zones.append({
                     "label": cfg.get("label", ""),
                     "value_source": adjust.get("key", ""),
+                    # Swiping under a dial does what turning it does.
+                    "drag_adjust": dict(adjust) if adjust.get("key") else None,
                 })
 
         if not zones:
@@ -1697,14 +1704,37 @@ class StreamDeckPlugin:
         return None
 
     async def _on_touchscreen_event(self, session, deck, event, value):
-        """Handle a touchscreen tap: map the x position to a zone's actions."""
+        """Handle a touchscreen tap, long-press, or drag.
+
+        SHORT runs the zone's ``touch`` actions; LONG runs ``long_touch``
+        (falling back to ``touch`` when not configured). DRAG arrives as one
+        event carrying start and end x — a horizontal swipe adjusts the
+        zone's ``drag_adjust`` value like turning a dial (one detent per
+        8 px of travel).
+        """
         await self._note_input(session)
         if session.overlay_active:
             await self._clear_overlay(session)
             return  # the input that dismisses an overlay never fires actions
         kind = getattr(event, "name", None)
+
+        if kind == "DRAG":
+            if not isinstance(value, dict):
+                return
+            x = value.get("x")
+            x_out = value.get("x_out")
+            if not isinstance(x, (int, float)) or not isinstance(x_out, (int, float)):
+                return
+            zone = self._zone_at(session, int(x))
+            drag = zone.get("drag_adjust") if zone else None
+            if isinstance(drag, dict) and drag.get("key"):
+                detents = int((x_out - x) / 8)  # truncate toward zero
+                if detents:
+                    await self._apply_dial_adjust(drag, detents)
+            return
+
         if kind not in ("SHORT", "LONG"):
-            return  # DRAG is unused
+            return
         x = value.get("x") if isinstance(value, dict) else None
         if not isinstance(x, (int, float)):
             return
@@ -1713,8 +1743,11 @@ class StreamDeckPlugin:
         )
         zone = self._zone_at(session, int(x))
         if zone:
+            actions = zone.get("long_touch") if kind == "LONG" else None
+            if not actions:
+                actions = zone.get("touch")
             await self._execute_actions(
-                session, self._action_list(zone.get("touch")), "touchscreen"
+                session, self._action_list(actions), "touchscreen"
             )
 
     async def _render_touchscreen(self, session):

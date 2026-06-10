@@ -83,7 +83,7 @@ Dials keep their assignment on every button page.
 
 ### Touchscreen (Stream Deck +)
 
-By default the touch strip shows one zone per dial with the dial's label and the live value of its adjusted variable -- no setup needed. To take over the strip, add custom zones in the **Touchscreen** section below the grid. Each zone can show a label (static or from a state key), a live state value, custom colors, and run actions when tapped. Zones split the strip evenly, or set explicit pixel positions.
+By default the touch strip shows one zone per dial with the dial's label and the live value of its adjusted variable -- no setup needed. To take over the strip, add custom zones in the **Touchscreen** section below the grid. Each zone can show a label (static or from a state key), a live state value, custom colors, and run actions when tapped. A zone can also run separate **long-press actions**, and **swiping** across a zone can step a variable up and down like turning a dial (the default per-dial zones do this automatically with the dial's own variable). Zones split the strip evenly, or set explicit pixel positions.
 
 ### Touch Keys and Info Screen (Neo)
 

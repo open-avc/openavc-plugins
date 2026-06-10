@@ -1711,6 +1711,76 @@ async def test_set_live_mirror_toggles_physical_mirroring(monkeypatch):
     assert not any(k[0] == "NEO01" for k in plugin._mirror_blobs)
 
 
+# ──── Touchscreen long-press + drag-to-adjust ────
+
+
+TOUCH_LONG = _Evt("LONG")
+
+
+@pytest.mark.asyncio
+async def test_long_touch_runs_long_actions_with_tap_fallback():
+    config = {"touchscreen": {"zones": [
+        {"label": "A",
+         "touch": [{"action": "macro", "macro": "tap_a"}],
+         "long_touch": [{"action": "macro", "macro": "long_a"}]},
+        {"label": "B", "touch": [{"action": "macro", "macro": "tap_b"}]},
+    ]}}
+    plugin, _state, macros, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, _FakePlusDeck())
+
+    await plugin._on_touchscreen_event(session, None, TOUCH_LONG, {"x": 100, "y": 50})
+    assert macros.executed == ["long_a"]
+    # Zone B has no long_touch -> LONG falls back to its tap actions.
+    await plugin._on_touchscreen_event(session, None, TOUCH_LONG, {"x": 500, "y": 50})
+    assert macros.executed == ["long_a", "tap_b"]
+    # SHORT still runs tap actions, never long_touch.
+    await plugin._on_touchscreen_event(session, None, TOUCH_SHORT, {"x": 100, "y": 50})
+    assert macros.executed == ["long_a", "tap_b", "tap_a"]
+
+
+@pytest.mark.asyncio
+async def test_drag_adjusts_zone_value():
+    config = {"touchscreen": {"zones": [
+        {"label": "Vol", "drag_adjust": {"key": "var.volume", "step": 1, "min": 0, "max": 100}},
+    ]}}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, _FakePlusDeck())
+    state.set("var.volume", 50, source="test")
+
+    # 80 px right = 10 detents.
+    await plugin._on_touchscreen_event(
+        session, None, TOUCH_DRAG, {"x": 100, "y": 50, "x_out": 180, "y_out": 50})
+    assert state.get("var.volume") == 60
+    # 40 px left = -5 detents.
+    await plugin._on_touchscreen_event(
+        session, None, TOUCH_DRAG, {"x": 400, "y": 50, "x_out": 360, "y_out": 50})
+    assert state.get("var.volume") == 55
+    # Sub-8px travel is a no-op.
+    await plugin._on_touchscreen_event(
+        session, None, TOUCH_DRAG, {"x": 100, "y": 50, "x_out": 105, "y_out": 50})
+    assert state.get("var.volume") == 55
+
+
+@pytest.mark.asyncio
+async def test_default_dial_zone_drag_follows_dial_adjust():
+    config = {"dials": [
+        {"index": 0, "label": "Volume",
+         "adjust": {"key": "var.volume", "step": 2, "min": 0, "max": 100}},
+    ]}
+    plugin, state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, _FakePlusDeck())
+    state.set("var.volume", 10, source="test")
+
+    # Swipe right under dial 0 (zone 0 spans x 0-199 on the default split).
+    await plugin._on_touchscreen_event(
+        session, None, TOUCH_DRAG, {"x": 50, "y": 50, "x_out": 90, "y_out": 50})
+    assert state.get("var.volume") == 20  # 5 detents x step 2
+    # An unconfigured dial's zone has no drag_adjust -> no-op.
+    await plugin._on_touchscreen_event(
+        session, None, TOUCH_DRAG, {"x": 250, "y": 50, "x_out": 350, "y_out": 50})
+    assert state.get("var.volume") == 20
+
+
 # ──── Automation actions: set_page / set_brightness / flash / show_message ────
 
 
