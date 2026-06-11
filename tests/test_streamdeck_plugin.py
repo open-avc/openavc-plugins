@@ -3193,8 +3193,9 @@ def test_net_device_feature_roundtrip_and_write_framing():
         data = dev.read_feature(0x06, 32)
         assert data[:1] == b"\x06" and data[5:12] == b"NETSN77"
         assert len(data) == 32
-        # Bridge identity via 0x80: vid/pid at payload offsets 12/14
-        assert dev.identify() == (0x0FD9, 0x00AA)
+        # Endpoint probe: 0x80 answered -> bridge/unit; vid/pid at 12/14
+        assert dev.probe_endpoint(timeout=3.0) == "primary"
+        assert (dev.vendor_id(), dev.product_id()) == (0x0FD9, 0x00AA)
         # hid write -> Cora WRITE|VERBATIM with the full report as payload
         dev.write(b"\x02\x07\x00\x01\x00\x00\x00\x00")
         import time as _time
@@ -3287,6 +3288,50 @@ def test_net_device_hotplug_device2_updates():
         assert dev.device2 is None and dev.device2_seen
     finally:
         dev.close()
+        dock.close()
+
+
+def _device2_payload(pid=0x0084, serial=b"PLUSSN9", port=20001):
+    payload = bytearray(130)
+    payload[0], payload[1], payload[4] = 0x01, 0x0B, 0x02
+    payload[26:28] = (0x0FD9).to_bytes(2, "little")
+    payload[28:30] = pid.to_bytes(2, "little")
+    payload[94:94 + len(serial) + 1] = serial + b"\x00"
+    payload[126:128] = port.to_bytes(2, "little")
+    return bytes(payload)
+
+
+def test_probe_endpoint_classifies_deck_port():
+    # The shape a real Network Dock advertises: the deck's own endpoint,
+    # which ignores 0x80 and answers the gen2 0x08 verbatim query.
+    dock = _FakeDock()
+    dock.feature_responses[0x08] = b"\x08" + b"\x00" * 31
+    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    try:
+        dev.connect(timeout=3.0)
+        assert dev.probe_endpoint(timeout=3.0) == "deck"
+    finally:
+        dev.close()
+        dock.close()
+
+
+def test_dock_link_deck_endpoint_identity_from_device2():
+    # Full link bring-up against a deck endpoint: identity comes from the
+    # Device-2 payload on the same socket; no second connection is dialed.
+    dock = _FakeDock()
+    dock.feature_responses[0x08] = b"\x08" + b"\x00" * 31
+    dock.feature_responses[0x1C] = _device2_payload(pid=0x0084, serial=b"PLUSSN9")
+    link = sd_module._DockLink("127.0.0.1", dock.port)
+    try:
+        link._connect_blocking()
+        assert link.is_deck_endpoint is True
+        assert link.child is None
+        assert link.primary.product_id() == 0x0084
+        assert link.observed_serial == "PLUSSN9"
+        live = link._live_transports()
+        assert live == [link.primary]
+    finally:
+        link.close()
         dock.close()
 
 
@@ -3422,7 +3467,7 @@ def test_net_reresolve_follows_serial_to_new_host():
     plugin.api.mdns_browse = fake_browse
     loop = __import__("asyncio").new_event_loop()
     try:
-        loop.run_until_complete(plugin._net_reresolve("192.0.2.9:5343", "SN42"))
+        loop.run_until_complete(plugin._net_reresolve("192.0.2.9:5343", {"SN42"}))
     finally:
         loop.close()
     assert saved["network_decks"][0]["host"] == "192.0.2.77"

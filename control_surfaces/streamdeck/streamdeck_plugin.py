@@ -674,12 +674,50 @@ class _NetDeckDevice:
         identity (0x80), Device 2 (0x1C), firmware/serial/MAC."""
         return self._get_report(bytes((0x03, report_id)), report_id, 0)
 
-    def identify(self):
-        """Read the unit's vendor/product id from the 0x80 report."""
-        payload = self.read_host_feature(0x80)
-        if len(payload) >= 16:
-            self._vid, self._pid = struct.unpack_from("<HH", payload, 12)
-        return self._vid, self._pid
+    def probe_endpoint(self, timeout=_NET_GET_TIMEOUT):
+        """Classify this endpoint: ``"primary"`` or ``"deck"``.
+
+        A unit/bridge endpoint (the dock's own port, a Studio's Ethernet
+        port) answers the 0x80 identity query; a deck endpoint (the docked
+        deck's dedicated TCP port — which is what docks advertise via
+        discovery) ignores 0x80 and answers the verbatim gen2 0x08 (or Mini
+        0xA1) query instead. All three are sent at once and the first answer
+        decides, mirroring the reference implementation. On "primary" the
+        unit's vid/pid are parsed from the 0x80 payload (offsets 12/14).
+        """
+        probes = {
+            0x80: (bytes((0x03, 0x80)), 0),
+            0x08: (bytes((0x08,)), _CORA_FLAG_VERBATIM),
+            0xA1: (bytes((0xA1,)), _CORA_FLAG_VERBATIM),
+        }
+        slots = {}
+        with self._pending_lock:
+            for rid in probes:
+                slots[rid] = [threading.Event(), None]
+                self._pending[rid] = slots[rid]
+        try:
+            for rid, (payload, flags) in probes.items():
+                if self._mode == "cora":
+                    self._send_raw(_cora_pack(
+                        flags, _CORA_OP_GET_REPORT, self._next_mid(), payload
+                    ))
+                else:
+                    self._send_raw(bytes(payload).ljust(_SDS_WRITE_LEN, b"\x00"))
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self._dead:
+                if slots[0x80][1] is not None:
+                    payload = slots[0x80][1]
+                    if len(payload) >= 16:
+                        self._vid, self._pid = struct.unpack_from("<HH", payload, 12)
+                    return "primary"
+                if slots[0x08][1] is not None or slots[0xA1][1] is not None:
+                    return "deck"
+                time.sleep(0.05)
+            raise _transport_error()("unit did not answer identification")
+        finally:
+            with self._pending_lock:
+                for rid in probes:
+                    self._pending.pop(rid, None)
 
     # ── the device interface the bundled library's classes consume ──
 
@@ -778,6 +816,10 @@ class _DockLink:
         self.fail_count = 0
         self.next_attempt = 0.0
         self.observed_serial = ""    # deck serial, once known (for re-resolve)
+        # True when the configured address IS a deck endpoint (docks
+        # advertise the docked deck's own port via discovery) — there is no
+        # separate child connection to manage in that case.
+        self.is_deck_endpoint = False
         self._connecting = False
         self._resolve_attempted = False
 
@@ -789,22 +831,44 @@ class _DockLink:
         self.child = None
 
     def _connect_blocking(self):
-        """Connect the primary, identify it, and bring up the child deck if
-        the unit reports one. Runs in an executor (blocking sockets)."""
-        primary = _NetDeckDevice(self.host, self.port, role="primary")
-        primary.link = self
-        primary.connect()
+        """Connect the configured endpoint, classify it, and bring up the
+        deck behind it. Runs in an executor (blocking sockets).
+
+        Two shapes exist in the field: the unit's bridge port (dock at its
+        base port, Studio Ethernet) where the deck arrives as a Device-2
+        child on a second connection — and the deck's own endpoint (the
+        port docks advertise via discovery), where this one socket IS the
+        deck and its identity comes from the Device-2 payload in place.
+        """
+        endpoint = _NetDeckDevice(self.host, self.port, role="primary")
+        endpoint.link = self
+        endpoint.connect()
         try:
-            primary.identify()
-            # Ask for the current child; docks answer, deck-units may not.
+            kind = endpoint.probe_endpoint()
+            if kind == "deck":
+                info = endpoint.device2
+                if info is None:
+                    payload = endpoint.read_host_feature(0x1C)
+                    info = _parse_device2(payload)
+                if info is None:
+                    raise _transport_error()("no deck present at this address")
+                endpoint._vid, endpoint._pid = info["vid"], info["pid"]
+                if info.get("serial"):
+                    self.observed_serial = info["serial"]
+                self.primary = endpoint
+                self.is_deck_endpoint = True
+                return
+            # Bridge/unit endpoint: learn the current child (docks answer;
+            # deck-units like the Studio may not have one attached).
             try:
-                primary.read_host_feature(0x1C)
+                endpoint.read_host_feature(0x1C)
             except Exception:
                 pass
         except Exception:
-            primary.close()
+            endpoint.close()
             raise
-        self.primary = primary
+        self.primary = endpoint
+        self.is_deck_endpoint = False
         self._connect_child_blocking()
 
     def _connect_child_blocking(self):
@@ -851,6 +915,12 @@ class _DockLink:
                 return []
             finally:
                 self._connecting = False
+            return self._live_transports()
+
+        # On a deck endpoint there is no child connection to manage — its
+        # Device-2 payload describes the deck on THIS socket, not a second
+        # port to dial.
+        if self.is_deck_endpoint:
             return self._live_transports()
 
         # Primary healthy: reconcile the child with the latest hotplug report.
@@ -1034,7 +1104,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.30.0",
+        "version": "1.31.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1908,7 +1978,12 @@ class StreamDeckPlugin:
                 "host": host,
                 "port": port,
                 "key": key,
+                # The deck's own serial (recorded after the first connect)
                 "serial": str(item.get("serial", "") or ""),
+                # The serial the unit advertises via discovery (recorded at
+                # add time) — for a dock this is the dock's serial, not the
+                # docked deck's, so re-resolve accepts either.
+                "mdns_sn": str(item.get("mdns_sn", "") or ""),
             })
         return entries
 
@@ -1947,16 +2022,20 @@ class StreamDeckPlugin:
             await self.api.state_set(f"net.{link.state_key}.status", link.status)
             if link.observed_serial and link.observed_serial != entry["serial"]:
                 serial_updates = True
-            known_serial = link.observed_serial or entry["serial"]
+            known_serials = {
+                s
+                for s in (link.observed_serial, entry["serial"], entry["mdns_sn"])
+                if s
+            }
             if (
-                known_serial
+                known_serials
                 and link.fail_count >= 3
                 and not link._resolve_attempted
                 and callable(getattr(self.api, "mdns_browse", None))
             ):
                 link._resolve_attempted = True
                 self.api.create_task(
-                    self._net_reresolve(key, known_serial),
+                    self._net_reresolve(key, known_serials),
                     name=f"net_reresolve_{link.state_key}",
                 )
         if serial_updates:
@@ -1992,9 +2071,10 @@ class StreamDeckPlugin:
             config["network_decks"] = updated
             await self.api.save_config(config)
 
-    async def _net_reresolve(self, key, serial):
-        """A configured deck stopped answering: browse discovery for its
-        serial and follow it to its new address."""
+    async def _net_reresolve(self, key, serials):
+        """A configured deck stopped answering: browse discovery for any of
+        its known serials (deck or advertised unit) and follow it to its
+        new address."""
         try:
             results = await self.api.mdns_browse([_NET_MDNS_SERVICE], duration=5.0)
         except Exception as e:
@@ -2002,7 +2082,7 @@ class StreamDeckPlugin:
             return
         for r in results:
             txt = r.get("txt") or {}
-            if str(txt.get("sn", "")) != serial:
+            if str(txt.get("sn", "")) not in serials:
                 continue
             new_host = r.get("ip")
             new_port = r.get("port") or _NET_DEFAULT_PORT
@@ -2028,8 +2108,8 @@ class StreamDeckPlugin:
                 updated.append(entry)
             if changed:
                 self.api.log(
-                    f"Network deck {serial} answered at {new_host}:{new_port} "
-                    f"(was {key}); following it"
+                    f"Network deck {str(txt.get('sn', ''))} answered at "
+                    f"{new_host}:{new_port} (was {key}); following it"
                 )
                 config = dict(self.api.config)
                 config["network_decks"] = updated
