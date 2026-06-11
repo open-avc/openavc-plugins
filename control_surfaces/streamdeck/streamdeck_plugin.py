@@ -723,10 +723,13 @@ class _NetDeckDevice:
             0x08: (bytes((0x08,)), _CORA_FLAG_VERBATIM),
             0xA1: (bytes((0xA1,)), _CORA_FLAG_VERBATIM),
         }
+        # One shared event: whichever probe the unit answers wakes the wait
+        # immediately (this runs on a connect worker thread, never the loop).
+        answered = threading.Event()
         slots = {}
         with self._pending_lock:
             for rid in probes:
-                slots[rid] = [threading.Event(), None]
+                slots[rid] = [answered, None]
                 self._pending[rid] = slots[rid]
         try:
             for rid, (payload, flags) in probes.items():
@@ -737,7 +740,7 @@ class _NetDeckDevice:
                 else:
                     self._send_raw(bytes(payload).ljust(_SDS_WRITE_LEN, b"\x00"))
             deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline and not self._dead:
+            while not self._dead:
                 if slots[0x80][1] is not None:
                     payload = slots[0x80][1]
                     if len(payload) >= 16:
@@ -745,7 +748,11 @@ class _NetDeckDevice:
                     return "primary"
                 if slots[0x08][1] is not None or slots[0xA1][1] is not None:
                     return "deck"
-                time.sleep(0.05)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not answered.wait(min(remaining, 0.25)):
+                    if remaining <= 0:
+                        break
+                answered.clear()
             raise _transport_error()("unit did not answer identification")
         finally:
             with self._pending_lock:
@@ -1137,7 +1144,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.32.0",
+        "version": "1.33.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
