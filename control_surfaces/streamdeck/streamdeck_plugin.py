@@ -855,7 +855,17 @@ class _DockLink:
         self.status = "connecting"
         self.fail_count = 0
         self.next_attempt = 0.0
-        self.observed_serial = ""    # deck serial, once known (for re-resolve)
+        # The deck's OWN serial, read from the opened deck (get_serial_number)
+        # — this is the deck's identity everywhere (card, state keys, the
+        # config entry's `serial`). Set only once the deck is open.
+        self.observed_serial = ""
+        # The serial the unit advertises over the wire / mDNS (Device-2
+        # payload). A Network Dock reports the deck under a DIFFERENT serial
+        # than the deck reports for itself (e.g. "A00WA6111J9SAM" vs
+        # "WA6111J9SAM"). This is an alias used ONLY for discovery re-resolve
+        # matching — it must never become the deck's identity, or the same
+        # physical deck shows up twice.
+        self.advertised_serial = ""
         # True when the configured address IS a deck endpoint (docks
         # advertise the docked deck's own port via discovery) — there is no
         # separate child connection to manage in that case.
@@ -893,8 +903,10 @@ class _DockLink:
                 if info is None:
                     raise _transport_error()("no deck present at this address")
                 endpoint._vid, endpoint._pid = info["vid"], info["pid"]
+                # The Device-2 serial is the unit's ADVERTISED alias, not the
+                # deck's own serial — keep it only for re-resolve matching.
                 if info.get("serial"):
-                    self.observed_serial = info["serial"]
+                    self.advertised_serial = info["serial"]
                 self.primary = endpoint
                 self.is_deck_endpoint = True
                 return
@@ -919,8 +931,9 @@ class _DockLink:
         child.link = self
         child.connect()
         child._vid, child._pid = info["vid"], info["pid"]
+        # Device-2 serial is the advertised alias (see _connect_blocking).
         if info.get("serial"):
-            self.observed_serial = info["serial"]
+            self.advertised_serial = info["serial"]
         self.child = child
 
     async def ensure(self, loop, log):
@@ -1144,7 +1157,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.33.0",
+        "version": "1.34.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -2057,6 +2070,8 @@ class StreamDeckPlugin:
                 link = _DockLink(entry["host"], entry["port"])
                 if entry["serial"]:
                     link.observed_serial = entry["serial"]
+                if entry["mdns_sn"]:
+                    link.advertised_serial = entry["mdns_sn"]
                 self._dock_links[key] = link
             transports = await link.ensure(self._loop, self.api.log)
             for transport in transports:
@@ -2066,11 +2081,22 @@ class StreamDeckPlugin:
                         new_decks.append(cls(transport))
             await self.api.state_set(f"net.{link.state_key}.address", key)
             await self.api.state_set(f"net.{link.state_key}.status", link.status)
-            if link.observed_serial and link.observed_serial != entry["serial"]:
+            if (
+                (link.observed_serial and link.observed_serial != entry["serial"])
+                or (link.advertised_serial and link.advertised_serial != entry["mdns_sn"])
+            ):
                 serial_updates = True
+            # Match discovery against every name this deck answers to: its own
+            # serial, the serial it advertises (the dock's alias), and any
+            # serials already recorded on the entry.
             known_serials = {
                 s
-                for s in (link.observed_serial, entry["serial"], entry["mdns_sn"])
+                for s in (
+                    link.observed_serial,
+                    link.advertised_serial,
+                    entry["serial"],
+                    entry["mdns_sn"],
+                )
                 if s
             }
             if (
@@ -2088,8 +2114,14 @@ class StreamDeckPlugin:
             await self._persist_network_serials()
 
     async def _persist_network_serials(self):
-        """Record each connected deck's serial on its ``network_decks`` entry
-        (so discovery can follow the deck if its address changes later)."""
+        """Record each deck's serials on its ``network_decks`` entry so
+        discovery can follow the deck if its address changes later.
+
+        ``serial`` is the deck's own serial (its identity everywhere);
+        ``mdns_sn`` is the serial the unit advertises (the dock's alias),
+        kept only for re-resolve matching. They are different strings for the
+        same deck — never collapse them, or the deck cards twice.
+        """
         raw = self.api.config.get("network_decks")
         if not isinstance(raw, list):
             return
@@ -2104,13 +2136,19 @@ class StreamDeckPlugin:
                 except (TypeError, ValueError):
                     port = _NET_DEFAULT_PORT
                 link = self._dock_links.get(f"{host}:{port}")
-                if (
-                    link
-                    and link.observed_serial
-                    and entry.get("serial") != link.observed_serial
-                ):
-                    entry["serial"] = link.observed_serial
-                    changed = True
+                if link:
+                    if (
+                        link.observed_serial
+                        and entry.get("serial") != link.observed_serial
+                    ):
+                        entry["serial"] = link.observed_serial
+                        changed = True
+                    if (
+                        link.advertised_serial
+                        and entry.get("mdns_sn") != link.advertised_serial
+                    ):
+                        entry["mdns_sn"] = link.advertised_serial
+                        changed = True
             updated.append(entry)
         if changed:
             config = dict(self.api.config)

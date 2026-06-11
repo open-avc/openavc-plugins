@@ -3334,12 +3334,57 @@ def test_dock_link_deck_endpoint_identity_from_device2():
         assert link.is_deck_endpoint is True
         assert link.child is None
         assert link.primary.product_id() == 0x0084
-        assert link.observed_serial == "PLUSSN9"
+        # The Device-2 serial is the ADVERTISED alias, not the deck's own
+        # identity — that comes later from get_serial_number in _open_deck.
+        assert link.advertised_serial == "PLUSSN9"
+        assert link.observed_serial == ""
         live = link._live_transports()
         assert live == [link.primary]
     finally:
         link.close()
         dock.close()
+
+
+def test_network_deck_serial_alias_does_not_flap_or_double_card():
+    # A Network Dock advertises the deck under one serial (Device-2 alias,
+    # e.g. A00WA6111J9SAM) while the deck reports another for itself
+    # (WA6111J9SAM). Reconnects must NOT overwrite the deck's own serial on
+    # the config entry with the alias — that flip-flop made the same deck
+    # appear as two cards. observed_serial (real) and advertised_serial
+    # (alias) are kept apart and persisted to separate fields.
+    plugin, _state, _m, _d = _make_plugin_with_recorders({
+        "network_decks": [{"host": "192.0.2.50", "port": 20001,
+                           "serial": "WA6111J9SAM", "mdns_sn": "A00WA6111J9SAM"}]
+    })
+    saved = {}
+
+    async def fake_save(config):
+        saved.update(config)
+        plugin.api._update_config(config)
+
+    plugin.api.save_config = fake_save
+    loop = __import__("asyncio").new_event_loop()
+    plugin._loop = loop
+
+    async def fake_ensure(self, _loop, _log):
+        # Simulate a reconnect: the connect path learned the advertised
+        # alias, but the deck isn't open yet so observed_serial is unset.
+        self.advertised_serial = "A00WA6111J9SAM"
+        self.status = "connected"
+        return []
+
+    original = sd_module._DockLink.ensure
+    sd_module._DockLink.ensure = fake_ensure
+    try:
+        loop.run_until_complete(plugin._reconcile_network_decks([]))
+    finally:
+        sd_module._DockLink.ensure = original
+        loop.close()
+
+    # The entry's own serial is untouched; the alias persisted separately.
+    entry = plugin.api.config["network_decks"][0]
+    assert entry["serial"] == "WA6111J9SAM"
+    assert entry["mdns_sn"] == "A00WA6111J9SAM"
 
 
 # ──── Network decks: config, reconcile, and routes ────
