@@ -492,6 +492,12 @@ class _NetDeckDevice:
         self._last_rx = 0.0
         self._connected_evt = threading.Event()
         self._write_lock = threading.Lock()
+        # Outbound frames are queued and sent by a dedicated writer thread:
+        # device writes are called from the asyncio event loop (renders), and
+        # a blocking sendall against a slow unit would stall the whole
+        # plugin — input handling included.
+        self._out = queue.Queue(maxsize=512)
+        self._writer = None
         self._inputs = queue.Queue(maxsize=256)
         self._pending = {}           # report_id -> [threading.Event, payload]
         self._pending_lock = threading.Lock()
@@ -522,6 +528,12 @@ class _NetDeckDevice:
             daemon=True,
         )
         self._reader.start()
+        self._writer = threading.Thread(
+            target=self._write_loop,
+            name=f"streamdeck-net-w-{self._host}:{self._port}",
+            daemon=True,
+        )
+        self._writer.start()
         ok = self._connected_evt.wait(timeout + 2.0)
         # The event also fires when the reader dies (so a connect against a
         # dead link never hangs) — success means alive AND mode detected.
@@ -640,11 +652,32 @@ class _NetDeckDevice:
     # ── shared send path ──
 
     def _send_raw(self, data):
-        sock = self._sock
-        if self._dead or sock is None:
+        if self._dead:
             raise OSError("network deck connection is closed")
-        with self._write_lock:
-            sock.sendall(data)
+        try:
+            self._out.put_nowait(bytes(data))
+        except queue.Full:
+            # The unit has stopped draining its socket faster than we can
+            # back off — the link is effectively dead. Dropping frames
+            # instead would corrupt multi-packet image streams.
+            self._dead = True
+            raise OSError("network deck stopped accepting data") from None
+
+    def _write_loop(self):
+        while not self._dead:
+            try:
+                data = self._out.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            sock = self._sock
+            if sock is None:
+                break
+            try:
+                with self._write_lock:
+                    sock.sendall(data)
+            except OSError:
+                break
+        self._dead = True
 
     def _next_mid(self):
         self._mid = (self._mid + 1) & 0xFFFFFF
@@ -1104,7 +1137,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.31.0",
+        "version": "1.32.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1581,6 +1614,12 @@ class StreamDeckPlugin:
         stop/start restart.
         """
         for session in list(self._sessions.values()):
+            # The config under any in-flight press just changed — end hold
+            # repeats now rather than trusting the (possibly re-bound)
+            # release to find them. A still-held key simply re-presses.
+            for task_id in list(session.hold_tasks.values()):
+                self.api.cancel_task(task_id)
+            session.hold_tasks.clear()
             for sub_id in session.feedback_subs:
                 try:
                     await self.api.state_unsubscribe(sub_id)
@@ -2496,9 +2535,26 @@ class StreamDeckPlugin:
         """Handle a physical button press/release with mode support."""
         await self._note_input(session)
 
+        # A release ALWAYS ends the press — no matter what changed between
+        # press and release (page flipped, buttons edited or deleted,
+        # overlay appeared, visibility changed). Skipping this is how keys
+        # get stuck visually pressed and how a hold-repeat task leaks and
+        # fires its action forever. Runs before every early return below.
+        if not pressed:
+            task_id = session.hold_tasks.pop(key_index, None)
+            if task_id:
+                self.api.cancel_task(task_id)
+            was_pressed = key_index in session.pressed_keys
+            session.pressed_keys.discard(key_index)
+            if was_pressed and session.deck and session.deck.is_visual():
+                try:
+                    await self._render_button(session, key_index)
+                except Exception:
+                    pass
+
         # A show_message overlay is dismissed by the first press, which is
         # swallowed (it must not fire the key's own action). The matching
-        # release is swallowed too (overlay just cleared; nothing was pressed).
+        # release is swallowed too (cleanup above already ran).
         if session.overlay_active:
             if pressed:
                 await self._clear_overlay(session)
@@ -2533,13 +2589,11 @@ class StreamDeckPlugin:
         # Momentary press highlight: mark the key as held and redraw. The mark
         # lives in the render path so a feedback/toggle re-render keeps the
         # highlight rather than fighting it; the redraw is a no-op without a
-        # visual deck.
+        # visual deck. (Release-side bookkeeping already ran above.)
         if pressed:
             session.pressed_keys.add(key_index)
-        else:
-            session.pressed_keys.discard(key_index)
-        if session.deck and session.deck.is_visual():
-            await self._render_button(session, key_index)
+            if session.deck and session.deck.is_visual():
+                await self._render_button(session, key_index)
 
         # Get press binding. The UI stores press as an array of actions; mode
         # and toggle/hold config live on the first entry, while a default tap
@@ -2569,10 +2623,8 @@ class StreamDeckPlugin:
                     interval_seconds=interval,
                     name=f"hold_repeat_{session.serial}_{key_index}",
                 )
-            else:
-                task_id = session.hold_tasks.pop(key_index, None)
-                if task_id:
-                    self.api.cancel_task(task_id)
+            # Release: the unconditional cleanup at the top already
+            # cancelled the task.
             return
 
         if mode == "toggle":

@@ -2491,9 +2491,16 @@ async def test_on_config_changed_hot_applies_without_closing_decks(monkeypatch):
         "brightness": 30,
         "page_names": {"1": "Audio"},
     }
+    # An in-flight hold-repeat must not survive a config swap.
+    session.hold_tasks[0] = plugin.api.create_periodic_task(
+        lambda: None, interval_seconds=999, name="stale_hold"
+    )
+
     plugin.api._update_config(new_config)
     assert await plugin.on_config_changed(new_config) is True
 
+    assert session.hold_tasks == {}
+    assert plugin.api._periodic_tasks == {}
     # Re-subscribed against the new config view (one feedback key again).
     assert len(session.feedback_subs) == 1
     # Page clamped to the pages that still exist (0..1).
@@ -3520,6 +3527,57 @@ def test_scan_route_degrades_without_mdns_browse():
     finally:
         loop.close()
     assert result == {"browse_available": False, "found": []}
+
+
+@pytest.mark.asyncio
+async def test_release_cancels_hold_even_when_buttons_deleted():
+    # Press a hold_repeat key, then delete the buttons (config edit / AI
+    # rewrite / page change all look the same to the release path). The
+    # release must still cancel the repeat and clear the press highlight —
+    # this is the "volume keeps going on its own" leak.
+    config = {
+        "buttons": [{
+            "index": 4, "page": 0,
+            "bindings": {"press": [{
+                "mode": "hold_repeat", "hold_repeat_ms": 50,
+                "action": "macro", "macro": "vol_down",
+            }]},
+        }],
+    }
+    plugin, _state, _m, _d = _make_plugin_with_recorders(config)
+    session = _session_for(plugin, None)
+    session.serial = "TESTDECK"
+
+    await plugin._on_key_change(session, None, 4, True)
+    assert 4 in session.hold_tasks
+    assert len(plugin.api._periodic_tasks) == 1
+    assert 4 in session.pressed_keys
+
+    plugin.api._update_config({"buttons": []})  # the button is gone now
+    await plugin._on_key_change(session, None, 4, False)
+
+    assert session.hold_tasks == {}
+    assert plugin.api._periodic_tasks == {}
+    assert 4 not in session.pressed_keys
+
+
+@pytest.mark.asyncio
+async def test_release_during_overlay_clears_press_state():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    session = _session_for(plugin, None)
+    session.serial = "TESTDECK"
+    session.overlay_active = True
+    session.pressed_keys.add(3)
+    session.hold_tasks[3] = plugin.api.create_periodic_task(
+        lambda: None, interval_seconds=999, name="stale_hold"
+    )
+
+    await plugin._on_key_change(session, None, 3, False)
+
+    assert 3 not in session.pressed_keys
+    assert session.hold_tasks == {}
+    assert plugin.api._periodic_tasks == {}
+    assert session.overlay_active is True  # release never dismisses it
 
 
 def test_test_route_validates_and_reports_refused():
