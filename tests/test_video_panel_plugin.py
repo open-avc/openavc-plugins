@@ -198,15 +198,17 @@ def test_plugin_info_manifest_shape():
 def test_video_stream_element_exposes_channel_field():
     # Runtime source switching: the Video Stream element must offer a `channel`
     # config field so an integrator can bind it to a selection key. The panel JS
-    # then follows plugin.video_panel.selection.<channel> at runtime. A free-text
-    # type (not select) is required — the channel name is author-defined.
+    # then follows plugin.video_panel.selection.<channel> at runtime. A
+    # single-line free-text type (not select) is required — the channel name is
+    # author-defined. ("string" is the single-line input; "text" now renders as
+    # a multi-line textarea in the panel-element Properties form.)
     element = next(
         e for e in VideoPanelPlugin.EXTENSIONS["panel_elements"]
         if e["type"] == "video_stream"
     )
     fields = {f["key"]: f for f in element["config_schema"]}
     assert "stream_id" in fields  # static source still present (the fallback)
-    assert fields["channel"]["type"] == "text"
+    assert fields["channel"]["type"] == "string"
 
 
 # ──── Probe parsing (pure) ────

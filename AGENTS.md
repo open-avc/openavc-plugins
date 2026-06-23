@@ -825,13 +825,12 @@ Plugins can provide custom HTML/CSS/JS UI elements for touch panels via iframes.
 EXTENSIONS = {
     "panel_elements": [
         {
-            "type": "status_display",           # Unique element type name
+            "type": "status_display",           # Unique type; also names the file: panel/status_display.html
             "label": "Status Display",          # Shown in Element Palette
             "renderer": "iframe",               # Only "iframe" supported
-            "renderer_url": "/plugins/{plugin_id}/panel/index.html",
             "default_size": {"col_span": 3, "row_span": 2},
             "config_schema": [
-                {"key": "title", "type": "text", "label": "Title", "default": "Status"},
+                {"key": "title", "type": "string", "label": "Title", "default": "Status"},
                 {"key": "state_key", "type": "state_key", "label": "State Key", "default": ""},
             ],
         },
@@ -841,13 +840,15 @@ EXTENSIONS = {
 
 ### 10.2 File Placement
 
-Place panel files in a `panel/` subdirectory within your plugin directory:
+Place panel files in a `panel/` subdirectory within your plugin directory. The
+panel loads `panel/<type>.html` for each element — the HTML file **must** be
+named to match the element's `type` (there is no separate URL field):
 
 ```
 my_plugin/
 ├── my_plugin_plugin.py
 └── panel/
-    ├── index.html
+    ├── status_display.html   # matches "type": "status_display"
     ├── style.css
     └── app.js
 ```
