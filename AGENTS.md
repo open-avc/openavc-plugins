@@ -692,7 +692,7 @@ Each param entry supports the following fields:
 | `default` | No | Initial value when a new step is added. |
 | `min`, `max`, `step` | No | Numeric input constraints. |
 | `options` | For `select` | Array of `{value, label}` for static dropdowns. |
-| `options_source` | For `select` | State key that holds a JSON list, populated dynamically by the plugin. Either `options` or `options_source` is required for `select`. |
+| `options_source` | For `select` | State key that holds a JSON list, populated dynamically by the plugin. The list may be plain strings (`["a","b"]`) or `{value, label}` objects. Either `options` or `options_source` is required for `select`. |
 
 Field types `text`, `integer`, `float`, and `select` also support **dynamic values**: a user can switch the field into "$var.foo" mode and the macro engine will resolve it from state at runtime before invoking the handler.
 
