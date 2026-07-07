@@ -1,7 +1,7 @@
 {
     "id": "present",
     "name": "Present",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "author": "OpenAVC",
     "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
     "category": "integration",

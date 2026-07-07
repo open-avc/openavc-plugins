@@ -100,6 +100,29 @@ has been interacted with, so a plain (non-kiosk) browser may show a **Tap for
 sound** button on the first share. Kiosk launchers can disable that policy
 (for Chromium: `--autoplay-policy=no-user-gesture-required`).
 
+## What to run a display on
+
+Any device with a modern browser works. In practice:
+
+- **A mini PC, stick PC, or Raspberry Pi** running Chromium in kiosk mode is
+  the simplest, most reliable choice, and what a permanent install should
+  use.
+- **Smart TVs and Android-based streaming sticks** (Android TV, Google TV,
+  Fire TV) can work when a real browser is installed on them. Browser
+  quality varies by model — test the exact device before committing a space
+  to it.
+- **Roku does not work.** It has no browser and no WebRTC support, so
+  nothing on it can open the Display page.
+- **Stream decoders and AV-over-IP receivers do not work as display
+  devices.** Boxes that ingest a stream URL (RTSP/SRT decoders) or that
+  decode only their paired transmitter have no browser to open the page
+  with.
+
+Present can still feed an existing video matrix or AV-over-IP system: run
+the Display page full screen on a small PC and connect that PC's HDMI
+output to a matrix input or an encoder/transmitter. Every screen on that
+system can then show the space's presentation like any other source.
+
 ## Routing
 
 Every display follows a source. `auto` means the active presenter — when one
@@ -122,12 +145,50 @@ Drive it like any matrix switcher:
 ## Space automation
 
 The point of wiring presentation into a control system: the space can react
-when someone shares. A state-change trigger on
-`plugin.present.active_presenters` rising above 0 can run a "Presentation On"
-macro — power the displays, switch inputs, set volume — and another on it
-returning to 0 can run "Presentation Off." A panel button can run a macro
-whose **Route Display** step pins a presenter to an overflow display: a
-matrix take with no matrix frame.
+when someone shares. The recipes below are built entirely in the Programmer —
+no scripting.
+
+### Presentation on and off
+
+Power the space up when the first screen appears; shut it down when the last
+one leaves.
+
+1. Build a **Presentation On** macro with the space's power-up steps — for
+   example, Device Command steps that power on the display and switch it to
+   the input showing Present, and one that sets the program volume.
+2. On the macro's **Triggers** tab, add a **State Change** trigger watching
+   `plugin.present.active_presenters` with operator **greater than** and
+   value `0`.
+3. Build a **Presentation Off** macro that reverses it, with a **State
+   Change** trigger on the same key, operator **equals**, value `0`. Give
+   this trigger a delay (with re-check) so a presenter's brief disconnect
+   doesn't shut the space down.
+
+The Off trigger fires exactly once, when the last presenter stops. The On
+trigger also re-fires when a second presenter joins while one is already
+sharing — the count changed and still matches. Normal power-up steps are
+harmless to run again; if the macro must run only for the very first
+presenter, wrap its steps in a **Conditional** on key `trigger.old_value`,
+operator **equals**, value `0` (a state-change trigger hands the macro the
+key's previous value), or set a cooldown on the trigger.
+
+### A panel button that routes the overflow display
+
+Pin one presenter to a secondary display while the main screen keeps
+following whoever presents — a matrix take with no matrix frame.
+
+1. Create a macro with a single **Route Display** step (in the Add Step
+   menu under **Plugin Actions**): Display = the overflow display,
+   Source = the presenter to pin. The Source dropdown lists the people
+   sharing right now, so pick from it while that person is live. To author
+   it ahead of time instead, use a **Set Variable** step targeting the
+   state key `plugin.present.display.<id>.source` with the presenter's
+   routable name (the `name` field in `plugin.present.presenters` — for
+   example `alice` for a guest who typed "Alice").
+2. In the UI Builder, add a **Button** to the panel page whose action runs
+   the macro.
+3. Add a second button whose Route Display step sets the same display back
+   to **Auto** — the "un-pin" take.
 
 ### State keys
 
