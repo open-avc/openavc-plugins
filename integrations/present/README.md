@@ -1,29 +1,38 @@
 # Present
 
 Wireless presentation for OpenAVC. A presenter shares a laptop screen from the
-browser over WebRTC, and it appears on the room display. The plugin bundles
+browser over WebRTC, and it appears on the space's displays. The plugin bundles
 [MediaMTX](https://github.com/bluenviron/mediamtx) as a local helper that
 ingests each presenter's screen and republishes it for playback. The helper's
 signaling listens on localhost only; displays and presenters reach it through
 the OpenAVC server.
 
-Each room gets a **Display page**: a full-screen web page that shows a connect
-card (room name, server address, and a rotating room code) when idle, and cuts
-to the presenter's screen when someone shares — then back to the card when they
-stop. Open it in a browser on whatever drives the room display: a mini PC, a
-stick PC, a smart TV with a real browser, or a spare tablet.
+The OpenAVC instance is the **space** — there is nothing to create beyond
+naming it. You add **displays**: each one is a full-screen web page that shows
+a connect card (space name, server address, and a rotating join code) when
+idle, and cuts to a presenter's screen when the routing sends one there — then
+back to the card. Open a display's link in a browser on whatever drives that
+screen: a mini PC, a stick PC, a smart TV with a real browser, or a spare
+tablet.
 
-> **Early release.** This version ships the room model, the Display page, and
-> the control-system state and events. The guest **share page** — where a
-> visitor types the room code and picks a screen to share, with no software
-> installed — is under active development. Until it ships, publishing to a room
-> requires a WebRTC (WHIP) publisher running on the OpenAVC server host, which
-> makes this release most useful for evaluating the display side and wiring up
-> room automation.
+Between presenters and displays sits **routing**, and it works like a matrix
+switcher with no frame: every display follows a source. `Auto` (the default)
+follows the active presenter, so a one-display space needs no routing setup at
+all. Pinning a presenter to a display sends that person's screen there — same
+source to many displays, different sources to different displays — from the
+plugin page, a macro step, a script, or a state key write.
+
+> **Early release.** This version ships the displays-and-routing model, the
+> Display page, and the control-system state, events, and routing verbs. The
+> guest **share page** — where a visitor types the join code and picks a screen
+> to share, with no software installed — is under active development. Until it
+> ships, publishing to the space requires a WebRTC (WHIP) publisher running on
+> the OpenAVC server host, which makes this release most useful for evaluating
+> the display side and wiring up automation.
 
 ## Requirements
 
-- A browser at the display (any modern one: Chrome, Edge, Firefox, Safari).
+- A browser at each display (any modern one: Chrome, Edge, Firefox, Safari).
   Devices that can only play a stream URL and devices without a browser are
   not supported by the Display page.
 - **Network:** WebRTC media travels over **UDP port 8190** directly between
@@ -35,43 +44,66 @@ stick PC, a smart TV with a real browser, or a spare tablet.
 The MediaMTX helper is downloaded automatically when the plugin is installed.
 No manual setup is required on Windows or Linux.
 
-## Rooms
+## Displays
 
-A room is one presentation space with its own display, join code, and state.
-Rooms are stored with the project. Each room has:
+A display is one routable output of the space. Displays are stored with the
+project and managed on the plugin's page in the Programmer. Each display has:
 
 | Field | Description |
 |-------|-------------|
-| Name | Friendly name shown on the display's connect card |
-| Room ID | Short unique identifier (lowercase, no spaces) |
-| Display link | The URL to open on the room display (see below) |
+| Name | Friendly name, e.g. "Main Screen" or "Overflow TV" |
+| Display ID | Short unique identifier (lowercase, no spaces) |
+| Display link | The URL to open on the device driving that screen (see below) |
+| Source | What it shows: `Auto` (follow the active presenter) or a pinned presenter |
 
-## Setting up a room display
+## Setting up a display
 
-1. Create a room in the **Present** section of the Programmer.
-2. Copy the room's **display link**. It includes a long display key that
-   authorizes that display — treat it like a password for the room's video.
-3. On the device driving the display, open the link in a browser, full screen
+1. Add a display on the **Present** plugin page in the Programmer.
+2. Copy its **display link**. It includes a long display key that authorizes
+   that one display — treat it like a password for the space's video.
+3. On the device driving the screen, open the link in a browser, full screen
    (double-click the page toggles fullscreen; kiosk mode is better for
    permanent installs).
 
 The display needs no OpenAVC login and survives server restarts — it keeps
-retrying until the server is back. If the link ever needs to be revoked (a
-device is lost, a link was shared too widely), use **Regenerate key** on the
-room; every old link stops working immediately.
+retrying until the server is back. If a link ever needs to be revoked (a
+device is lost, a link was shared too widely), use **Regenerate key** on that
+display; every old copy of its link stops working immediately, and the other
+displays are untouched.
 
 Audio plays when the browser allows it. Browsers block sound before the page
 has been interacted with, so a plain (non-kiosk) browser may show a **Tap for
 sound** button on the first share. Kiosk launchers can disable that policy
 (for Chromium: `--autoplay-policy=no-user-gesture-required`).
 
-## Room automation
+## Routing
 
-The point of wiring presentation into a control system: the room can react
+Every display follows a source. `auto` means the active presenter — when one
+person is sharing, every `auto` display shows them. Pinning a presenter to a
+display holds that person's screen there; a pinned presenter who isn't
+sharing shows the connect card (it does not fall through to someone else).
+Routing resets to `Auto` when the plugin restarts.
+
+Drive it like any matrix switcher:
+
+- **Plugin page:** each display row has a Source dropdown.
+- **Macro:** the **Route Display** step (under Plugin Actions) picks a display
+  and a source from dropdowns.
+- **Script:** `openavc.plugins.present.route("main_screen", "alice")` — use
+  `"auto"` to clear a pin.
+- **State key:** set `plugin.present.display.<id>.source` to a presenter name
+  or `auto` from a `state.set` macro step, a script, or the API. Writing an
+  empty value also clears the pin.
+
+## Space automation
+
+The point of wiring presentation into a control system: the space can react
 when someone shares. A state-change trigger on
-`plugin.present.<room>.active_presenters` rising above 0 can run a
-"Presentation On" macro — power the display, switch inputs, set volume — and
-another on it returning to 0 can run "Presentation Off."
+`plugin.present.active_presenters` rising above 0 can run a "Presentation On"
+macro — power the displays, switch inputs, set volume — and another on it
+returning to 0 can run "Presentation Off." A panel button can run a macro
+whose **Route Display** step pins a presenter to an overflow display: a
+matrix take with no matrix frame.
 
 ### State keys
 
@@ -80,30 +112,34 @@ another on it returning to 0 can run "Presentation Off."
 | `plugin.present.running` | boolean | Helper is up and responding |
 | `plugin.present.sidecar` | string | Helper process state: `starting`, `running`, `restarting`, `failed` |
 | `plugin.present.error` | string | Last fatal error message (empty when healthy) |
-| `plugin.present.rooms` | string | JSON list of `{id, label}` for configured rooms |
-| `plugin.present.<room>.code` | string | The join code currently shown on the room's connect card |
-| `plugin.present.<room>.output_state` | string | `idle` or `live` |
-| `plugin.present.<room>.active_presenters` | integer | How many presenters are currently sharing |
-| `plugin.present.<room>.presenters` | string | JSON list of `{name, since}` for current presenters |
+| `plugin.present.code` | string | The join code currently shown on every connect card |
+| `plugin.present.active_presenters` | integer | How many presenters are currently sharing |
+| `plugin.present.presenters` | string | JSON list of `{name, since}` for current presenters |
+| `plugin.present.displays` | string | JSON list of `{id, value, label}` for configured displays (feeds the Route Display dropdown) |
+| `plugin.present.sources` | string | JSON list of `{value, label}` routable sources: `auto` plus live presenters (feeds the Route Display dropdown) |
+| `plugin.present.display.<id>.source` | string | The routing assignment: `auto` or a presenter name. **Writable** — set it to route the display |
+| `plugin.present.display.<id>.showing` | string | Who the display is actually showing (empty = the connect card). Read-only; trigger on it |
+| `plugin.present.display.<id>.output_state` | string | `idle` or `live` |
 
 ### Events
 
 | Event | Payload | Description |
 |-------|---------|-------------|
-| `plugin.present.presenter_joined` | `{room, name}` | Someone started sharing |
-| `plugin.present.presenter_left` | `{room, name}` | Someone stopped sharing |
+| `plugin.present.presenter_joined` | `{name}` | Someone started sharing |
+| `plugin.present.presenter_left` | `{name}` | Someone stopped sharing |
+| `plugin.present.route_changed` | `{display, source}` | A display's routing assignment changed |
 | `plugin.present.error` | `{reason}` | The helper failed repeatedly and stopped restarting |
 
-Event-triggered macros can read the payload with `$trigger.room` and
-`$trigger.name`.
+Event-triggered macros can read the payload with `$trigger.name`,
+`$trigger.display`, and `$trigger.source`.
 
-## The room code
+## The join code
 
-The connect card shows a short room code that rotates when a presentation
-ends and periodically while the room is idle, so a code seen during one
-meeting can't be reused for the next. In this release the code is shown on
-the display; the guest share flow that asks for it is part of the upcoming
-share page.
+Every connect card shows the space's join code. It rotates when a
+presentation ends and periodically while the space is idle, so a code seen
+during one meeting can't be reused for the next. In this release the code is
+shown on the displays; the guest share flow that asks for it is part of the
+upcoming share page.
 
 ## Troubleshooting
 
@@ -111,12 +147,15 @@ share page.
   the System Log. If the binary is missing, reinstall the plugin so its
   components download again.
 - **Display shows "This display link isn't valid":** The key in the URL is
-  wrong or was regenerated. Copy the room's display link again from the
-  Programmer.
+  wrong or was regenerated. Copy the display's link again from the plugin
+  page.
 - **Display shows "Reconnecting to OpenAVC…":** The display can't reach the
   OpenAVC server — server down or network issue. It recovers on its own.
 - **Video connects but never appears on another device:** Make sure UDP port
   8190 is open between the display's network and the server.
+- **A display stays on the connect card while someone is sharing:** Check its
+  Source — a pinned presenter who isn't sharing shows the card. Set it back
+  to `Auto` to follow whoever presents.
 - **Sound is missing:** Look for the **Tap for sound** button (autoplay
   policy), and check that the presenter's browser is actually capturing audio
   — screen-share audio support varies by browser and OS.

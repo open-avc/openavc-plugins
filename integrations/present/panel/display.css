@@ -1,4 +1,4 @@
-/* Present Display page — fullscreen room display surface.
+/* Present Display page — one display's fullscreen output surface.
    Idle "connect" card and live video. Dark with the OpenAVC sage accent;
    system font stack so it renders identically on an offline LAN. */
 
@@ -20,7 +20,7 @@ html, body {
   height: 100%;
   object-fit: contain;
   background: #000;
-  cursor: none; /* a pointer parked on the room display looks broken */
+  cursor: none; /* a pointer parked on a display looks broken */
 }
 
 /* ──── Idle card ──── */
@@ -43,11 +43,20 @@ html, body {
   max-width: 80vw;
 }
 
-.room-label {
+.space-name {
   font-size: clamp(1.6rem, 4vw, 3.2rem);
   font-weight: 600;
   letter-spacing: 0.01em;
   margin-bottom: 6vh;
+}
+
+/* Which display this link is — matters once a space has more than one. */
+.display-badge {
+  position: absolute;
+  left: 2vw;
+  bottom: 3vh;
+  font-size: clamp(0.8rem, 1.4vw, 1.1rem);
+  opacity: 0.45;
 }
 
 .join-hint {

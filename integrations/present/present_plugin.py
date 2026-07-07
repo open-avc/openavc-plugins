@@ -1,20 +1,29 @@
 """Present plugin for OpenAVC — wireless BYOD presentation.
 
 A guest shares a laptop screen from the browser (WebRTC/WHIP, no install) and
-it appears on the room display. The plugin bundles MediaMTX as a sidecar that
-ingests each presenter's screen and republishes it as browser-playable WebRTC
-(WHEP). A room's display runs the plugin's standalone Display page: an idle
-"connect" card (room name, server address, join code) that cuts to the live
+it appears on the space's displays. The plugin bundles MediaMTX as a sidecar
+that ingests each presenter's screen and republishes it as browser-playable
+WebRTC (WHEP). Each display runs the plugin's standalone Display page: an idle
+"connect" card (space name, server address, join code) that cuts to the routed
 presenter and back, driven by a 2-second status poll.
 
-Because a room display has no OpenAVC login — it may be a bare browser on a
-mini PC, a stick PC, or a TV — the Display page and its API ride the plugin's
-guest routes (``/api/plugins/present/guest/*``), gated by a persistent
-per-room display key carried in the Display URL. Rooms and their keys are
-managed from the Programmer IDE through the authed ``/ext`` routes.
+The space is the OpenAVC instance itself — one join code, nothing to create.
+Displays are the routable outputs, presenters are the inputs, and the routing
+between them behaves like an internal matrix switcher: every display follows a
+source ("auto" = the active presenter, or a pinned presenter), drivable from
+macros (``present.route``), scripts (``openavc.plugins.present.route``), and
+writes to the ``plugin.present.display.<id>.source`` state key.
 
-This module owns the sidecar lifecycle, the rooms model, presence polling
-(state keys + events for room automation), and both HTTP routers.
+Because a display has no OpenAVC login — it may be a bare browser on a mini
+PC, a stick PC, or a TV — the Display page and its API ride the plugin's
+guest routes (``/api/plugins/present/guest/*``), gated by a persistent
+per-display key carried in the Display URL. Displays and their keys are
+managed from the plugin's page in the Programmer IDE through the authed
+``/ext`` routes.
+
+This module owns the sidecar lifecycle, the displays and routing model,
+presence polling (state keys + events for space automation), and both HTTP
+routers.
 """
 
 import asyncio
@@ -54,34 +63,44 @@ _WEBRTC_HOST = "127.0.0.1"
 _WEBRTC_PORT = 8890
 _WEBRTC_UDP_PORT = 8190
 _READY_TIMEOUT = 10.0
-# Presence poll cadence. Also the ceiling on how stale the Display page's
+# Presence poll cadence. Also the ceiling on how stale a Display page's
 # idle/live decision can be (it polls its status route at the same rate).
 _POLL_SECONDS = 2.0
 
 _MEDIAMTX_VERSION = "1.18.2"
 _SIDECAR_USER = "openavc"
 
-# Join code shown on the idle card. Rotates when a session ends (live -> idle)
-# and on a timer while idle, so a code seen on a display is always fresh.
-# Verification of the code happens with the guest Connect flow; until then it
-# is display-only.
+# Join code shown on every idle card. Rotates when the space's last presenter
+# leaves (session end) and on a timer while idle, so a code seen on a display
+# is always fresh. Verification of the code happens with the guest Connect
+# flow; until then it is display-only.
 _CODE_LENGTH = 4
 _CODE_ROTATE_SECONDS = 300.0
 
-# Room ids become MediaMTX path prefixes, state-key segments, and URL path
-# segments, so keep them to a portable, URL-safe character set.
-_ROOM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+# Presenters publish their screen to in/<presenter>; per-display encoder
+# outputs (stream displays, future) will live under out/<display>. The prefix
+# keeps the two namespaces apart on the sidecar.
+_INGEST_PREFIX = "in"
+
+# The routing value that means "follow the active presenter" rather than a
+# pinned one. Reserved everywhere a presenter or display name could collide
+# with it.
+_AUTO = "auto"
+
+# Display ids become state-key segments and URL path segments, so keep them to
+# a portable, URL-safe character set.
+_DISPLAY_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Presenter names arrive as the second segment of an ingest path
-# (<room>/<presenter>), chosen by the publisher; constrain before they're
-# spliced into proxied sidecar URLs.
+# (in/<presenter>), chosen by the publisher; constrain before they're spliced
+# into proxied sidecar URLs.
 _PRESENTER_RE = re.compile(r"[A-Za-z0-9._-]+")
 # WHEP session secrets are MediaMTX-minted UUIDs; constrain to a URL-safe set
 # before they're spliced into the proxied sidecar URL.
 _SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
 
-# Room ids that would collide with the plugin's own flat state keys
-# (plugin.present.rooms) or read confusingly in URLs.
-_RESERVED_ROOM_IDS = {"rooms", "status", "display", "whep"}
+# Display ids that would collide with the routing "auto" sentinel, the sidecar
+# path namespaces, or read confusingly in the guest URLs.
+_RESERVED_DISPLAY_IDS = {_AUTO, "display", "displays", "status", "whep", "in", "out"}
 
 _DISPLAY_ERROR_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Present</title>
@@ -94,18 +113,24 @@ _DISPLAY_ERROR_HTML = """<!doctype html>
 </style></head>
 <body><div class="card">
   <h1>This display link isn't valid</h1>
-  <p>The link may be incomplete, or the room's display key may have been
-  regenerated. Open the Present section in the OpenAVC Programmer and copy
-  the room's display link again.</p>
+  <p>The link may be incomplete, or the display's key may have been
+  regenerated. Open the Present plugin page in the OpenAVC Programmer and
+  copy the display's link again.</p>
 </div></body></html>
 """
 
 
-class RoomIn(BaseModel):
-    """Add/edit payload for a room. The IDE Present form posts this."""
+class DisplayIn(BaseModel):
+    """Add/edit payload for a display. The plugin page's form posts this."""
 
     label: str
-    room_id: str | None = None
+    display_id: str | None = None
+
+
+class RouteIn(BaseModel):
+    """Route payload: 'auto' or a presenter name."""
+
+    source: str
 
 
 class PresentPlugin:
@@ -113,9 +138,9 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "author": "OpenAVC",
-        "description": "Wireless presentation: share a laptop screen from the browser to the room display.",
+        "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
@@ -156,12 +181,58 @@ class PresentPlugin:
             },
         ],
         "usage": (
-            "Create a room in the Present section of the Programmer, then open "
-            "the room's display link in a browser on the device driving the "
-            "room display (full screen). The display shows a connect card with "
-            "the room's join code, and switches to the presenter's screen when "
-            "someone shares."
+            "Add a display on this plugin page, then open its display link in "
+            "a browser on the device driving that display (full screen). The "
+            "display shows a connect card with the space's join code, and "
+            "switches to the presenter's screen when someone shares. Route a "
+            "specific presenter to a display from this page, a macro's Route "
+            "Display step, or a script."
         ),
+    }
+
+    CONFIG_SCHEMA = {
+        "space_name": {
+            "type": "string",
+            "label": "Space Name",
+            "description": (
+                "Shown on every display's connect card. Leave blank to use "
+                "the project name."
+            ),
+            "default": "",
+        },
+    }
+
+    MACRO_ACTIONS = {
+        "present.route": {
+            "label": "Route Display",
+            "description": "Route a source (a presenter, or Auto) to a display.",
+            "icon": "monitor",
+            "handler": "action_route",
+            "params": [
+                {
+                    "key": "display",
+                    "type": "select",
+                    "label": "Display",
+                    "required": True,
+                    "options_source": "plugin.present.displays",
+                },
+                {
+                    "key": "source",
+                    "type": "select",
+                    "label": "Source",
+                    "required": True,
+                    "options_source": "plugin.present.sources",
+                    "description": "Auto follows the active presenter; a name pins that presenter.",
+                },
+            ],
+        },
+    }
+
+    SCRIPT_API = {
+        "route": {
+            "handler": "script_route",
+            "doc": "Route a source ('auto' or a presenter name) to a display.",
+        },
     }
 
     def __init__(self):
@@ -170,10 +241,11 @@ class PresentPlugin:
         self._mediamtx_bin = None
         self._auth_pass = ""
         self._config_path = None
-        self._rooms = []  # configured room dicts (the source of truth)
-        # Runtime, per room id:
-        self._codes = {}  # room_id -> (code, rotated_at monotonic)
-        self._presence = {}  # room_id -> {presenter_name: since_epoch}
+        self._displays = []  # configured display dicts (the source of truth)
+        # Runtime:
+        self._routing = {}  # display_id -> "auto" | pinned presenter name
+        self._presence = {}  # presenter_name -> since_epoch
+        self._code = ("", 0.0)  # (join code, rotated_at monotonic)
 
     # ──── Lifecycle ────
 
@@ -219,14 +291,21 @@ class PresentPlugin:
             await self.api.state_set("running", True)
             self.api.register_router(self._build_ext_router())
             self.api.register_guest_router(self._build_guest_router())
-            await self._load_rooms()
-            await self._publish_rooms()
+            await self._load_displays()
+            self._rotate_code()
+            await self._publish_all()
+            # The routing state key is the matrix's write surface: macros
+            # (state.set), scripts, and the API drive it directly. Subscribe
+            # after the initial publish; our own writes no-op in the handler.
+            await self.api.state_subscribe(
+                "plugin.present.display.*.source", self._on_source_write
+            )
             self.api.create_periodic_task(
                 self._poll, interval_seconds=_POLL_SECONDS, name="presence_poll"
             )
             self.api.log(
                 f"Present started: MediaMTX {_MEDIAMTX_VERSION} on "
-                f"{_API_HOST}:{_API_PORT}, {len(self._rooms)} room(s)"
+                f"{_API_HOST}:{_API_PORT}, {len(self._displays)} display(s)"
             )
         except Exception:
             # Don't leave an orphaned sidecar if start() fails partway.
@@ -258,102 +337,199 @@ class PresentPlugin:
         await self.api.state_set("error", reason)
         await self.api.event_emit("error", {"reason": reason})
 
-    # ──── Rooms ────
+    # ──── Space ────
 
-    async def _load_rooms(self):
-        configured = self.api.config.get("rooms", [])
-        self._rooms = []
+    async def _space_name(self):
+        configured = (self.api.config.get("space_name") or "").strip()
+        if configured:
+            return configured
+        # Fall back to the loaded project's name (published by the engine).
+        return (await self.api.state_get("system.project_name")) or ""
+
+    def _rotate_code(self):
+        code = "".join(secrets.choice("0123456789") for _ in range(_CODE_LENGTH))
+        self._code = (code, time.monotonic())
+        return code
+
+    def _current_code(self):
+        return self._code[0]
+
+    # ──── Displays ────
+
+    async def _load_displays(self):
+        configured = self.api.config.get("displays", [])
+        self._displays = []
         if not isinstance(configured, list):
             return
         changed = False
-        for room in configured:
-            if not isinstance(room, dict):
+        for display in configured:
+            if not isinstance(display, dict):
                 continue
-            room_id = (room.get("id") or "").strip()
-            if not room_id or not _ROOM_ID_RE.fullmatch(room_id):
+            display_id = (display.get("id") or "").strip()
+            if not display_id or not _DISPLAY_ID_RE.fullmatch(display_id):
                 continue
-            # A room saved without a display key (hand-edited project file,
-            # older plugin version) gets one now so its Display URL works.
-            if not room.get("display_key"):
-                room["display_key"] = self._new_display_key()
+            if display_id in _RESERVED_DISPLAY_IDS:
+                continue
+            # A display saved without a key (hand-edited project file, older
+            # plugin version) gets one now so its Display URL works.
+            if not display.get("display_key"):
+                display["display_key"] = self._new_display_key()
                 changed = True
-            self._rooms.append(room)
+            self._displays.append(display)
         if changed:
-            await self._persist_rooms()
-        for room in self._rooms:
-            self._rotate_code(room["id"])
-            self._presence[room["id"]] = {}
+            await self._persist_displays()
+        # Routing is runtime state: every display comes up following the
+        # active presenter. Pins don't survive a restart (revisit if that
+        # proves sticky-worthy).
+        self._routing = {d["id"]: _AUTO for d in self._displays}
 
-    async def _persist_rooms(self):
-        """Write the current room list back to the project file via the platform."""
+    async def _persist_displays(self):
+        """Write the current display list back to the project file via the platform."""
         cfg = self.api.config  # a copy; safe to mutate
-        cfg["rooms"] = self._rooms
+        cfg["displays"] = self._displays
+        cfg.pop("rooms", None)  # pre-0.2.0 config carried a rooms list
         await self.api.save_config(cfg)
 
-    def _find_room(self, room_id):
-        for r in self._rooms:
-            if r.get("id") == room_id:
-                return r
+    def _find_display(self, display_id):
+        for d in self._displays:
+            if d.get("id") == display_id:
+                return d
         return None
 
-    def _unique_room_id(self, label):
+    def _unique_display_id(self, label):
         base = self._slugify(label)
-        rid = base
+        did = base
         n = 2
-        while self._find_room(rid) or rid in _RESERVED_ROOM_IDS:
-            rid = f"{base}_{n}"
+        while self._find_display(did) or did in _RESERVED_DISPLAY_IDS:
+            did = f"{base}_{n}"
             n += 1
-        return rid
+        return did
 
     @staticmethod
     def _slugify(label):
         slug = re.sub(r"[^a-z0-9]+", "_", (label or "").lower()).strip("_")
-        return slug or "room"
+        return slug or "display"
 
     @staticmethod
     def _new_display_key():
         return secrets.token_urlsafe(24)
 
-    def _rotate_code(self, room_id):
-        code = "".join(secrets.choice("0123456789") for _ in range(_CODE_LENGTH))
-        self._codes[room_id] = (code, time.monotonic())
-        return code
-
-    def _current_code(self, room_id):
-        entry = self._codes.get(room_id)
-        return entry[0] if entry else ""
-
-    def _display_path(self, room):
-        """Site-relative Display URL for a room; the IDE prepends the origin."""
+    def _display_path(self, display):
+        """Site-relative Display URL; the plugin page prepends the origin."""
         return (
-            f"/api/plugins/present/guest/display/{room['id']}"
-            f"?key={room.get('display_key', '')}"
+            f"/api/plugins/present/guest/display/{display['id']}"
+            f"?key={display.get('display_key', '')}"
         )
+
+    # ──── Routing (the internal matrix) ────
+
+    @staticmethod
+    def _normalize_source(source):
+        """Canonical routing value, or None when invalid.
+
+        Empty/None mean "auto" — writing '' to a display's source key clears
+        a pin, mirroring how an unset selection falls back elsewhere.
+        """
+        if source is None or source == "":
+            return _AUTO
+        if not isinstance(source, str):
+            return None
+        if source == _AUTO or _PRESENTER_RE.fullmatch(source):
+            return source
+        return None
+
+    def _resolve_source(self, display_id, live_names):
+        """The presenter this display should show ('' = the idle card).
+
+        "auto" follows the earliest-joined active presenter; a pinned
+        presenter who isn't sharing resolves to the idle card, not to
+        another presenter.
+        """
+        routed = self._routing.get(display_id, _AUTO)
+        if routed == _AUTO:
+            return self._earliest_presenter(live_names)
+        return routed if routed in live_names else ""
+
+    def _earliest_presenter(self, names):
+        if not names:
+            return ""
+        # A presenter the poll hasn't recorded yet sorts last, not first.
+        return min(sorted(names), key=lambda n: self._presence.get(n, float("inf")))
+
+    async def _route(self, display_id, source):
+        """The one matrix take, shared by every write surface (macro action,
+        script API, ext route, state-key writes). Raises ValueError with a
+        user-facing message on an unknown display or malformed source."""
+        display = self._find_display(display_id)
+        if display is None:
+            raise ValueError(f"No display with id '{display_id}'.")
+        normalized = self._normalize_source(source)
+        if normalized is None:
+            raise ValueError("Source must be 'auto' or a presenter name.")
+        if self._routing.get(display_id) == normalized:
+            return  # already routed there; not a change
+        self._routing[display_id] = normalized
+        await self.api.state_set(f"display.{display_id}.source", normalized)
+        await self.api.event_emit(
+            "route_changed", {"display": display_id, "source": normalized}
+        )
+        await self._publish_display(display_id, set(self._presence))
+
+    async def _on_source_write(self, key, value, old_value):
+        """Honor writes to plugin.present.display.<id>.source.
+
+        Fires for our own publishes too; those match the routing table and
+        return early. A cleared key (display removed) is not a route request.
+        """
+        parts = key.split(".")
+        if len(parts) != 5 or parts[2] != "display" or parts[4] != "source":
+            return
+        if value is None:
+            return
+        display_id = parts[3]
+        normalized = self._normalize_source(value)
+        if normalized is not None and normalized == self._routing.get(display_id):
+            return
+        try:
+            await self._route(display_id, value)
+        except ValueError as e:
+            self.api.log(f"rejected write to {key} ({value!r}): {e}", "warning")
+            # Put the truth back so the bad value doesn't linger in the store.
+            current = self._routing.get(display_id)
+            if current is not None:
+                await self.api.state_set(f"display.{display_id}.source", current)
+
+    async def action_route(self, params, _context):
+        await self._route((params.get("display") or "").strip(), params.get("source"))
+
+    async def script_route(self, display: str, source: str = _AUTO) -> None:
+        await self._route(display, source)
 
     # ──── Presence (sidecar paths -> state keys + events) ────
 
     async def _scan_presenters(self):
-        """Live presenters per room from the sidecar's path list.
+        """Live presenters from the sidecar's path list.
 
-        Ingest paths are named ``<room>/<presenter>`` by the publisher; a path
+        Ingest paths are named ``in/<presenter>`` by the publisher; a path
         counts once its stream is available. Returns ``None`` when the sidecar
-        API is unreachable, else ``{room_id: {presenter, ...}}``.
+        API is unreachable, else the set of live presenter names.
         """
         data = await self._api_get("/v3/paths/list")
         if data is None:
             return None
-        live = {}
+        live = set()
         for item in data.get("items", []):
             name = item.get("name") or ""
-            room_id, sep, presenter = name.partition("/")
-            if not sep or not presenter or self._find_room(room_id) is None:
+            prefix, sep, presenter = name.partition("/")
+            if prefix != _INGEST_PREFIX or not sep or not presenter:
                 continue
-            if not _PRESENTER_RE.fullmatch(presenter):
+            # "auto" is the routing sentinel, never a valid presenter.
+            if presenter == _AUTO or not _PRESENTER_RE.fullmatch(presenter):
                 continue
             # `ready` is deprecated in MediaMTX 1.18.x in favour of `available`.
             if not bool(item.get("available", item.get("ready", False))):
                 continue
-            live.setdefault(room_id, set()).add(presenter)
+            live.add(presenter)
         return live
 
     async def _poll(self):
@@ -363,37 +539,25 @@ class PresentPlugin:
             return
         await self.api.state_set("running", True)
         now = int(time.time())
-        for room in self._rooms:
-            room_id = room["id"]
-            current = live.get(room_id, set())
-            presence = self._presence.setdefault(room_id, {})
-            was_live = bool(presence)
+        was_live = bool(self._presence)
 
-            for name in sorted(current - set(presence)):
-                presence[name] = now
-                await self.api.event_emit(
-                    "presenter_joined", {"room": room_id, "name": name}
-                )
-            for name in sorted(set(presence) - current):
-                del presence[name]
-                await self.api.event_emit(
-                    "presenter_left", {"room": room_id, "name": name}
-                )
+        for name in sorted(live - set(self._presence)):
+            self._presence[name] = now
+            await self.api.event_emit("presenter_joined", {"name": name})
+        for name in sorted(set(self._presence) - live):
+            del self._presence[name]
+            await self.api.event_emit("presenter_left", {"name": name})
 
-            is_live = bool(presence)
-            code, rotated_at = self._codes.get(room_id, ("", 0.0))
-            if was_live and not is_live:
-                # Session ended: a code seen on the display during the meeting
-                # must not open the next one.
-                code = self._rotate_code(room_id)
-            elif not is_live and time.monotonic() - rotated_at > _CODE_ROTATE_SECONDS:
-                code = self._rotate_code(room_id)
+        is_live = bool(self._presence)
+        _code, rotated_at = self._code
+        if was_live and not is_live:
+            # Session ended: a code seen on the displays during the meeting
+            # must not open the next one.
+            self._rotate_code()
+        elif not is_live and time.monotonic() - rotated_at > _CODE_ROTATE_SECONDS:
+            self._rotate_code()
 
-            presenters = self._presenters_list(presence)
-            await self.api.state_set(f"{room_id}.presenters", json.dumps(presenters))
-            await self.api.state_set(f"{room_id}.active_presenters", len(presenters))
-            await self.api.state_set(f"{room_id}.output_state", "live" if is_live else "idle")
-            await self.api.state_set(f"{room_id}.code", code)
+        await self._publish_all()
 
     @staticmethod
     def _presenters_list(presence):
@@ -402,63 +566,79 @@ class PresentPlugin:
             for n, s in sorted(presence.items(), key=lambda kv: (kv[1], kv[0]))
         ]
 
-    def _pick_presenter(self, room_id, names):
-        """The presenter the Display shows: earliest joined, per presence."""
-        if not names:
-            return ""
-        presence = self._presence.get(room_id, {})
-        return min(sorted(names), key=lambda n: presence.get(n, float("inf")))
+    def _sources_options(self):
+        """The routable-source list, in the {value, label} shape the macro
+        builder's options_source picker parses."""
+        return [{"value": _AUTO, "label": "Auto (active presenter)"}] + [
+            {"value": p["name"], "label": p["name"]}
+            for p in self._presenters_list(self._presence)
+        ]
 
-    async def _publish_rooms(self):
-        """(Re)publish the room list and every room's current keys.
+    async def _publish_all(self):
+        """(Re)publish the space keys, the pick lists, and every display.
 
         Derives from the runtime presence bookkeeping, so re-publishing after
-        a room CRUD action never stomps a live room back to idle (which would
-        fire a spurious presentation-off trigger).
+        a display CRUD action never stomps a live display back to idle (which
+        would fire a spurious presentation-off trigger).
         """
+        presenters = self._presenters_list(self._presence)
+        await self.api.state_set("code", self._current_code())
+        await self.api.state_set("presenters", json.dumps(presenters))
+        await self.api.state_set("active_presenters", len(presenters))
+        # Entries carry value=id so the same key feeds the Route Display
+        # dropdown (options_source wants {value, label}).
         await self.api.state_set(
-            "rooms",
-            json.dumps([{"id": r["id"], "label": r.get("label") or r["id"]} for r in self._rooms]),
+            "displays",
+            json.dumps([
+                {"id": d["id"], "value": d["id"], "label": d.get("label") or d["id"]}
+                for d in self._displays
+            ]),
         )
-        for room in self._rooms:
-            room_id = room["id"]
-            presenters = self._presenters_list(self._presence.get(room_id, {}))
-            await self.api.state_set(f"{room_id}.code", self._current_code(room_id))
-            await self.api.state_set(f"{room_id}.presenters", json.dumps(presenters))
-            await self.api.state_set(f"{room_id}.active_presenters", len(presenters))
-            await self.api.state_set(f"{room_id}.output_state", "live" if presenters else "idle")
+        await self.api.state_set("sources", json.dumps(self._sources_options()))
+        live_names = set(self._presence)
+        for display in self._displays:
+            await self._publish_display(display["id"], live_names)
 
-    async def _clear_room_state(self, room_id):
-        for suffix in ("code", "presenters", "active_presenters", "output_state"):
-            await self.api.state_set(f"{room_id}.{suffix}", None)
-        self._codes.pop(room_id, None)
-        self._presence.pop(room_id, None)
+    async def _publish_display(self, display_id, live_names):
+        showing = self._resolve_source(display_id, live_names)
+        await self.api.state_set(
+            f"display.{display_id}.source", self._routing.get(display_id, _AUTO)
+        )
+        await self.api.state_set(f"display.{display_id}.showing", showing)
+        await self.api.state_set(
+            f"display.{display_id}.output_state", "live" if showing else "idle"
+        )
+
+    async def _clear_display_state(self, display_id):
+        for suffix in ("source", "showing", "output_state"):
+            await self.api.state_set(f"display.{display_id}.{suffix}", None)
+        self._routing.pop(display_id, None)
 
     # ──── Guest router (mounted at /api/plugins/present/guest/) ────
 
-    def _guest_room(self, room_id, key):
-        """Resolve a room for a guest call, or raise 401.
+    def _guest_display(self, display_id, key):
+        """Resolve a display for a guest call, or raise 401.
 
-        A missing room and a bad key both return 401 — guest callers learn
-        nothing about which room ids exist, and every failure feeds the
+        A missing display and a bad key both return 401 — guest callers learn
+        nothing about which display ids exist, and every failure feeds the
         platform rate limiter's brute-force accounting.
         """
-        room = None
-        if _ROOM_ID_RE.fullmatch(room_id or ""):
-            room = self._find_room(room_id)
+        display = None
+        if _DISPLAY_ID_RE.fullmatch(display_id or ""):
+            display = self._find_display(display_id)
         supplied = (key or "").strip()
-        expected = (room or {}).get("display_key") or ""
-        if room is None or not supplied or not secrets.compare_digest(supplied, expected):
+        expected = (display or {}).get("display_key") or ""
+        if display is None or not supplied or not secrets.compare_digest(supplied, expected):
             raise HTTPException(401, "Invalid or missing display key")
-        return room
+        return display
 
     def _build_guest_router(self):
         guest = APIRouter()
 
-        @guest.get("/display/{room_id}")
-        async def display_page(room_id: str, key: str = ""):
+        @guest.get("/display/{display_id}")
+        async def display_page(display_id: str, key: str = ""):
             try:
-                self._guest_room(room_id, key)
+                self._guest_display(display_id, key)
             except HTTPException:
                 # Friendly page for a human at the display, still a 401 so
                 # bad-key guessing throttles like any other guest failure.
@@ -466,21 +646,21 @@ class PresentPlugin:
             html = (_PLUGIN_DIR / "panel" / "display.html").read_text(encoding="utf-8")
             return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
-        @guest.get("/rooms/{room_id}/status")
-        async def room_status(room_id: str, key: str = ""):
-            room = self._guest_room(room_id, key)
+        @guest.get("/displays/{display_id}/status")
+        async def display_status(display_id: str, key: str = ""):
+            display = self._guest_display(display_id, key)
             live = await self._scan_presenters()
             if live is None:
                 raise HTTPException(503, "Media service is not running")
-            names = live.get(room["id"], set())
-            presenter = self._pick_presenter(room["id"], names)
+            presenter = self._resolve_source(display["id"], live)
             return {
-                "room": room["id"],
-                "label": room.get("label") or room["id"],
+                "display": display["id"],
+                "label": display.get("label") or display["id"],
+                "space_name": await self._space_name(),
                 "state": "live" if presenter else "idle",
                 "presenter": presenter,
-                "path": f"{room['id']}/{presenter}" if presenter else "",
-                "code": self._current_code(room["id"]),
+                "path": f"{_INGEST_PREFIX}/{presenter}" if presenter else "",
+                "code": self._current_code(),
             }
 
         # ── WHEP (WebRTC playback) reverse proxy ──
@@ -492,12 +672,12 @@ class PresentPlugin:
         # origin root, bypassing this mount. So we rewrite Location to sit
         # under the incoming request path — the trickle and teardown then come
         # back through here (and through the key check).
-        @guest.post("/whep/{room_id}/{presenter}")
-        async def whep_offer(room_id: str, presenter: str, request: Request, key: str = ""):
-            self._guest_room(room_id, key)
+        @guest.post("/whep/{display_id}/{presenter}")
+        async def whep_offer(display_id: str, presenter: str, request: Request, key: str = ""):
+            self._guest_display(display_id, key)
             self._validate_presenter(presenter)
             resp = await self.api.proxy_to(
-                self._whep_url(room_id, presenter), request, allow_internal=True
+                self._whep_url(presenter), request, allow_internal=True
             )
             location = resp.headers.get("location")
             if location:
@@ -505,38 +685,38 @@ class PresentPlugin:
                 resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
             return resp
 
-        @guest.patch("/whep/{room_id}/{presenter}/{secret}")
+        @guest.patch("/whep/{display_id}/{presenter}/{secret}")
         async def whep_trickle(
-            room_id: str, presenter: str, secret: str, request: Request, key: str = ""
+            display_id: str, presenter: str, secret: str, request: Request, key: str = ""
         ):
-            self._guest_room(room_id, key)
+            self._guest_display(display_id, key)
             self._validate_presenter(presenter)
             self._validate_secret(secret)
             return await self.api.proxy_to(
-                self._whep_url(room_id, presenter, secret), request, allow_internal=True
+                self._whep_url(presenter, secret), request, allow_internal=True
             )
 
-        @guest.delete("/whep/{room_id}/{presenter}/{secret}")
+        @guest.delete("/whep/{display_id}/{presenter}/{secret}")
         async def whep_teardown(
-            room_id: str, presenter: str, secret: str, request: Request, key: str = ""
+            display_id: str, presenter: str, secret: str, request: Request, key: str = ""
         ):
-            self._guest_room(room_id, key)
+            self._guest_display(display_id, key)
             self._validate_presenter(presenter)
             self._validate_secret(secret)
             return await self.api.proxy_to(
-                self._whep_url(room_id, presenter, secret), request, allow_internal=True
+                self._whep_url(presenter, secret), request, allow_internal=True
             )
 
         return guest
 
-    def _whep_url(self, room_id, presenter, secret=None):
+    def _whep_url(self, presenter, secret=None):
         """Build the localhost sidecar WHEP URL, with read creds in the userinfo.
 
         httpx turns the userinfo into a Basic ``Authorization`` header, which is
         how the sidecar's ``openavc`` (read/playback) user is authenticated.
         """
         cred = f"{_SIDECAR_USER}:{self._auth_pass}@" if self._auth_pass else ""
-        base = f"http://{cred}{_WEBRTC_HOST}:{_WEBRTC_PORT}/{room_id}/{presenter}/whep"
+        base = f"http://{cred}{_WEBRTC_HOST}:{_WEBRTC_PORT}/{_INGEST_PREFIX}/{presenter}/whep"
         return f"{base}/{secret}" if secret else base
 
     # ──── Ext router (authed, mounted at /api/plugins/present/ext/) ────
@@ -546,108 +726,118 @@ class PresentPlugin:
 
         @router.get("/status")
         async def status():
+            presenters = self._presenters_list(self._presence)
             return {
                 "running": bool(self._supervisor and self._supervisor.running),
                 "mediamtx_version": _MEDIAMTX_VERSION,
-                "room_ids": [r["id"] for r in self._rooms],
+                "space_name": await self._space_name(),
+                "code": self._current_code(),
+                "presenters": presenters,
+                "active_presenters": len(presenters),
+                "sources": self._sources_options(),
+                "display_ids": [d["id"] for d in self._displays],
             }
 
-        @router.get("/rooms")
-        async def list_rooms():
-            live = await self._scan_presenters() or {}
-            return [self._room_view(r, live) for r in self._rooms]
+        @router.get("/displays")
+        async def list_displays():
+            return [self._display_view(d) for d in self._displays]
 
-        @router.post("/rooms")
-        async def add_room(data: RoomIn):
+        @router.post("/displays")
+        async def add_display(data: DisplayIn):
             label = (data.label or "").strip()
             if not label:
-                raise HTTPException(422, "Room name is required.")
-            room_id = (data.room_id or "").strip() or self._unique_room_id(label)
-            self._validate_room_id(room_id)
-            if self._find_room(room_id):
-                raise HTTPException(409, f"A room with id '{room_id}' already exists.")
-            room = {"id": room_id, "label": label, "display_key": self._new_display_key()}
-            self._rooms.append(room)
-            self._rotate_code(room_id)
-            self._presence[room_id] = {}
-            await self._persist_rooms()
-            await self._publish_rooms()
-            return self._room_view(room, {})
+                raise HTTPException(422, "Display name is required.")
+            display_id = (data.display_id or "").strip() or self._unique_display_id(label)
+            self._validate_display_id(display_id)
+            if self._find_display(display_id):
+                raise HTTPException(409, f"A display with id '{display_id}' already exists.")
+            display = {"id": display_id, "label": label, "display_key": self._new_display_key()}
+            self._displays.append(display)
+            self._routing[display_id] = _AUTO
+            await self._persist_displays()
+            await self._publish_all()
+            return self._display_view(display)
 
-        @router.put("/rooms/{room_id}")
-        async def edit_room(room_id: str, data: RoomIn):
-            room = self._find_room(room_id)
-            if not room:
-                raise HTTPException(404, f"No room with id '{room_id}'.")
+        @router.put("/displays/{display_id}")
+        async def edit_display(display_id: str, data: DisplayIn):
+            display = self._find_display(display_id)
+            if not display:
+                raise HTTPException(404, f"No display with id '{display_id}'.")
             label = (data.label or "").strip()
             if not label:
-                raise HTTPException(422, "Room name is required.")
-            new_id = (data.room_id or "").strip() or room_id
-            self._validate_room_id(new_id)
-            if new_id != room_id and self._find_room(new_id):
-                raise HTTPException(409, f"A room with id '{new_id}' already exists.")
-            room["label"] = label
-            if new_id != room_id:
+                raise HTTPException(422, "Display name is required.")
+            new_id = (data.display_id or "").strip() or display_id
+            self._validate_display_id(new_id)
+            if new_id != display_id and self._find_display(new_id):
+                raise HTTPException(409, f"A display with id '{new_id}' already exists.")
+            display["label"] = label
+            if new_id != display_id:
                 # The id is baked into the Display URL and the state keys, so
-                # a rename moves the runtime bookkeeping and clears old keys.
-                # (Any open Display page for the old id stops at its next poll.)
-                await self._clear_room_state(room_id)
-                room["id"] = new_id
-                self._rotate_code(new_id)
-                self._presence[new_id] = {}
-            await self._persist_rooms()
-            await self._publish_rooms()
-            live = await self._scan_presenters() or {}
-            return self._room_view(room, live)
+                # a rename moves the routing and clears old keys. (Any open
+                # Display page for the old id stops at its next poll.)
+                routed = self._routing.get(display_id, _AUTO)
+                await self._clear_display_state(display_id)
+                display["id"] = new_id
+                self._routing[new_id] = routed
+            await self._persist_displays()
+            await self._publish_all()
+            return self._display_view(display)
 
-        @router.delete("/rooms/{room_id}")
-        async def delete_room(room_id: str):
-            room = self._find_room(room_id)
-            if not room:
-                raise HTTPException(404, f"No room with id '{room_id}'.")
-            self._rooms.remove(room)
-            await self._persist_rooms()
-            await self._clear_room_state(room_id)
-            await self._publish_rooms()
-            return {"ok": True, "room_id": room_id}
+        @router.delete("/displays/{display_id}")
+        async def delete_display(display_id: str):
+            display = self._find_display(display_id)
+            if not display:
+                raise HTTPException(404, f"No display with id '{display_id}'.")
+            self._displays.remove(display)
+            await self._persist_displays()
+            await self._clear_display_state(display_id)
+            await self._publish_all()
+            return {"ok": True, "display_id": display_id}
 
-        @router.post("/rooms/{room_id}/regenerate_key")
-        async def regenerate_key(room_id: str):
-            room = self._find_room(room_id)
-            if not room:
-                raise HTTPException(404, f"No room with id '{room_id}'.")
-            # Invalidate every existing Display URL for this room; open
+        @router.post("/displays/{display_id}/regenerate_key")
+        async def regenerate_key(display_id: str):
+            display = self._find_display(display_id)
+            if not display:
+                raise HTTPException(404, f"No display with id '{display_id}'.")
+            # Invalidate every existing Display URL for this display; open
             # Display pages get a 401 on their next poll and show the
             # "link isn't valid" card.
-            room["display_key"] = self._new_display_key()
-            await self._persist_rooms()
-            live = await self._scan_presenters() or {}
-            return self._room_view(room, live)
+            display["display_key"] = self._new_display_key()
+            await self._persist_displays()
+            return self._display_view(display)
+
+        @router.post("/displays/{display_id}/route")
+        async def route_display(display_id: str, data: RouteIn):
+            try:
+                await self._route(display_id, data.source)
+            except ValueError as e:
+                raise HTTPException(404 if self._find_display(display_id) is None else 422, str(e))
+            return self._display_view(self._find_display(display_id))
 
         return router
 
-    def _room_view(self, room, live):
-        room_id = room["id"]
-        names = live.get(room_id, set())
+    def _display_view(self, display):
+        display_id = display["id"]
+        showing = self._resolve_source(display_id, set(self._presence))
         return {
-            "id": room_id,
-            "label": room.get("label") or room_id,
-            "display_key": room.get("display_key", ""),
-            "display_path": self._display_path(room),
-            "code": self._current_code(room_id),
-            "output_state": "live" if names else "idle",
-            "active_presenters": len(names),
+            "id": display_id,
+            "label": display.get("label") or display_id,
+            "display_key": display.get("display_key", ""),
+            "display_path": self._display_path(display),
+            "source": self._routing.get(display_id, _AUTO),
+            "showing": showing,
+            "output_state": "live" if showing else "idle",
         }
 
     @staticmethod
-    def _validate_room_id(room_id):
-        if not _ROOM_ID_RE.fullmatch(room_id or ""):
+    def _validate_display_id(display_id):
+        if not _DISPLAY_ID_RE.fullmatch(display_id or ""):
             raise HTTPException(
                 422,
-                "Room ID may contain only letters, numbers, hyphens, and underscores.",
+                "Display ID may contain only letters, numbers, hyphens, and underscores.",
             )
-        if room_id in _RESERVED_ROOM_IDS:
-            raise HTTPException(422, f"'{room_id}' is a reserved name; pick another room ID.")
+        if display_id in _RESERVED_DISPLAY_IDS:
+            raise HTTPException(422, f"'{display_id}' is a reserved name; pick another display ID.")
 
     @staticmethod
     def _validate_presenter(presenter):
@@ -656,6 +846,8 @@ class PresentPlugin:
                 422,
                 "Presenter name may contain only letters, numbers, dots, hyphens, and underscores.",
             )
+        if presenter == _AUTO:
+            raise HTTPException(422, "'auto' is a reserved name.")
 
     @staticmethod
     def _validate_secret(secret):
@@ -729,7 +921,7 @@ class PresentPlugin:
             # arrives through the plugin's own proxied routes.
             "  - action: publish\n"
             "\n"
-            # Ingest paths (<room>/<presenter>) come and go with publishers and
+            # Ingest paths (in/<presenter>) come and go with publishers and
             # can't be pre-registered per name, so accept any path. Who may
             # publish/read is still governed by the auth users above.
             "paths:\n"

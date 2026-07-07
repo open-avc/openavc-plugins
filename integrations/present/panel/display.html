@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Present</title>
-  <!-- Served by the plugin's guest route at .../guest/display/<room>; these
+  <!-- Served by the plugin's guest route at .../guest/display/<display>; these
        relative paths resolve to the open plugin panel-file route. -->
   <link rel="stylesheet" href="../../panel/display.css">
 </head>
@@ -13,12 +13,13 @@
 
   <div id="idle" class="idle">
     <div class="idle-inner">
-      <div id="roomLabel" class="room-label"></div>
+      <div id="spaceName" class="space-name"></div>
       <div class="join-hint">To share your screen, open a browser and go to</div>
       <div id="joinHost" class="join-host"></div>
-      <div class="code-caption">Room code</div>
+      <div class="code-caption">Join code</div>
       <div id="joinCode" class="join-code"></div>
     </div>
+    <div id="displayLabel" class="display-badge"></div>
     <div id="idleStatus" class="idle-status"></div>
   </div>
 

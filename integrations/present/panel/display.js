@@ -1,23 +1,27 @@
 'use strict';
 
-// Present Display page — the room display surface.
+// Present Display page — one display's output surface.
 //
-// Served by the plugin's guest route at .../guest/display/<room>?key=<display
+// Served by the plugin's guest route at .../guest/display/<display>?key=<display
 // key>, so it runs in any plain browser with no OpenAVC login: a mini PC at
 // the projector, a stick PC behind a TV, a spare tablet. It shows the idle
-// "connect" card (room name, server address, join code) and cuts to the live
-// presenter's screen when someone shares, then back.
+// "connect" card (space name, server address, join code) and cuts to the
+// routed presenter's screen when the space's routing sends one here, then
+// back.
 //
-// Idle/live switching is driven by polling the room status route every two
-// seconds; playback is a focused WHEP client (create a recvonly
-// PeerConnection, POST the SDP offer to the plugin's reverse-proxied WHEP
-// route, set the answer, trickle ICE by PATCH, DELETE on teardown). MediaMTX
-// is the upstream. The display key rides every call as a query parameter.
+// Idle/live switching is driven by polling the display status route every two
+// seconds — the route answers with what THIS display should show, so routing
+// (auto or pinned) is resolved server-side. Playback is a focused WHEP client
+// (create a recvonly PeerConnection, POST the SDP offer to the plugin's
+// reverse-proxied WHEP route, set the answer, trickle ICE by PATCH, DELETE on
+// teardown). MediaMTX is the upstream. The display key rides every call as a
+// query parameter.
 
 (() => {
   const videoEl = document.getElementById('video');
   const idleEl = document.getElementById('idle');
-  const roomLabelEl = document.getElementById('roomLabel');
+  const spaceNameEl = document.getElementById('spaceName');
+  const displayLabelEl = document.getElementById('displayLabel');
   const joinHostEl = document.getElementById('joinHost');
   const joinCodeEl = document.getElementById('joinCode');
   const idleStatusEl = document.getElementById('idleStatus');
@@ -27,11 +31,11 @@
   const POLL_MS = 2000;
   const PLAYOUT_DELAY_HINT = 0.1; // seconds; small jitter buffer for LAN latency
 
-  // The page lives at <base>/api/plugins/present/guest/display/<room>. The
+  // The page lives at <base>/api/plugins/present/guest/display/<display>. The
   // other guest routes are siblings under .../guest/. Deriving the base from
   // our own location keeps every call correct under any path prefix.
   const path = location.pathname.replace(/\/+$/, '');
-  const roomId = decodeURIComponent(path.split('/').pop());
+  const displayId = decodeURIComponent(path.split('/').pop());
   const GUEST_BASE = path.replace(/\/display\/[^/]*$/, '');
   const KEY = new URLSearchParams(location.search).get('key') || '';
 
@@ -55,15 +59,15 @@
     if (linkDead) return;
     let status;
     try {
-      const res = await fetch(withKey(GUEST_BASE + '/rooms/' + encodeURIComponent(roomId) + '/status'));
+      const res = await fetch(withKey(GUEST_BASE + '/displays/' + encodeURIComponent(displayId) + '/status'));
       if (res.status === 401) {
-        // The display key was regenerated (or the room removed). Terminal:
+        // The display key was regenerated (or the display removed). Terminal:
         // a human has to paste the new link.
         linkDead = true;
         stopLive();
         showIdle();
         idleStatusEl.textContent =
-          'This display link is no longer valid. Copy the room’s display link again from the OpenAVC Programmer.';
+          'This display link is no longer valid. Copy the display’s link again from the Present plugin page in the OpenAVC Programmer.';
         return;
       }
       if (!res.ok) throw new Error('status ' + res.status);
@@ -77,9 +81,10 @@
       return;
     }
 
-    roomLabelEl.textContent = status.label || roomId;
+    spaceNameEl.textContent = status.space_name || '';
+    displayLabelEl.textContent = status.label || displayId;
     joinCodeEl.textContent = (status.code || '').split('').join(' ');
-    document.title = (status.label || roomId) + ' — Present';
+    document.title = (status.label || displayId) + ' — Present';
 
     if (status.state === 'live' && status.presenter) {
       presenterBadgeEl.textContent = status.presenter;
@@ -97,7 +102,7 @@
   // ──── WHEP client ────
 
   function whepUrl(secret) {
-    let url = GUEST_BASE + '/whep/' + encodeURIComponent(roomId) + '/' + encodeURIComponent(currentPresenter);
+    let url = GUEST_BASE + '/whep/' + encodeURIComponent(displayId) + '/' + encodeURIComponent(currentPresenter);
     if (secret) url += '/' + encodeURIComponent(secret);
     return withKey(url);
   }
@@ -137,8 +142,8 @@
       if (s === 'connected') {
         showLive();
       } else if (s === 'failed' || s === 'closed' || s === 'disconnected') {
-        // Drop back to the card; the next poll restarts playback if the
-        // presenter is still live.
+        // Drop back to the card; the next poll restarts playback if this
+        // display is still routed a live presenter.
         stopLive();
         showIdle();
       }
@@ -228,9 +233,9 @@
     presenterBadgeEl.hidden = !presenterBadgeEl.textContent;
   }
 
-  // A room display should play sound, but browsers block unmuted autoplay
-  // until the page has had a user gesture (kiosk launchers typically disable
-  // that policy). Try with audio first; fall back to muted playback plus a
+  // A display should play sound, but browsers block unmuted autoplay until
+  // the page has had a user gesture (kiosk launchers typically disable that
+  // policy). Try with audio first; fall back to muted playback plus a
   // "tap for sound" affordance.
   function playWithAudioFallback() {
     videoEl.muted = false;

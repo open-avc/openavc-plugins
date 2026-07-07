@@ -2,9 +2,11 @@
 Tests for the Present plugin.
 
 Covers the manifest shape, the locked-down MediaMTX config it generates, the
-room helpers, the guest display-key gate (the page serve, the status route,
-and the WHEP reverse proxy behind it), the rooms CRUD on the authed router,
-and the presence poll that drives the state keys and join/leave events.
+display helpers, the routing engine (auto / pinned / pinned-but-absent, and
+every write surface: macro action, script API, ext route, state-key writes),
+the guest display-key gate (the page serve, the status route, and the WHEP
+reverse proxy behind it), the displays CRUD on the authed router, and the
+presence poll that drives the state keys and join/leave events.
 
 The SidecarSupervisor is a byte-for-byte copy of the video_panel one, whose
 behavior is covered in test_video_panel_plugin.py; it is not re-tested here.
@@ -47,12 +49,12 @@ pytestmark = pytest.mark.skipif(
 
 
 class _FakeApi:
-    """Stands in for the scoped PluginAPI in router and poll tests."""
+    """Stands in for the scoped PluginAPI in router, routing, and poll tests."""
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, state=None):
         self._config = dict(config or {})
         self.saved = []
-        self.state = {}
+        self.state = dict(state or {})
         self.events = []  # (name, payload) from event_emit
         self.proxy_calls = []
         self.proxy_location = None  # canned WHEP Location for POST responses
@@ -67,6 +69,9 @@ class _FakeApi:
 
     async def state_set(self, key, value):
         self.state[key] = value
+
+    async def state_get(self, key):
+        return self.state.get(key)
 
     async def event_emit(self, name, payload):
         self.events.append((name, payload))
@@ -95,22 +100,22 @@ class _FakeApi:
         return _Resp(content=b"", status_code=204)  # PATCH
 
 
-_ROOM = {"id": "room1", "label": "Boardroom", "display_key": "k3y-k3y-k3y"}
+_DISPLAY = {"id": "main", "label": "Main Screen", "display_key": "k3y-k3y-k3y"}
+_DISPLAY2 = {"id": "overflow", "label": "Overflow TV", "display_key": "0th3r-k3y"}
 
 
-def _plugin(rooms=None, auth_pass="sidecarpass"):
+def _plugin(displays=None, auth_pass="sidecarpass", state=None):
     plugin = PresentPlugin()
-    plugin.api = _FakeApi({"rooms": [dict(r) for r in (rooms or [])]})
+    plugin.api = _FakeApi({"displays": [dict(d) for d in (displays or [])]}, state=state)
     plugin._auth_pass = auth_pass
-    plugin._rooms = [dict(r) for r in (rooms or [])]
-    for room in plugin._rooms:
-        plugin._rotate_code(room["id"])
-        plugin._presence[room["id"]] = {}
+    plugin._displays = [dict(d) for d in (displays or [])]
+    plugin._routing = {d["id"]: "auto" for d in plugin._displays}
+    plugin._rotate_code()
     return plugin
 
 
-def _guest_client(rooms=None):
-    plugin = _plugin(rooms)
+def _guest_client(displays=None):
+    plugin = _plugin(displays)
     app = FastAPI()
     # Mount at root so request.url.path is "/whep/...", which is what the
     # Location-rewrite reflects. The platform mounts it under
@@ -119,13 +124,9 @@ def _guest_client(rooms=None):
     return TestClient(app), plugin, plugin.api
 
 
-def _ext_client(rooms=None, live=None):
-    plugin = _plugin(rooms)
-
-    async def fake_scan():
-        return dict(live or {})
-
-    plugin._scan_presenters = fake_scan
+def _ext_client(displays=None, presence=None):
+    plugin = _plugin(displays)
+    plugin._presence = dict(presence or {})
     app = FastAPI()
     app.include_router(plugin._build_ext_router())
     return TestClient(app), plugin, plugin.api
@@ -153,6 +154,17 @@ def test_plugin_info_manifest_shape():
             assert entry["extract"]
 
 
+def test_matrix_verbs_are_declared():
+    # The routing surface the macro builder and scripts consume.
+    action = PresentPlugin.MACRO_ACTIONS["present.route"]
+    assert action["handler"] == "action_route"
+    params = {p["key"]: p for p in action["params"]}
+    assert params["display"]["options_source"] == "plugin.present.displays"
+    assert params["source"]["options_source"] == "plugin.present.sources"
+
+    assert PresentPlugin.SCRIPT_API["route"]["handler"] == "script_route"
+
+
 def test_render_config_is_valid_and_locked_down():
     plugin = PresentPlugin()
     plugin._auth_pass = "a1b2c3d4e5f6"
@@ -178,110 +190,233 @@ def test_render_config_is_valid_and_locked_down():
     assert users[1]["ips"] == ["127.0.0.1", "::1"]
     assert {p["action"] for p in users[1]["permissions"]} == {"api", "publish"}
 
-    # Ingest paths (<room>/<presenter>) are dynamic, so the catch-all must exist.
+    # Ingest paths (in/<presenter>) are dynamic, so the catch-all must exist.
     assert "all_others" in cfg["paths"]
 
 
-# ──── Room helpers ────
+# ──── Display helpers ────
 
 
-def test_slugify_and_unique_room_id():
-    assert PresentPlugin._slugify("Main Boardroom!") == "main_boardroom"
-    assert PresentPlugin._slugify("   ") == "room"
+def test_slugify_and_unique_display_id():
+    assert PresentPlugin._slugify("Main Screen!") == "main_screen"
+    assert PresentPlugin._slugify("   ") == "display"
 
-    plugin = _plugin(rooms=[_ROOM])
-    assert plugin._unique_room_id("Boardroom") == "boardroom"
-    plugin._rooms.append({"id": "boardroom", "label": "x", "display_key": "k"})
-    assert plugin._unique_room_id("Boardroom") == "boardroom_2"
+    plugin = _plugin(displays=[_DISPLAY])
+    assert plugin._unique_display_id("Main Screen") == "main_screen"
+    plugin._displays.append({"id": "main_screen", "label": "x", "display_key": "k"})
+    assert plugin._unique_display_id("Main Screen") == "main_screen_2"
     # Reserved names are skipped, not produced.
-    assert plugin._unique_room_id("Rooms") == "rooms_2"
+    assert plugin._unique_display_id("Auto") == "auto_2"
 
 
-def test_validate_room_id_rejects_bad_and_reserved():
-    PresentPlugin._validate_room_id("room1")
+def test_validate_display_id_rejects_bad_and_reserved():
+    PresentPlugin._validate_display_id("main")
     with pytest.raises(HTTPException) as e:
-        PresentPlugin._validate_room_id("bad id!")
+        PresentPlugin._validate_display_id("bad id!")
     assert e.value.status_code == 422
-    with pytest.raises(HTTPException) as e:
-        PresentPlugin._validate_room_id("rooms")
-    assert e.value.status_code == 422
+    for reserved in ("auto", "display", "displays", "in", "out", "status", "whep"):
+        with pytest.raises(HTTPException) as e:
+            PresentPlugin._validate_display_id(reserved)
+        assert e.value.status_code == 422
 
 
-def test_pick_presenter_prefers_earliest_joined():
-    plugin = _plugin(rooms=[_ROOM])
-    plugin._presence["room1"] = {"bob": 200, "alice": 100}
-    assert plugin._pick_presenter("room1", {"alice", "bob"}) == "alice"
+# ──── Routing resolution ────
+
+
+def test_normalize_source():
+    assert PresentPlugin._normalize_source("auto") == "auto"
+    assert PresentPlugin._normalize_source("alice") == "alice"
+    # Empty and None mean auto (clearing a pin).
+    assert PresentPlugin._normalize_source("") == "auto"
+    assert PresentPlugin._normalize_source(None) == "auto"
+    # Anything else is invalid, not coerced.
+    assert PresentPlugin._normalize_source("bad name!") is None
+    assert PresentPlugin._normalize_source(7) is None
+
+
+def test_resolve_source_auto_follows_earliest_presenter():
+    plugin = _plugin(displays=[_DISPLAY])
+    plugin._presence = {"bob": 200, "alice": 100}
+    assert plugin._resolve_source("main", {"alice", "bob"}) == "alice"
     # A presenter the poll hasn't recorded yet sorts last, not first.
-    assert plugin._pick_presenter("room1", {"zoe", "bob"}) == "bob"
-    assert plugin._pick_presenter("room1", set()) == ""
+    assert plugin._resolve_source("main", {"zoe", "bob"}) == "bob"
+    assert plugin._resolve_source("main", set()) == ""
+
+
+def test_resolve_source_pinned_and_pinned_absent():
+    plugin = _plugin(displays=[_DISPLAY])
+    plugin._presence = {"alice": 100, "bob": 200}
+    plugin._routing["main"] = "bob"
+    # Pinned: shows bob even though alice joined first.
+    assert plugin._resolve_source("main", {"alice", "bob"}) == "bob"
+    # Pinned presenter not sharing: the idle card, NOT a fall-through to alice.
+    assert plugin._resolve_source("main", {"alice"}) == ""
+
+
+@pytest.mark.asyncio
+async def test_route_updates_state_and_emits_event():
+    plugin = _plugin(displays=[_DISPLAY, _DISPLAY2])
+    api = plugin.api
+    plugin._presence = {"alice": 100, "bob": 200}
+
+    await plugin._route("overflow", "bob")
+    assert plugin._routing["overflow"] == "bob"
+    assert api.state["display.overflow.source"] == "bob"
+    assert api.state["display.overflow.showing"] == "bob"
+    assert api.state["display.overflow.output_state"] == "live"
+    assert ("route_changed", {"display": "overflow", "source": "bob"}) in api.events
+
+    # Re-routing to the same source is not a change — no second event.
+    events_before = len(api.events)
+    await plugin._route("overflow", "bob")
+    assert len(api.events) == events_before
+
+    # Clearing the pin: empty means auto.
+    await plugin._route("overflow", "")
+    assert plugin._routing["overflow"] == "auto"
+    assert api.state["display.overflow.source"] == "auto"
+    assert api.events[-1] == ("route_changed", {"display": "overflow", "source": "auto"})
+
+    with pytest.raises(ValueError):
+        await plugin._route("ghost", "alice")
+    with pytest.raises(ValueError):
+        await plugin._route("main", "bad name!")
+
+
+@pytest.mark.asyncio
+async def test_macro_action_and_script_api_route():
+    plugin = _plugin(displays=[_DISPLAY])
+    plugin._presence = {"alice": 100}
+
+    await plugin.action_route({"display": "main", "source": "alice"}, {})
+    assert plugin._routing["main"] == "alice"
+
+    await plugin.script_route("main", "auto")
+    assert plugin._routing["main"] == "auto"
+
+    # A failed step surfaces the user-facing message through the macro engine.
+    with pytest.raises(ValueError):
+        await plugin.action_route({"display": "ghost", "source": "alice"}, {})
+
+
+@pytest.mark.asyncio
+async def test_state_key_write_drives_routing():
+    plugin = _plugin(displays=[_DISPLAY])
+    api = plugin.api
+    plugin._presence = {"alice": 100}
+
+    # An external state.set (macro / script / API) pins the display.
+    await plugin._on_source_write("plugin.present.display.main.source", "alice", "auto")
+    assert plugin._routing["main"] == "alice"
+    assert ("route_changed", {"display": "main", "source": "alice"}) in api.events
+
+    # The plugin's own publish of that key round-trips as a no-op.
+    events_before = len(api.events)
+    await plugin._on_source_write("plugin.present.display.main.source", "alice", "auto")
+    assert len(api.events) == events_before
+
+    # A cleared key (display removed) is not a route request.
+    await plugin._on_source_write("plugin.present.display.main.source", None, "alice")
+    assert plugin._routing["main"] == "alice"
+
+    # An invalid value is rejected and the truth republished.
+    await plugin._on_source_write("plugin.present.display.main.source", "bad name!", "alice")
+    assert plugin._routing["main"] == "alice"
+    assert api.state["display.main.source"] == "alice"
+
+    # A write for an unknown display is ignored (no crash, no routing entry).
+    await plugin._on_source_write("plugin.present.display.ghost.source", "alice", None)
+    assert "ghost" not in plugin._routing
 
 
 # ──── Guest key gate ────
 
 
-def test_guest_room_gate():
-    plugin = _plugin(rooms=[_ROOM])
-    assert plugin._guest_room("room1", "k3y-k3y-k3y") is plugin._rooms[0]
-    # Wrong key, missing key, unknown room, and malformed id all read the same
-    # from outside: 401, so callers can't probe which room ids exist.
-    for room_id, key in [
-        ("room1", "wrong"),
-        ("room1", ""),
+def test_guest_display_gate():
+    plugin = _plugin(displays=[_DISPLAY])
+    assert plugin._guest_display("main", "k3y-k3y-k3y") is plugin._displays[0]
+    # Wrong key, missing key, unknown display, and malformed id all read the
+    # same from outside: 401, so callers can't probe which ids exist.
+    for display_id, key in [
+        ("main", "wrong"),
+        ("main", ""),
         ("ghost", "k3y-k3y-k3y"),
         ("bad id!", "k3y-k3y-k3y"),
     ]:
         with pytest.raises(HTTPException) as e:
-            plugin._guest_room(room_id, key)
+            plugin._guest_display(display_id, key)
         assert e.value.status_code == 401
 
 
 def test_display_page_serves_html_with_valid_key_and_friendly_401_without():
-    client, _plugin_, _api = _guest_client(rooms=[_ROOM])
+    client, _plugin_, _api = _guest_client(displays=[_DISPLAY])
 
-    ok = client.get("/display/room1", params={"key": "k3y-k3y-k3y"})
+    ok = client.get("/display/main", params={"key": "k3y-k3y-k3y"})
     assert ok.status_code == 200
     assert ok.headers["content-type"].startswith("text/html")
     assert "display.js" in ok.text  # the real page, not the error card
 
-    bad = client.get("/display/room1", params={"key": "nope"})
+    bad = client.get("/display/main", params={"key": "nope"})
     assert bad.status_code == 401  # feeds the platform's brute-force accounting
     assert "isn't valid" in bad.text  # a human-readable card, not a JSON error
 
 
-def test_room_status_reports_live_and_idle(monkeypatch):
-    client, plugin, _api = _guest_client(rooms=[_ROOM])
+def test_display_status_reports_routed_source(monkeypatch):
+    client, plugin, api = _guest_client(displays=[_DISPLAY, _DISPLAY2])
+    api.state["system.project_name"] = "Lecture Hall"
+    plugin._presence = {"alice": 100, "bob": 200}
 
     async def scan_live():
-        return {"room1": {"alice"}}
+        return {"alice", "bob"}
 
     monkeypatch.setattr(plugin, "_scan_presenters", scan_live)
-    r = client.get("/rooms/room1/status", params={"key": "k3y-k3y-k3y"})
+
+    # Auto: the earliest presenter.
+    r = client.get("/displays/main/status", params={"key": "k3y-k3y-k3y"})
     assert r.status_code == 200
     body = r.json()
     assert body["state"] == "live"
     assert body["presenter"] == "alice"
-    assert body["path"] == "room1/alice"
-    assert body["label"] == "Boardroom"
-    assert body["code"] == plugin._current_code("room1")
+    assert body["path"] == "in/alice"
+    assert body["label"] == "Main Screen"
+    assert body["space_name"] == "Lecture Hall"  # project-name fallback
+    assert body["code"] == plugin._current_code()
 
-    async def scan_idle():
-        return {}
+    # Pinned: this display shows bob regardless of who joined first.
+    plugin._routing["overflow"] = "bob"
+    body = client.get("/displays/overflow/status", params={"key": "0th3r-k3y"}).json()
+    assert body["state"] == "live" and body["presenter"] == "bob"
 
-    monkeypatch.setattr(plugin, "_scan_presenters", scan_idle)
-    body = client.get("/rooms/room1/status", params={"key": "k3y-k3y-k3y"}).json()
+    # Pinned-but-absent: the idle card.
+    plugin._routing["overflow"] = "carol"
+    body = client.get("/displays/overflow/status", params={"key": "0th3r-k3y"}).json()
     assert body["state"] == "idle" and body["presenter"] == "" and body["path"] == ""
 
-    assert client.get("/rooms/room1/status", params={"key": "bad"}).status_code == 401
+    assert client.get("/displays/main/status", params={"key": "bad"}).status_code == 401
 
 
-def test_room_status_503_when_sidecar_down(monkeypatch):
-    client, plugin, _api = _guest_client(rooms=[_ROOM])
+def test_display_status_prefers_configured_space_name(monkeypatch):
+    client, plugin, api = _guest_client(displays=[_DISPLAY])
+    api._config["space_name"] = "Boardroom"
+    api.state["system.project_name"] = "Lecture Hall"
+
+    async def scan_idle():
+        return set()
+
+    monkeypatch.setattr(plugin, "_scan_presenters", scan_idle)
+    body = client.get("/displays/main/status", params={"key": "k3y-k3y-k3y"}).json()
+    assert body["space_name"] == "Boardroom"
+    assert body["state"] == "idle"
+
+
+def test_display_status_503_when_sidecar_down(monkeypatch):
+    client, plugin, _api = _guest_client(displays=[_DISPLAY])
 
     async def scan_down():
         return None
 
     monkeypatch.setattr(plugin, "_scan_presenters", scan_down)
-    r = client.get("/rooms/room1/status", params={"key": "k3y-k3y-k3y"})
+    r = client.get("/displays/main/status", params={"key": "k3y-k3y-k3y"})
     assert r.status_code == 503
 
 
@@ -289,41 +424,41 @@ def test_room_status_503_when_sidecar_down(monkeypatch):
 
 
 def test_whep_offer_requires_key_and_rewrites_location():
-    client, _plugin_, api = _guest_client(rooms=[_ROOM])
-    api.proxy_location = "/room1/alice/whep/abc-123-uuid"
+    client, _plugin_, api = _guest_client(displays=[_DISPLAY])
+    api.proxy_location = "/in/alice/whep/abc-123-uuid"
 
     # No/bad key: rejected before anything reaches the sidecar.
     denied = client.post(
-        "/whep/room1/alice", content=b"v=0", headers={"Content-Type": "application/sdp"}
+        "/whep/main/alice", content=b"v=0", headers={"Content-Type": "application/sdp"}
     )
     assert denied.status_code == 401
     assert api.proxy_calls == []
 
     r = client.post(
-        "/whep/room1/alice",
+        "/whep/main/alice",
         params={"key": "k3y-k3y-k3y"},
         content=b"v=0\r\noffer",
         headers={"Content-Type": "application/sdp"},
     )
     assert r.status_code == 201, r.text
-    # Forwarded to the localhost sidecar WHEP endpoint with read creds in
-    # userinfo. allow_internal=True opts past proxy_to's SSRF guard.
+    # Forwarded to the localhost sidecar's in/<presenter> WHEP endpoint with
+    # read creds in userinfo. allow_internal=True opts past the SSRF guard.
     assert api.proxy_calls[-1] == {
-        "url": "http://openavc:sidecarpass@127.0.0.1:8890/room1/alice/whep",
+        "url": "http://openavc:sidecarpass@127.0.0.1:8890/in/alice/whep",
         "method": "POST",
         "allow_internal": True,
     }
     # MediaMTX's path-absolute Location is rewritten to live under this mount
     # so the browser's PATCH/DELETE come back through the key-checked proxy.
-    assert r.headers["location"] == "/whep/room1/alice/abc-123-uuid"
+    assert r.headers["location"] == "/whep/main/alice/abc-123-uuid"
 
 
 def test_whep_trickle_and_teardown_target_the_session():
-    client, _plugin_, api = _guest_client(rooms=[_ROOM])
-    expected = "http://openavc:sidecarpass@127.0.0.1:8890/room1/alice/whep/abc-123-uuid"
+    client, _plugin_, api = _guest_client(displays=[_DISPLAY])
+    expected = "http://openavc:sidecarpass@127.0.0.1:8890/in/alice/whep/abc-123-uuid"
 
     pr = client.patch(
-        "/whep/room1/alice/abc-123-uuid",
+        "/whep/main/alice/abc-123-uuid",
         params={"key": "k3y-k3y-k3y"},
         content=b"a=ice-ufrag:x\r\n",
         headers={"Content-Type": "application/trickle-ice-sdpfrag"},
@@ -333,7 +468,7 @@ def test_whep_trickle_and_teardown_target_the_session():
         "url": expected, "method": "PATCH", "allow_internal": True,
     }
 
-    dr = client.delete("/whep/room1/alice/abc-123-uuid", params={"key": "k3y-k3y-k3y"})
+    dr = client.delete("/whep/main/alice/abc-123-uuid", params={"key": "k3y-k3y-k3y"})
     assert dr.status_code == 200
     assert api.proxy_calls[-1] == {
         "url": expected, "method": "DELETE", "allow_internal": True,
@@ -341,90 +476,128 @@ def test_whep_trickle_and_teardown_target_the_session():
 
 
 def test_whep_rejects_malformed_presenter_and_secret():
-    client, _plugin_, api = _guest_client(rooms=[_ROOM])
+    client, _plugin_, api = _guest_client(displays=[_DISPLAY])
     bad_presenter = client.post(
-        "/whep/room1/bad%20name",
+        "/whep/main/bad%20name",
         params={"key": "k3y-k3y-k3y"},
         content=b"v=0",
         headers={"Content-Type": "application/sdp"},
     )
     assert bad_presenter.status_code == 422
+    # "auto" is the routing sentinel, never a playable ingest.
+    reserved = client.post(
+        "/whep/main/auto",
+        params={"key": "k3y-k3y-k3y"},
+        content=b"v=0",
+        headers={"Content-Type": "application/sdp"},
+    )
+    assert reserved.status_code == 422
     # Underscore is outside the UUID-ish secret charset -> rejected before proxying.
     bad_secret = client.delete(
-        "/whep/room1/alice/bad_secret", params={"key": "k3y-k3y-k3y"}
+        "/whep/main/alice/bad_secret", params={"key": "k3y-k3y-k3y"}
     )
     assert bad_secret.status_code == 422
     assert api.proxy_calls == []
 
 
-# ──── Rooms CRUD (authed /ext router) ────
+# ──── Displays CRUD (authed /ext router) ────
 
 
 def test_crud_add_list_edit_delete():
     client, plugin, api = _ext_client()
 
-    # Add: id auto-derived from the label, display key + code generated, persisted.
-    r = client.post("/rooms", json={"label": "Main Boardroom"})
+    # Add: id auto-derived from the label, display key generated, persisted,
+    # routing starts in auto.
+    r = client.post("/displays", json={"label": "Main Screen"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["id"] == "main_boardroom"
-    assert body["output_state"] == "idle"
+    assert body["id"] == "main_screen"
+    assert body["source"] == "auto"
+    assert body["showing"] == "" and body["output_state"] == "idle"
     assert len(body["display_key"]) >= 24
     assert body["display_path"] == (
-        f"/api/plugins/present/guest/display/main_boardroom?key={body['display_key']}"
+        f"/api/plugins/present/guest/display/main_screen?key={body['display_key']}"
     )
-    assert body["code"].isdigit() and len(body["code"]) == 4
-    assert api.saved[-1]["rooms"][0]["id"] == "main_boardroom"
-    # The room list state key is republished for the IDE / triggers.
-    assert json.loads(api.state["rooms"]) == [
-        {"id": "main_boardroom", "label": "Main Boardroom"}
+    assert api.saved[-1]["displays"][0]["id"] == "main_screen"
+    # The displays state key is republished; entries carry value=id so the
+    # same key feeds the Route Display dropdown.
+    assert json.loads(api.state["displays"]) == [
+        {"id": "main_screen", "value": "main_screen", "label": "Main Screen"}
     ]
+    assert api.state["display.main_screen.source"] == "auto"
 
-    # A second room with the same label gets a unique id.
-    r = client.post("/rooms", json={"label": "Main Boardroom"})
-    assert r.json()["id"] == "main_boardroom_2"
+    # A second display with the same label gets a unique id.
+    r = client.post("/displays", json={"label": "Main Screen"})
+    assert r.json()["id"] == "main_screen_2"
 
     # List returns both.
-    listing = client.get("/rooms").json()
-    assert {x["id"] for x in listing} == {"main_boardroom", "main_boardroom_2"}
+    listing = client.get("/displays").json()
+    assert {x["id"] for x in listing} == {"main_screen", "main_screen_2"}
 
-    # Edit: rename keeps the key; an id change clears the old state keys.
+    # Edit: rename keeps the key; an id change clears the old state keys and
+    # carries the routing assignment over.
+    plugin._routing["main_screen"] = "alice"
     old_key = body["display_key"]
-    r = client.put("/rooms/main_boardroom", json={"label": "Boardroom", "room_id": "board"})
+    r = client.put("/displays/main_screen", json={"label": "Stage Left", "display_id": "left"})
     assert r.status_code == 200, r.text
     edited = r.json()
-    assert edited["id"] == "board" and edited["label"] == "Boardroom"
+    assert edited["id"] == "left" and edited["label"] == "Stage Left"
     assert edited["display_key"] == old_key  # a rename must not break display links
-    assert api.state["main_boardroom.output_state"] is None  # old keys cleared
+    assert edited["source"] == "alice"  # the pin moved with the id
+    assert api.state["display.main_screen.source"] is None  # old keys cleared
 
-    # Delete removes it from the list and persists.
-    r = client.delete("/rooms/board")
+    # Delete removes it from the list, persists, and clears its state keys.
+    r = client.delete("/displays/left")
     assert r.status_code == 200 and r.json()["ok"] is True
-    assert [x["id"] for x in api.saved[-1]["rooms"]] == ["main_boardroom_2"]
-    assert api.state["board.output_state"] is None
+    assert [x["id"] for x in api.saved[-1]["displays"]] == ["main_screen_2"]
+    assert api.state["display.left.output_state"] is None
+    assert "left" not in plugin._routing
 
 
 def test_crud_validation_and_conflicts():
-    client, _plugin_, _api = _ext_client(rooms=[_ROOM])
+    client, _plugin_, _api = _ext_client(displays=[_DISPLAY])
 
-    assert client.post("/rooms", json={"label": "   "}).status_code == 422
-    assert client.post("/rooms", json={"label": "X", "room_id": "bad id!"}).status_code == 422
-    assert client.post("/rooms", json={"label": "X", "room_id": "rooms"}).status_code == 422
-    assert client.post("/rooms", json={"label": "X", "room_id": "room1"}).status_code == 409
-    assert client.put("/rooms/nope", json={"label": "N"}).status_code == 404
-    assert client.delete("/rooms/nope").status_code == 404
+    assert client.post("/displays", json={"label": "   "}).status_code == 422
+    assert client.post("/displays", json={"label": "X", "display_id": "bad id!"}).status_code == 422
+    assert client.post("/displays", json={"label": "X", "display_id": "auto"}).status_code == 422
+    assert client.post("/displays", json={"label": "X", "display_id": "main"}).status_code == 409
+    assert client.put("/displays/nope", json={"label": "N"}).status_code == 404
+    assert client.delete("/displays/nope").status_code == 404
 
 
 def test_regenerate_key_invalidates_old_display_links():
-    client, plugin, _api = _ext_client(rooms=[_ROOM])
-    r = client.post("/rooms/room1/regenerate_key")
+    client, plugin, _api = _ext_client(displays=[_DISPLAY])
+    r = client.post("/displays/main/regenerate_key")
     assert r.status_code == 200
     new_key = r.json()["display_key"]
     assert new_key and new_key != "k3y-k3y-k3y"
     # The old key no longer passes the guest gate.
     with pytest.raises(HTTPException):
-        plugin._guest_room("room1", "k3y-k3y-k3y")
-    assert plugin._guest_room("room1", new_key) is plugin._rooms[0]
+        plugin._guest_display("main", "k3y-k3y-k3y")
+    assert plugin._guest_display("main", new_key) is plugin._displays[0]
+
+
+def test_route_endpoint_and_status():
+    client, plugin, api = _ext_client(
+        displays=[_DISPLAY, _DISPLAY2], presence={"alice": 100, "bob": 200}
+    )
+
+    r = client.post("/displays/overflow/route", json={"source": "bob"})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "bob" and r.json()["showing"] == "bob"
+
+    assert client.post("/displays/ghost/route", json={"source": "bob"}).status_code == 404
+    assert client.post("/displays/main/route", json={"source": "bad name!"}).status_code == 422
+
+    body = client.get("/status").json()
+    assert body["active_presenters"] == 2
+    assert [p["name"] for p in body["presenters"]] == ["alice", "bob"]
+    # Sources: auto first, then live presenters, in the {value, label} shape
+    # the options_source picker parses.
+    assert body["sources"][0]["value"] == "auto"
+    assert [s["value"] for s in body["sources"][1:]] == ["alice", "bob"]
+    assert body["display_ids"] == ["main", "overflow"]
+    assert body["code"] == plugin._current_code()
 
 
 # ──── Presence scan + poll ────
@@ -432,59 +605,65 @@ def test_regenerate_key_invalidates_old_display_links():
 
 @pytest.mark.asyncio
 async def test_scan_presenters_filters_paths(monkeypatch):
-    plugin = _plugin(rooms=[_ROOM])
+    plugin = _plugin(displays=[_DISPLAY])
 
     async def fake_get(path):
         return {
             "items": [
-                {"name": "room1/alice", "available": True},
-                {"name": "room1/bob", "available": False},  # not publishing yet
-                {"name": "room1/bad name", "available": True},  # unsafe segment
-                {"name": "ghost/carol", "available": True},  # not a configured room
-                {"name": "room1", "available": True},  # no presenter segment
+                {"name": "in/alice", "available": True},
+                {"name": "in/bob", "available": False},  # not publishing yet
+                {"name": "in/bad name", "available": True},  # unsafe segment
+                {"name": "in/auto", "available": True},  # reserved sentinel
+                {"name": "out/main", "available": True},  # not an ingest path
+                {"name": "in", "available": True},  # no presenter segment
+                {"name": "rooms/carol", "available": True},  # pre-0.2.0 naming
             ]
         }
 
     monkeypatch.setattr(plugin, "_api_get", fake_get)
-    assert await plugin._scan_presenters() == {"room1": {"alice"}}
+    assert await plugin._scan_presenters() == {"alice"}
 
 
 @pytest.mark.asyncio
 async def test_poll_publishes_state_and_events_and_rotates_code(monkeypatch):
-    plugin = _plugin(rooms=[_ROOM])
+    plugin = _plugin(displays=[_DISPLAY])
     api = plugin.api
-    scan_result = {"room1": {"alice"}}
+    scan_result = {"alice"}
 
     async def fake_scan():
-        return {k: set(v) for k, v in scan_result.items()}
+        return set(scan_result)
 
     monkeypatch.setattr(plugin, "_scan_presenters", fake_scan)
-    code_before, rotated_before = plugin._codes["room1"]
+    code_before, rotated_before = plugin._code
 
     # Presenter joins.
     await plugin._poll()
     assert api.state["running"] is True
-    assert api.state["room1.output_state"] == "live"
-    assert api.state["room1.active_presenters"] == 1
-    assert json.loads(api.state["room1.presenters"])[0]["name"] == "alice"
-    assert api.events[-1][0] == "presenter_joined"
-    assert api.events[-1][1] == {"room": "room1", "name": "alice"}
-    # A live session keeps its code (the display isn't showing it anyway).
-    assert plugin._codes["room1"] == (code_before, rotated_before)
+    assert api.state["active_presenters"] == 1
+    assert json.loads(api.state["presenters"])[0]["name"] == "alice"
+    assert ("presenter_joined", {"name": "alice"}) in api.events
+    # The auto-routed display follows them.
+    assert api.state["display.main.showing"] == "alice"
+    assert api.state["display.main.output_state"] == "live"
+    # The sources pick list gained the presenter.
+    assert [s["value"] for s in json.loads(api.state["sources"])] == ["auto", "alice"]
+    # A live session keeps its code (the displays aren't showing it anyway).
+    assert plugin._code == (code_before, rotated_before)
 
     # Presenter leaves: back to idle, and the session's code is retired.
-    scan_result = {}
+    scan_result = set()
     await plugin._poll()
-    assert api.state["room1.output_state"] == "idle"
-    assert api.state["room1.active_presenters"] == 0
-    assert api.events[-1][0] == "presenter_left"
-    assert plugin._codes["room1"][1] != rotated_before  # rotated
-    assert api.state["room1.code"] == plugin._codes["room1"][0]
+    assert api.state["active_presenters"] == 0
+    assert api.state["display.main.showing"] == ""
+    assert api.state["display.main.output_state"] == "idle"
+    assert api.events[-1] == ("presenter_left", {"name": "alice"})
+    assert plugin._code[1] != rotated_before  # rotated
+    assert api.state["code"] == plugin._current_code()
 
 
 @pytest.mark.asyncio
 async def test_poll_marks_not_running_when_sidecar_unreachable(monkeypatch):
-    plugin = _plugin(rooms=[_ROOM])
+    plugin = _plugin(displays=[_DISPLAY])
 
     async def fake_scan():
         return None
@@ -496,34 +675,37 @@ async def test_poll_marks_not_running_when_sidecar_unreachable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stale_idle_code_rotates(monkeypatch):
-    plugin = _plugin(rooms=[_ROOM])
+    plugin = _plugin(displays=[_DISPLAY])
 
     async def fake_scan():
-        return {}
+        return set()
 
     monkeypatch.setattr(plugin, "_scan_presenters", fake_scan)
-    code = plugin._codes["room1"][0]
+    code = plugin._code[0]
     # Age the code past the idle rotation window.
-    plugin._codes["room1"] = (code, -10_000.0)
+    plugin._code = (code, -10_000.0)
     await plugin._poll()
-    assert plugin._codes["room1"][1] > 0  # re-stamped now
+    assert plugin._code[1] > 0  # re-stamped now
 
 
 # ──── Config loading ────
 
 
 @pytest.mark.asyncio
-async def test_load_rooms_backfills_missing_display_key():
+async def test_load_displays_backfills_key_and_drops_invalid():
     plugin = PresentPlugin()
     plugin.api = _FakeApi({
-        "rooms": [
-            {"id": "room1", "label": "Boardroom"},  # hand-edited: no key
+        "displays": [
+            {"id": "main", "label": "Main Screen"},  # hand-edited: no key
             {"id": "bad id!", "label": "Rejected"},
+            {"id": "auto", "label": "Reserved"},
             "not-a-dict",
-        ]
+        ],
+        "rooms": [{"id": "room1"}],  # pre-0.2.0 leftover
     })
-    await plugin._load_rooms()
-    assert [r["id"] for r in plugin._rooms] == ["room1"]
-    assert plugin._rooms[0]["display_key"]  # generated
+    await plugin._load_displays()
+    assert [d["id"] for d in plugin._displays] == ["main"]
+    assert plugin._displays[0]["display_key"]  # generated
+    assert plugin._routing == {"main": "auto"}
     assert plugin.api.saved  # and persisted back
-    assert plugin._current_code("room1")  # a code exists from load
+    assert "rooms" not in plugin.api.saved[-1]  # legacy list dropped
