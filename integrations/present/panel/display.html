@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Present</title>
+  <!-- Served by the plugin's guest route at .../guest/display/<room>; these
+       relative paths resolve to the open plugin panel-file route. -->
+  <link rel="stylesheet" href="../../panel/display.css">
+</head>
+<body>
+  <video id="video" autoplay playsinline></video>
+
+  <div id="idle" class="idle">
+    <div class="idle-inner">
+      <div id="roomLabel" class="room-label"></div>
+      <div class="join-hint">To share your screen, open a browser and go to</div>
+      <div id="joinHost" class="join-host"></div>
+      <div class="code-caption">Room code</div>
+      <div id="joinCode" class="join-code"></div>
+    </div>
+    <div id="idleStatus" class="idle-status"></div>
+  </div>
+
+  <div id="presenterBadge" class="presenter-badge" hidden></div>
+  <button id="audioHint" class="audio-hint" hidden>Tap for sound</button>
+
+  <script src="../../panel/display.js"></script>
+</body>
+</html>

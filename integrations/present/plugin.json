@@ -1,0 +1,14 @@
+{
+    "id": "present",
+    "name": "Present",
+    "version": "0.1.0",
+    "author": "OpenAVC",
+    "description": "Wireless presentation: share a laptop screen from the browser to the room display.",
+    "category": "integration",
+    "license": "MIT",
+    "platforms": ["win_x64", "linux_x64", "linux_arm64"],
+    "capabilities": ["state_read", "state_write", "event_emit", "network_listen", "http_endpoints", "guest_endpoints"],
+    "dependencies": [],
+    "has_native_dependencies": true,
+    "min_openavc_version": "0.23.0"
+}
