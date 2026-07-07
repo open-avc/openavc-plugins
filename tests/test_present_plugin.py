@@ -5,8 +5,10 @@ Covers the manifest shape, the locked-down MediaMTX config it generates, the
 display helpers, the routing engine (auto / pinned / pinned-but-absent, and
 every write surface: macro action, script API, ext route, state-key writes),
 the guest display-key gate (the page serve, the status route, and the WHEP
-reverse proxy behind it), the displays CRUD on the authed router, and the
-presence poll that drives the state keys and join/leave events.
+reverse proxy behind it), the Connect flow (code->token exchange, the
+token-gated WHIP publish proxy, presenter labels, the join address), the
+displays CRUD on the authed router, and the presence poll that drives the
+state keys and join/leave events.
 
 The SidecarSupervisor is a byte-for-byte copy of the video_panel one, whose
 behavior is covered in test_video_panel_plugin.py; it is not re-tested here.
@@ -57,7 +59,9 @@ class _FakeApi:
         self.state = dict(state or {})
         self.events = []  # (name, payload) from event_emit
         self.proxy_calls = []
-        self.proxy_location = None  # canned WHEP Location for POST responses
+        self.proxy_location = None  # canned WHEP/WHIP Location for POST responses
+        self.minted = []  # (scope, ttl) from mint_guest_token
+        self.tokens = {}  # token -> scope
 
     @property
     def config(self):
@@ -82,6 +86,17 @@ class _FakeApi:
     def log(self, message, level="info"):
         pass
 
+    def mint_guest_token(self, scope, ttl=3600):
+        """Stand in for the platform's HMAC guest tokens: opaque token bound
+        to the scope, verified by exact scope match (the real contract)."""
+        token = f"tok{len(self.minted)}-{scope}"
+        self.minted.append((scope, ttl))
+        self.tokens[token] = scope
+        return token, 1_900_000_000
+
+    def verify_guest_token(self, token, scope):
+        return self.tokens.get(token) == scope
+
     async def proxy_to(self, url, request, *, timeout=30.0, allow_internal=False):
         """Stand in for PluginAPI.proxy_to: record the upstream URL, return a
         canned response shaped like MediaMTX's WHEP replies."""
@@ -104,13 +119,19 @@ _DISPLAY = {"id": "main", "label": "Main Screen", "display_key": "k3y-k3y-k3y"}
 _DISPLAY2 = {"id": "overflow", "label": "Overflow TV", "display_key": "0th3r-k3y"}
 
 
-def _plugin(displays=None, auth_pass="sidecarpass", state=None):
+def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     plugin = PresentPlugin()
-    plugin.api = _FakeApi({"displays": [dict(d) for d in (displays or [])]}, state=state)
+    cfg = {"displays": [dict(d) for d in (displays or [])]}
+    cfg.update(config or {})
+    plugin.api = _FakeApi(cfg, state=state)
     plugin._auth_pass = auth_pass
     plugin._displays = [dict(d) for d in (displays or [])]
     plugin._routing = {d["id"]: "auto" for d in plugin._displays}
     plugin._rotate_code()
+    # Pin the join-address inputs so join_url is deterministic regardless of
+    # the test host's NICs or whether the server package is importable.
+    plugin._detect_local_ip = lambda: "192.0.2.10"
+    plugin._http_port = lambda: 8080
     return plugin
 
 
@@ -144,6 +165,10 @@ def test_plugin_info_manifest_shape():
     # Guest routes are the point of this plugin; both HTTP grants are needed.
     assert "http_endpoints" in info["capabilities"]
     assert "guest_endpoints" in info["capabilities"]
+    # The short typed URL on every connect card.
+    assert info["guest_alias"] == "present"
+    # The join-address override must be a declared config field.
+    assert "join_address" in PresentPlugin.CONFIG_SCHEMA
 
     deps = {d["id"]: d for d in info["native_dependencies"]}
     assert set(deps) == {"mediamtx"}  # no ffmpeg: the display path plays WebRTC as-is
@@ -214,7 +239,7 @@ def test_validate_display_id_rejects_bad_and_reserved():
     with pytest.raises(HTTPException) as e:
         PresentPlugin._validate_display_id("bad id!")
     assert e.value.status_code == 422
-    for reserved in ("auto", "display", "displays", "in", "out", "status", "whep"):
+    for reserved in ("auto", "connect", "display", "displays", "in", "out", "status", "whep", "whip"):
         with pytest.raises(HTTPException) as e:
             PresentPlugin._validate_display_id(reserved)
         assert e.value.status_code == 422
@@ -377,10 +402,14 @@ def test_display_status_reports_routed_source(monkeypatch):
     body = r.json()
     assert body["state"] == "live"
     assert body["presenter"] == "alice"
+    assert body["presenter_label"] == "alice"  # no typed label: slug stands in
     assert body["path"] == "in/alice"
     assert body["label"] == "Main Screen"
     assert body["space_name"] == "Lecture Hall"  # project-name fallback
     assert body["code"] == plugin._current_code()
+    # The plugin-chosen join line the idle card renders (not the page's own
+    # location.host).
+    assert body["join_url"] == "192.0.2.10:8080/present"
 
     # Pinned: this display shows bob regardless of who joined first.
     plugin._routing["overflow"] = "bob"
@@ -500,6 +529,161 @@ def test_whep_rejects_malformed_presenter_and_secret():
     assert api.proxy_calls == []
 
 
+# ──── Connect flow (code -> token -> WHIP publish) ────
+
+
+def test_connect_page_served_at_guest_root():
+    client, _plugin_, _api = _guest_client()
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "connect.js" in r.text
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_connect_exchange_mints_scoped_token():
+    client, plugin, api = _guest_client()
+    api.state["system.project_name"] = "Lecture Hall"
+    code = plugin._current_code()
+
+    r = client.post("/connect", json={"name": "  Aaron   Todd ", "code": code})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The typed name is trimmed/collapsed for the label and slugged for the
+    # ingest name; routing values use the slug, humans see the label.
+    assert body["presenter"] == "aaron_todd"
+    assert body["label"] == "Aaron Todd"
+    assert body["space_name"] == "Lecture Hall"
+    assert body["token"] and body["expires_at"]
+    assert plugin._labels["aaron_todd"] == "Aaron Todd"
+    # The token is bound to exactly this ingest name.
+    assert api.minted == [("whip:aaron_todd", 4 * 3600)]
+
+
+def test_connect_exchange_rejects_bad_code_name_and_active_presenter():
+    client, plugin, api = _guest_client()
+    code = plugin._current_code()
+
+    # Wrong/missing code: 401 (feeds brute-force accounting), nothing minted.
+    assert client.post("/connect", json={"name": "Alice", "code": "0000" if code != "0000" else "1111"}).status_code == 401
+    assert client.post("/connect", json={"name": "Alice", "code": ""}).status_code == 401
+    assert api.minted == []
+
+    # A name that slugs to nothing, and the routing sentinel: 422.
+    assert client.post("/connect", json={"name": "   ", "code": code}).status_code == 422
+    assert client.post("/connect", json={"name": "Auto", "code": code}).status_code == 422
+
+    # A name already presenting: 409, friendly, nothing minted for it.
+    plugin._presence["alice"] = 100
+    plugin._labels["alice"] = "Alice"
+    r = client.post("/connect", json={"name": "alice", "code": code})
+    assert r.status_code == 409
+    assert "Alice" in r.json()["detail"]
+
+
+def test_whip_publish_requires_token_and_rewrites_location():
+    client, plugin, api = _guest_client()
+    api.proxy_location = "/in/alice/whip/abc-123-uuid"
+    token, _ = api.mint_guest_token("whip:alice")
+
+    # No token / a token for a different presenter: rejected before the proxy.
+    assert client.post("/whip/alice", content=b"v=0").status_code == 401
+    other, _ = api.mint_guest_token("whip:bob")
+    assert client.post("/whip/alice", params={"token": other}, content=b"v=0").status_code == 401
+    assert api.proxy_calls == []
+
+    r = client.post(
+        "/whip/alice",
+        params={"token": token},
+        content=b"v=0\r\noffer",
+        headers={"Content-Type": "application/sdp"},
+    )
+    assert r.status_code == 201, r.text
+    # Forwarded to the sidecar's in/<presenter> WHIP endpoint with NO
+    # credentials — the localhost "any" user carries publish.
+    assert api.proxy_calls[-1] == {
+        "url": "http://127.0.0.1:8890/in/alice/whip",
+        "method": "POST",
+        "allow_internal": True,
+    }
+    # Location rewritten under this mount so PATCH/DELETE come back through
+    # the token check.
+    assert r.headers["location"] == "/whip/alice/abc-123-uuid"
+
+
+def test_whip_trickle_and_teardown_target_the_session():
+    client, _plugin_, api = _guest_client()
+    token, _ = api.mint_guest_token("whip:alice")
+    expected = "http://127.0.0.1:8890/in/alice/whip/abc-123-uuid"
+
+    pr = client.patch(
+        "/whip/alice/abc-123-uuid",
+        params={"token": token},
+        content=b"a=ice-ufrag:x\r\n",
+        headers={"Content-Type": "application/trickle-ice-sdpfrag"},
+    )
+    assert pr.status_code == 204
+    assert api.proxy_calls[-1] == {"url": expected, "method": "PATCH", "allow_internal": True}
+
+    dr = client.delete("/whip/alice/abc-123-uuid", params={"token": token})
+    assert dr.status_code == 200
+    assert api.proxy_calls[-1] == {"url": expected, "method": "DELETE", "allow_internal": True}
+
+    # Reserved/malformed presenter and malformed secret: rejected pre-proxy.
+    calls_before = len(api.proxy_calls)
+    assert client.post("/whip/auto", params={"token": token}, content=b"v=0").status_code == 422
+    assert client.delete("/whip/alice/bad_secret", params={"token": token}).status_code == 422
+    assert len(api.proxy_calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_presenter_labels_flow_and_prune(monkeypatch):
+    plugin = _plugin(displays=[_DISPLAY])
+    api = plugin.api
+    plugin._labels["aaron_todd"] = "Aaron Todd"
+    scan_result = {"aaron_todd"}
+
+    async def fake_scan():
+        return set(scan_result)
+
+    monkeypatch.setattr(plugin, "_scan_presenters", fake_scan)
+
+    await plugin._poll()
+    # Labels ride the events, the presenters JSON, and the sources options;
+    # routing values stay the slugs.
+    assert ("presenter_joined", {"name": "aaron_todd", "label": "Aaron Todd"}) in api.events
+    presenters = json.loads(api.state["presenters"])
+    assert presenters[0] == {"name": "aaron_todd", "label": "Aaron Todd", "since": presenters[0]["since"]}
+    sources = json.loads(api.state["sources"])
+    assert {"value": "aaron_todd", "label": "Aaron Todd"} in sources
+
+    # Leave: the label map is pruned and the event carries the label.
+    scan_result = set()
+    await plugin._poll()
+    assert api.events[-1] == ("presenter_left", {"name": "aaron_todd", "label": "Aaron Todd"})
+    assert "aaron_todd" not in plugin._labels
+
+
+def test_join_url_configured_address_and_port_handling():
+    # Configured join_address wins over detection.
+    plugin = _plugin(config={"join_address": "av.example.edu"})
+    assert plugin._join_url() == "av.example.edu:8080/present"
+    # Port 80 is implicit in what a human types.
+    plugin._http_port = lambda: 80
+    assert plugin._join_url() == "av.example.edu/present"
+    # Blank config falls back to the (pinned) auto-detected LAN address.
+    plugin2 = _plugin()
+    assert plugin2._join_url() == "192.0.2.10:8080/present"
+
+
+def test_slugify_presenter():
+    assert PresentPlugin._slugify_presenter("Aaron Todd") == "aaron_todd"
+    assert PresentPlugin._slugify_presenter("J.-P. O'Neil") == "j_p_o_neil"
+    # No fallback: an empty result is the caller's cue to reject.
+    assert PresentPlugin._slugify_presenter("   ") == ""
+    assert PresentPlugin._slugify_presenter("!!!") == ""
+
+
 # ──── Displays CRUD (authed /ext router) ────
 
 
@@ -515,8 +699,10 @@ def test_crud_add_list_edit_delete():
     assert body["source"] == "auto"
     assert body["showing"] == "" and body["output_state"] == "idle"
     assert len(body["display_key"]) >= 24
+    # The short guest-alias form; the canonical /api/plugins/... path serves
+    # the same page.
     assert body["display_path"] == (
-        f"/api/plugins/present/guest/display/main_screen?key={body['display_key']}"
+        f"/present/display/main_screen?key={body['display_key']}"
     )
     assert api.saved[-1]["displays"][0]["id"] == "main_screen"
     # The displays state key is republished; entries carry value=id so the
@@ -591,6 +777,7 @@ def test_route_endpoint_and_status():
 
     body = client.get("/status").json()
     assert body["active_presenters"] == 2
+    assert body["join_url"] == "192.0.2.10:8080/present"  # for the IDE panel
     assert [p["name"] for p in body["presenters"]] == ["alice", "bob"]
     # Sources: auto first, then live presenters, in the {value, label} shape
     # the options_source picker parses.
@@ -641,7 +828,7 @@ async def test_poll_publishes_state_and_events_and_rotates_code(monkeypatch):
     assert api.state["running"] is True
     assert api.state["active_presenters"] == 1
     assert json.loads(api.state["presenters"])[0]["name"] == "alice"
-    assert ("presenter_joined", {"name": "alice"}) in api.events
+    assert ("presenter_joined", {"name": "alice", "label": "alice"}) in api.events
     # The auto-routed display follows them.
     assert api.state["display.main.showing"] == "alice"
     assert api.state["display.main.output_state"] == "live"
@@ -656,7 +843,7 @@ async def test_poll_publishes_state_and_events_and_rotates_code(monkeypatch):
     assert api.state["active_presenters"] == 0
     assert api.state["display.main.showing"] == ""
     assert api.state["display.main.output_state"] == "idle"
-    assert api.events[-1] == ("presenter_left", {"name": "alice"})
+    assert api.events[-1] == ("presenter_left", {"name": "alice", "label": "alice"})
     assert plugin._code[1] != rotated_before  # rotated
     assert api.state["code"] == plugin._current_code()
 

@@ -1,0 +1,160 @@
+/* Present Connect page — the presenter's sender surface.
+   Same dark + sage identity as the Display page, sized for a laptop browser
+   window rather than a fullscreen output. */
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background:
+    radial-gradient(ellipse at 50% 120%, rgba(138, 180, 147, 0.16), transparent 60%),
+    linear-gradient(180deg, #0d120f 0%, #121a15 100%);
+  color: #e8ede9;
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.card {
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+}
+
+.brand {
+  font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #8AB493;
+  margin: 0 0 0.4em;
+}
+
+.lede {
+  font-size: 1rem;
+  opacity: 0.75;
+  margin: 0 0 1.8em;
+  line-height: 1.5;
+}
+
+/* ──── Join form ──── */
+
+.field-label {
+  display: block;
+  text-align: left;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  opacity: 0.6;
+  margin: 1.2em 0 0.4em;
+}
+
+input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.7em 0.9em;
+  font-size: 1.05rem;
+  font-family: inherit;
+  color: #e8ede9;
+  background: rgba(232, 237, 233, 0.06);
+  border: 1px solid rgba(232, 237, 233, 0.18);
+  border-radius: 10px;
+  outline: none;
+}
+
+input:focus {
+  border-color: rgba(138, 180, 147, 0.7);
+}
+
+.code-input {
+  font-size: 1.6rem;
+  font-weight: 600;
+  letter-spacing: 0.35em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+button {
+  font-family: inherit;
+  font-size: 1.05rem;
+  border-radius: 999px;
+  cursor: pointer;
+  padding: 0.75em 2em;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.primary {
+  width: 100%;
+  margin-top: 1.6em;
+  border: none;
+  background: #8AB493;
+  color: #0d120f;
+  font-weight: 600;
+}
+
+.primary:not(:disabled):hover {
+  background: #9cc2a4;
+}
+
+.danger {
+  margin-top: 1.4em;
+  border: 1px solid rgba(232, 140, 130, 0.6);
+  background: transparent;
+  color: #e88c82;
+}
+
+.danger:hover {
+  background: rgba(232, 140, 130, 0.12);
+}
+
+.error {
+  color: #e88c82;
+  font-size: 0.95rem;
+  margin: 1em 0 0;
+  line-height: 1.4;
+}
+
+.error[hidden] { display: none; }
+
+/* Capability explanations (no HTTPS, mobile browser). */
+.blocked {
+  text-align: left;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  padding: 0.9em 1.1em;
+  margin-bottom: 1.2em;
+  border-radius: 10px;
+  border: 1px solid rgba(138, 180, 147, 0.35);
+  background: rgba(138, 180, 147, 0.08);
+}
+
+.blocked[hidden] { display: none; }
+
+.note {
+  font-size: 0.85rem;
+  opacity: 0.55;
+  line-height: 1.5;
+  margin-top: 2em;
+}
+
+/* ──── Live view ──── */
+
+.live-name {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin: 0 0 0.3em;
+}
+
+.live-status {
+  font-size: 0.95rem;
+  opacity: 0.7;
+  min-height: 1.3em;
+}

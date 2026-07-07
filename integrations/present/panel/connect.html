@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Present — Share your screen</title>
+  <!-- Served at the guest mount root (/present and .../guest), so assets use
+       the absolute open plugin panel-file route. -->
+  <link rel="stylesheet" href="/api/plugins/present/panel/connect.css">
+</head>
+<body>
+  <main class="card">
+    <!-- Join: name + the code shown on the space's displays. -->
+    <section id="joinView">
+      <h1 class="brand">Present</h1>
+      <p class="lede">Enter the code shown on the display to share your screen.</p>
+
+      <div id="blockedNote" class="blocked" hidden></div>
+
+      <form id="joinForm">
+        <label class="field-label" for="nameInput">Your name</label>
+        <input id="nameInput" type="text" autocomplete="name" maxlength="60"
+               placeholder="Alex" required>
+
+        <label class="field-label" for="codeInput">Join code</label>
+        <input id="codeInput" class="code-input" type="text" inputmode="numeric"
+               autocomplete="one-time-code" maxlength="8" placeholder="0000" required>
+
+        <p id="joinError" class="error" role="alert" hidden></p>
+
+        <button id="shareBtn" type="submit" class="primary">Share my screen</button>
+      </form>
+
+      <p class="note">
+        Works from a laptop or desktop browser. Phones and tablets can’t share
+        their screen. To include sound, use Chrome or Edge and turn on
+        “Also share audio” in the picker; other browsers may send video only.
+      </p>
+    </section>
+
+    <!-- Live: sharing in progress. -->
+    <section id="liveView" hidden>
+      <h1 class="brand">You’re presenting</h1>
+      <p class="live-name"><span id="liveName"></span></p>
+      <p id="liveSpace" class="lede"></p>
+      <p id="liveStatus" class="live-status">Connecting…</p>
+      <button id="stopBtn" class="danger">Stop sharing</button>
+    </section>
+  </main>
+
+  <script src="/api/plugins/present/panel/connect.js"></script>
+</body>
+</html>

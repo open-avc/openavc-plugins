@@ -42,6 +42,14 @@ VALID_CONFIG_TYPES = {
 
 VALID_PLATFORMS = {"all", "win_x64", "linux_x64", "linux_arm64"}
 
+# Top-level path segments a guest_alias may not shadow. Mirrors
+# server/core/plugin_loader.py RESERVED_GUEST_ALIASES.
+RESERVED_GUEST_ALIASES = {
+    "api", "panel", "programmer", "pair", "setup", "ws", "isc",
+    "docs", "redoc", "openapi.json", "assets", "themes", "health",
+    "favicon.ico", "static", "simulator",
+}
+
 # EXTENSIONS types the panel/IDE understand, and the field that uniquely
 # identifies an entry within each type (panel_elements are keyed by `type`,
 # every other type by `id`). Mirrors server/core/plugin_loader.py.
@@ -164,6 +172,17 @@ def validate_plugin_info(plugin_info, result, source="PLUGIN_INFO"):
             for plat in plugin_info["platforms"]:
                 if plat not in VALID_PLATFORMS:
                     result.error(f"{source}: invalid platform '{plat}': must be one of {sorted(VALID_PLATFORMS)}")
+
+    # Guest alias (top-level short route for the guest router) — mirrors the
+    # platform loader's static rules.
+    if "guest_alias" in plugin_info:
+        alias = plugin_info["guest_alias"]
+        if not isinstance(alias, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", alias):
+            result.error(f"{source}: invalid guest_alias '{alias}': must be one lowercase URL segment (letters, digits, hyphens, underscores; max 32 chars)")
+        elif alias in RESERVED_GUEST_ALIASES:
+            result.error(f"{source}: guest_alias '{alias}' is a reserved platform path")
+        if "guest_endpoints" not in plugin_info.get("capabilities", []):
+            result.error(f"{source}: guest_alias requires the guest_endpoints capability")
 
     # Version format
     if "version" in plugin_info:

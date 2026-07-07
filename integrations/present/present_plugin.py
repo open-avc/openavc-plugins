@@ -14,12 +14,20 @@ source ("auto" = the active presenter, or a pinned presenter), drivable from
 macros (``present.route``), scripts (``openavc.plugins.present.route``), and
 writes to the ``plugin.present.display.<id>.source`` state key.
 
-Because a display has no OpenAVC login — it may be a bare browser on a mini
-PC, a stick PC, or a TV — the Display page and its API ride the plugin's
-guest routes (``/api/plugins/present/guest/*``), gated by a persistent
-per-display key carried in the Display URL. Displays and their keys are
-managed from the plugin's page in the Programmer IDE through the authed
-``/ext`` routes.
+Because neither surface has an OpenAVC login, both ride the plugin's guest
+routes (``/api/plugins/present/guest/*``, also mounted at the top-level
+``/present/*`` via the ``guest_alias``):
+
+- The **Display page** (a bare browser on a mini PC, a stick PC, a TV) is
+  gated by a persistent per-display key carried in the Display URL. Displays
+  and their keys are managed from the plugin's page in the Programmer IDE
+  through the authed ``/ext`` routes.
+- The **Connect page** (the presenter's own laptop) is the short URL on every
+  connect card (``http://<join-address>:<port>/present``). The guest enters
+  the join code shown on the displays plus a name; the plugin verifies the
+  code and exchanges it for a platform-minted guest token scoped to that
+  presenter's ingest name, which then gates the WHIP publish routes the page
+  uses to share the screen.
 
 This module owns the sidecar lifecycle, the displays and routing model,
 presence polling (state keys + events for space automation), and both HTTP
@@ -31,6 +39,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
 import sys
 import time
@@ -72,10 +81,26 @@ _SIDECAR_USER = "openavc"
 
 # Join code shown on every idle card. Rotates when the space's last presenter
 # leaves (session end) and on a timer while idle, so a code seen on a display
-# is always fresh. Verification of the code happens with the guest Connect
-# flow; until then it is display-only.
+# is always fresh. The Connect page's POST /connect verifies it and exchanges
+# it for a guest token; a wrong code is a 401 that feeds the platform's
+# brute-force accounting.
 _CODE_LENGTH = 4
 _CODE_ROTATE_SECONDS = 300.0
+
+# The top-level short route (PLUGIN_INFO guest_alias) the platform also
+# mounts the guest router at — the address a human types from the card.
+_GUEST_ALIAS = "present"
+
+# Guest tokens gate WHIP signaling only (established media keeps flowing when
+# one expires), so size the TTL for a long meeting rather than a request.
+_GUEST_TOKEN_TTL_SECONDS = 4 * 3600
+
+# Presenter display names are trimmed to this before slugging; keeps the
+# presenters state JSON and on-screen badges sane.
+_NAME_MAX_CHARS = 60
+
+# The auto-detected join address is re-resolved at most this often.
+_IP_CACHE_SECONDS = 60.0
 
 # Presenters publish their screen to in/<presenter>; per-display encoder
 # outputs (stream displays, future) will live under out/<display>. The prefix
@@ -99,8 +124,10 @@ _PRESENTER_RE = re.compile(r"[A-Za-z0-9._-]+")
 _SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
 
 # Display ids that would collide with the routing "auto" sentinel, the sidecar
-# path namespaces, or read confusingly in the guest URLs.
-_RESERVED_DISPLAY_IDS = {_AUTO, "display", "displays", "status", "whep", "in", "out"}
+# path namespaces, or the guest URL segments.
+_RESERVED_DISPLAY_IDS = {
+    _AUTO, "connect", "display", "displays", "status", "whep", "whip", "in", "out",
+}
 
 _DISPLAY_ERROR_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Present</title>
@@ -133,12 +160,19 @@ class RouteIn(BaseModel):
     source: str
 
 
+class ConnectIn(BaseModel):
+    """Connect page's code->token exchange payload."""
+
+    name: str
+    code: str
+
+
 class PresentPlugin:
 
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -153,6 +187,7 @@ class PresentPlugin:
             "http_endpoints",
             "guest_endpoints",
         ],
+        "guest_alias": _GUEST_ALIAS,
         "has_native_dependencies": True,
         "native_dependencies": [
             {
@@ -183,10 +218,12 @@ class PresentPlugin:
         "usage": (
             "Add a display on this plugin page, then open its display link in "
             "a browser on the device driving that display (full screen). The "
-            "display shows a connect card with the space's join code, and "
-            "switches to the presenter's screen when someone shares. Route a "
-            "specific presenter to a display from this page, a macro's Route "
-            "Display step, or a script."
+            "display shows a connect card with the join address and code; a "
+            "guest types that address into a browser, enters the code and a "
+            "name, and shares their screen. Route a specific presenter to a "
+            "display from this page, a macro's Route Display step, or a "
+            "script. Screen capture in the guest's browser requires HTTPS "
+            "(enable it in Settings > Security)."
         ),
     }
 
@@ -197,6 +234,18 @@ class PresentPlugin:
             "description": (
                 "Shown on every display's connect card. Leave blank to use "
                 "the project name."
+            ),
+            "default": "",
+        },
+        "join_address": {
+            "type": "string",
+            "label": "Join Address",
+            "description": (
+                "IP address or hostname shown on the connect cards — what "
+                "guests type to reach this server. Leave blank to auto-detect "
+                "the LAN address. Set it on multi-network installs where "
+                "guests reach the server on a different network than the "
+                "displays."
             ),
             "default": "",
         },
@@ -246,6 +295,8 @@ class PresentPlugin:
         self._routing = {}  # display_id -> "auto" | pinned presenter name
         self._presence = {}  # presenter_name -> since_epoch
         self._code = ("", 0.0)  # (join code, rotated_at monotonic)
+        self._labels = {}  # presenter slug -> the display name the guest typed
+        self._detected_ip = ("", 0.0)  # (auto-detected join address, at monotonic)
 
     # ──── Lifecycle ────
 
@@ -354,6 +405,53 @@ class PresentPlugin:
     def _current_code(self):
         return self._code[0]
 
+    def _join_url(self):
+        """The address a guest types, exactly as the connect cards show it.
+
+        Scheme-less on purpose: guests type it into the address bar, and the
+        platform's HTTP->HTTPS redirect upgrades it when TLS is enabled.
+        """
+        address = (self.api.config.get("join_address") or "").strip()
+        if not address:
+            address = self._detect_local_ip()
+        port = self._http_port()
+        host = address if port == 80 else f"{address}:{port}"
+        return f"{host}/{_GUEST_ALIAS}"
+
+    def _detect_local_ip(self):
+        """Best-guess LAN address via the UDP-connect trick (no packets sent).
+
+        Same method the platform's mDNS advertiser uses. Multi-NIC/VLAN
+        installs where this guesses wrong set the join_address config field.
+        """
+        ip, at = self._detected_ip
+        if ip and time.monotonic() - at < _IP_CACHE_SECONDS:
+            return ip
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.settimeout(0.5)
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
+        except OSError:
+            ip = "127.0.0.1"
+        self._detected_ip = (ip, time.monotonic())
+        return ip
+
+    @staticmethod
+    def _http_port():
+        # The plugin runs in the server process, so the platform config is
+        # importable; the fallback keeps unit tests (no server package on the
+        # path) and any config surprise on the default port.
+        try:
+            from server.system_config import get_system_config
+
+            return int(get_system_config().get("network", "http_port"))
+        except Exception:
+            return 8080
+
     # ──── Displays ────
 
     async def _load_displays(self):
@@ -415,9 +513,13 @@ class PresentPlugin:
         return secrets.token_urlsafe(24)
 
     def _display_path(self, display):
-        """Site-relative Display URL; the plugin page prepends the origin."""
+        """Site-relative Display URL; the plugin page prepends the origin.
+
+        Uses the short guest-alias mount (the canonical
+        /api/plugins/present/guest/... path serves the same page).
+        """
         return (
-            f"/api/plugins/present/guest/display/{display['id']}"
+            f"/{_GUEST_ALIAS}/display/{display['id']}"
             f"?key={display.get('display_key', '')}"
         )
 
@@ -543,10 +645,13 @@ class PresentPlugin:
 
         for name in sorted(live - set(self._presence)):
             self._presence[name] = now
-            await self.api.event_emit("presenter_joined", {"name": name})
+            await self.api.event_emit(
+                "presenter_joined", {"name": name, "label": self._label_for(name)}
+            )
         for name in sorted(set(self._presence) - live):
             del self._presence[name]
-            await self.api.event_emit("presenter_left", {"name": name})
+            label = self._labels.pop(name, name)
+            await self.api.event_emit("presenter_left", {"name": name, "label": label})
 
         is_live = bool(self._presence)
         _code, rotated_at = self._code
@@ -559,18 +664,26 @@ class PresentPlugin:
 
         await self._publish_all()
 
-    @staticmethod
-    def _presenters_list(presence):
+    def _label_for(self, presenter):
+        """The display name the guest typed at connect time, else the slug.
+
+        A presenter who bypassed the Connect page (a bench WHIP publish
+        straight to the sidecar) has no label; their ingest name stands in.
+        """
+        return self._labels.get(presenter, presenter)
+
+    def _presenters_list(self, presence):
         return [
-            {"name": n, "since": s}
+            {"name": n, "label": self._label_for(n), "since": s}
             for n, s in sorted(presence.items(), key=lambda kv: (kv[1], kv[0]))
         ]
 
     def _sources_options(self):
         """The routable-source list, in the {value, label} shape the macro
-        builder's options_source picker parses."""
+        builder's options_source picker parses. Routing values stay the
+        path-safe ingest names; the labels are the typed display names."""
         return [{"value": _AUTO, "label": "Auto (active presenter)"}] + [
-            {"value": p["name"], "label": p["name"]}
+            {"value": p["name"], "label": p["label"]}
             for p in self._presenters_list(self._presence)
         ]
 
@@ -635,6 +748,94 @@ class PresentPlugin:
     def _build_guest_router(self):
         guest = APIRouter()
 
+        # ── Connect page (the presenter's sender surface) ──
+        # The root of both guest mounts; via the top-level alias this is the
+        # short URL on every connect card (http://<join-address>:<port>/present
+        # redirects here). Deliberately open — the join code is the gate, and
+        # it is checked at the POST /connect exchange, not the page serve.
+        @guest.get("/")
+        async def connect_page():
+            html = (_PLUGIN_DIR / "panel" / "connect.html").read_text(encoding="utf-8")
+            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+        @guest.post("/connect")
+        async def connect(data: ConnectIn):
+            code = (data.code or "").strip()
+            current = self._current_code()
+            if not code or not current or not secrets.compare_digest(code, current):
+                # 401 feeds the platform's brute-force accounting.
+                raise HTTPException(
+                    401, "That join code isn't right. Check the code on the display."
+                )
+            label = " ".join((data.name or "").split())[:_NAME_MAX_CHARS]
+            presenter = self._slugify_presenter(label)
+            if not presenter:
+                raise HTTPException(422, "Enter your name.")
+            if presenter == _AUTO:
+                raise HTTPException(422, "That name is reserved. Use a different name.")
+            if presenter in self._presence:
+                raise HTTPException(
+                    409,
+                    f'Someone is already presenting as "{self._label_for(presenter)}". '
+                    "Use a different name.",
+                )
+            self._labels[presenter] = label
+            # The scope binds the token to this ingest name: it can publish
+            # in/<presenter> and nothing else.
+            token, expires_at = self.api.mint_guest_token(
+                f"whip:{presenter}", ttl=_GUEST_TOKEN_TTL_SECONDS
+            )
+            return {
+                "token": token,
+                "expires_at": expires_at,
+                "presenter": presenter,
+                "label": label,
+                "space_name": await self._space_name(),
+            }
+
+        # ── WHIP (WebRTC publish) reverse proxy ──
+        # The Connect page POSTs its SDP offer here with the guest token from
+        # the /connect exchange; we forward to the sidecar's WHIP endpoint for
+        # in/<presenter>. Signaling is loopback-only on the sidecar, and its
+        # localhost "any" user carries publish (no read), so the proxied
+        # publish needs no credential injection. Same Location rewrite as the
+        # WHEP proxy below, so trickle/teardown come back through the token
+        # check.
+        @guest.post("/whip/{presenter}")
+        async def whip_publish(presenter: str, request: Request, token: str = ""):
+            self._validate_presenter(presenter)
+            self._require_guest_token(token, presenter)
+            resp = await self.api.proxy_to(
+                self._whip_url(presenter), request, allow_internal=True
+            )
+            location = resp.headers.get("location")
+            if location:
+                secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
+            return resp
+
+        @guest.patch("/whip/{presenter}/{secret}")
+        async def whip_trickle(
+            presenter: str, secret: str, request: Request, token: str = ""
+        ):
+            self._validate_presenter(presenter)
+            self._require_guest_token(token, presenter)
+            self._validate_secret(secret)
+            return await self.api.proxy_to(
+                self._whip_url(presenter, secret), request, allow_internal=True
+            )
+
+        @guest.delete("/whip/{presenter}/{secret}")
+        async def whip_teardown(
+            presenter: str, secret: str, request: Request, token: str = ""
+        ):
+            self._validate_presenter(presenter)
+            self._require_guest_token(token, presenter)
+            self._validate_secret(secret)
+            return await self.api.proxy_to(
+                self._whip_url(presenter, secret), request, allow_internal=True
+            )
+
         @guest.get("/display/{display_id}")
         async def display_page(display_id: str, key: str = ""):
             try:
@@ -659,8 +860,13 @@ class PresentPlugin:
                 "space_name": await self._space_name(),
                 "state": "live" if presenter else "idle",
                 "presenter": presenter,
+                "presenter_label": self._label_for(presenter) if presenter else "",
                 "path": f"{_INGEST_PREFIX}/{presenter}" if presenter else "",
                 "code": self._current_code(),
+                # What the idle card tells guests to type — plugin-chosen, not
+                # derived from the display's own vantage (which is wrong on
+                # the server host and on multi-network installs).
+                "join_url": self._join_url(),
             }
 
         # ── WHEP (WebRTC playback) reverse proxy ──
@@ -719,6 +925,30 @@ class PresentPlugin:
         base = f"http://{cred}{_WEBRTC_HOST}:{_WEBRTC_PORT}/{_INGEST_PREFIX}/{presenter}/whep"
         return f"{base}/{secret}" if secret else base
 
+    @staticmethod
+    def _whip_url(presenter, secret=None):
+        """Build the localhost sidecar WHIP (publish) URL — no credentials.
+
+        The proxied request originates on this host, and the sidecar's
+        localhost ``any`` user carries publish (and only publish).
+        """
+        base = f"http://{_WEBRTC_HOST}:{_WEBRTC_PORT}/{_INGEST_PREFIX}/{presenter}/whip"
+        return f"{base}/{secret}" if secret else base
+
+    def _require_guest_token(self, token, presenter):
+        """401 unless ``token`` was minted for exactly this presenter's ingest."""
+        if not token or not self.api.verify_guest_token(token, f"whip:{presenter}"):
+            raise HTTPException(
+                401, "Invalid or expired session. Enter the join code again."
+            )
+
+    @staticmethod
+    def _slugify_presenter(name):
+        """Path-safe ingest name from a typed display name ('' when nothing
+        survives). Distinct from _slugify: no fallback value — an empty name
+        is rejected, not defaulted."""
+        return re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
+
     # ──── Ext router (authed, mounted at /api/plugins/present/ext/) ────
 
     def _build_ext_router(self):
@@ -732,6 +962,7 @@ class PresentPlugin:
                 "mediamtx_version": _MEDIAMTX_VERSION,
                 "space_name": await self._space_name(),
                 "code": self._current_code(),
+                "join_url": self._join_url(),
                 "presenters": presenters,
                 "active_presenters": len(presenters),
                 "sources": self._sources_options(),

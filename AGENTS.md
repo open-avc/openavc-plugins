@@ -96,6 +96,8 @@ PLUGIN_INFO = {
     "dependencies": [],             # pip packages (must be MIT-compatible)
     "native_dependencies": [],      # Platform-level SDKs (see section 11)
     "capabilities": [],             # API permissions needed (see below)
+    "guest_alias": "myshare",       # Top-level short route for the guest router
+                                    # (requires guest_endpoints; see HTTP Endpoints)
     "usage": "...",                 # Markdown shown on the plugin's IDE page
 }
 ```
@@ -137,7 +139,7 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | `network_listen` | Plugin may open network ports; also gates `mdns_browse(service_types, duration=5.0)` (LAN service discovery via the platform's mDNS listener; feature-detect with `getattr` — added in platform 0.16.0) |
 | `usb_access` | Plugin may access USB devices |
 | `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*`; also gates `proxy_to()` (outbound requests) |
-| `guest_endpoints` | `register_guest_router()` — mount **unauthenticated** HTTP routes under `/api/plugins/<id>/guest/*` (added in platform 0.23.0; see HTTP Endpoints below) |
+| `guest_endpoints` | `register_guest_router()` — mount **unauthenticated** HTTP routes under `/api/plugins/<id>/guest/*`; also gates `mint_guest_token()`/`verify_guest_token()` and the PLUGIN_INFO `guest_alias` short route (added in platform 0.23.0; see HTTP Endpoints below) |
 
 `state_write` and `variable_write` are independent. `state_write` lets a plugin write its own namespaced state (e.g., `plugin.my_plugin.connected`). `variable_write` lets a plugin write user variables (`var.*`) — shared room-logic state. Most plugins need only `state_write`. Declare `variable_write` only when the plugin explicitly contributes to user-variable state, e.g., a sensor reporting occupancy into `var.room_occupied` or a bridge mirroring an external system. A `var.*` key the plugin *creates* (one that didn't already exist) is removed on stop/uninstall; writing to a variable already declared in the project leaves it intact.
 
@@ -463,6 +465,45 @@ openly). Return `401` on a bad credential — the platform's per-IP rate limiter
 counts 401 responses toward its brute-force throttle. Keep guest handlers
 minimal and read-only where possible; never expose project mutation, code
 execution, or other plugins' data through a guest route.
+
+**Guest tokens (code→token exchange, requires: guest_endpoints).** When the
+guest credential is something a person types once (a join code, a PIN), don't
+make every call re-send it — exchange it for a platform-minted token bound to
+`(this plugin, scope)`:
+
+```python
+@guest.post("/connect")
+async def connect(data: ConnectIn):
+    if not self._code_valid(data.code):
+        raise HTTPException(401, "Wrong code")          # feeds brute-force throttle
+    token, expires_at = api.mint_guest_token(f"session:{data.name}", ttl=4 * 3600)
+    return {"token": token, "expires_at": expires_at}
+
+@guest.post("/stream/{name}")
+async def stream(name: str, request: Request, token: str = ""):
+    if not api.verify_guest_token(token, f"session:{name}"):
+        raise HTTPException(401, "Invalid or expired token")
+    ...
+```
+
+The `scope` string is plugin-defined — bind it to what the token may touch (a
+session, a resource, a claimed name) so one guest's token can't act as
+another's. Tokens are HMAC-signed with an in-memory per-process secret:
+nothing lands on disk, and every token dies on server restart (the guest
+re-enters the code). Return `401` on verification failure.
+
+**Top-level short route (`guest_alias`).** A guest URL a human has to *type*
+can't look like `/api/plugins/my_plugin/guest/join`. A plugin with
+`guest_endpoints` may declare `"guest_alias": "myshare"` in PLUGIN_INFO; the
+guest router is then *also* mounted at `/myshare/*` (a route defined as
+`@guest.get("/join")` serves at both `/myshare/join` and
+`/api/plugins/my_plugin/guest/join`). One lowercase URL segment
+(`[a-z][a-z0-9_-]*`, max 32 chars); reserved platform paths (`api`, `panel`,
+`programmer`, `pair`, `setup`, ...) are refused at load. If two running
+plugins claim the same alias, the first one wins and the loser keeps its
+canonical `/guest/*` routes. Alias traffic gets the same rate-limit tier and
+401 accounting as the canonical routes. The Programmer IDE shows the alias as
+the plugin's "Guest URL". Added in platform 0.23.0.
 
 ---
 

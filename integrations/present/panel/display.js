@@ -47,6 +47,10 @@
   let starting = false;
   let linkDead = false; // the key was rejected; stop polling for good
 
+  // The join line comes from the status payload (the plugin decides the
+  // address guests should type); our own location.host is only the
+  // placeholder until the first poll lands — it is wrong on the server host
+  // and on multi-network installs.
   joinHostEl.textContent = location.host;
 
   // ──── Status poll (drives idle <-> live) ────
@@ -83,11 +87,12 @@
 
     spaceNameEl.textContent = status.space_name || '';
     displayLabelEl.textContent = status.label || displayId;
+    if (status.join_url) joinHostEl.textContent = status.join_url;
     joinCodeEl.textContent = (status.code || '').split('').join(' ');
     document.title = (status.label || displayId) + ' — Present';
 
     if (status.state === 'live' && status.presenter) {
-      presenterBadgeEl.textContent = status.presenter;
+      presenterBadgeEl.textContent = status.presenter_label || status.presenter;
       if (status.presenter !== currentPresenter) {
         stopLive();
         currentPresenter = status.presenter;

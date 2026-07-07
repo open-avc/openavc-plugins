@@ -15,6 +15,11 @@ back to the card. Open a display's link in a browser on whatever drives that
 screen: a mini PC, a stick PC, a smart TV with a real browser, or a spare
 tablet.
 
+Presenters join with nothing installed: the connect card on every display
+shows a short address (for example `192.168.1.20:8080/present`) and a rotating
+join code. A guest types the address into a laptop browser, enters the code
+and their name, and picks a screen or window to share.
+
 Between presenters and displays sits **routing**, and it works like a matrix
 switcher with no frame: every display follows a source. `Auto` (the default)
 follows the active presenter, so a one-display space needs no routing setup at
@@ -22,19 +27,18 @@ all. Pinning a presenter to a display sends that person's screen there — same
 source to many displays, different sources to different displays — from the
 plugin page, a macro step, a script, or a state key write.
 
-> **Early release.** This version ships the displays-and-routing model, the
-> Display page, and the control-system state, events, and routing verbs. The
-> guest **share page** — where a visitor types the join code and picks a screen
-> to share, with no software installed — is under active development. Until it
-> ships, publishing to the space requires a WebRTC (WHIP) publisher running on
-> the OpenAVC server host, which makes this release most useful for evaluating
-> the display side and wiring up automation.
-
 ## Requirements
 
 - A browser at each display (any modern one: Chrome, Edge, Firefox, Safari).
   Devices that can only play a stream URL and devices without a browser are
   not supported by the Display page.
+- **HTTPS on the OpenAVC instance for presenters.** Browsers only allow
+  screen capture on a secure page, so the share page needs the instance's
+  HTTPS support enabled (Settings > Security in the Programmer). With the
+  auto-generated certificate, guests click through a one-time browser
+  warning; with a CA-issued certificate they don't. Without HTTPS the share
+  page still loads but tells the guest sharing is unavailable. Displays are
+  not affected.
 - **Network:** WebRTC media travels over **UDP port 8190** directly between
   browsers and the server. On a normal LAN this works as-is; if the server has
   a firewall, allow inbound UDP 8190.
@@ -43,6 +47,26 @@ plugin page, a macro step, a script, or a state key write.
 
 The MediaMTX helper is downloaded automatically when the plugin is installed.
 No manual setup is required on Windows or Linux.
+
+## Sharing your screen (presenters)
+
+1. Open a browser on a laptop and go to the address on the display
+   (for example `192.168.1.20:8080/present`).
+2. Enter your name and the join code shown on the display.
+3. Pick the screen, window, or tab to share in the browser's picker.
+
+That's it — the routing decides which display shows it (with one display and
+`Auto` routing, it just appears). Stop from the page's **Stop sharing**
+button or the browser's own stop-sharing bar.
+
+**Sound** is best-effort and browser-dependent: Chrome and Edge offer an
+"Also share audio" option in the picker (tab audio anywhere; full system
+audio on Windows when sharing the entire screen). Firefox and Safari share
+video only.
+
+By default the connect card shows the server's detected LAN address. If
+guests reach the server at a different address (multiple networks, VLANs, a
+DNS name), set **Join Address** in the plugin's configuration.
 
 ## Displays
 
@@ -114,7 +138,7 @@ matrix take with no matrix frame.
 | `plugin.present.error` | string | Last fatal error message (empty when healthy) |
 | `plugin.present.code` | string | The join code currently shown on every connect card |
 | `plugin.present.active_presenters` | integer | How many presenters are currently sharing |
-| `plugin.present.presenters` | string | JSON list of `{name, since}` for current presenters |
+| `plugin.present.presenters` | string | JSON list of `{name, label, since}` for current presenters (`name` is the routable ingest name, `label` the name the guest typed) |
 | `plugin.present.displays` | string | JSON list of `{id, value, label}` for configured displays (feeds the Route Display dropdown) |
 | `plugin.present.sources` | string | JSON list of `{value, label}` routable sources: `auto` plus live presenters (feeds the Route Display dropdown) |
 | `plugin.present.display.<id>.source` | string | The routing assignment: `auto` or a presenter name. **Writable** — set it to route the display |
@@ -125,8 +149,8 @@ matrix take with no matrix frame.
 
 | Event | Payload | Description |
 |-------|---------|-------------|
-| `plugin.present.presenter_joined` | `{name}` | Someone started sharing |
-| `plugin.present.presenter_left` | `{name}` | Someone stopped sharing |
+| `plugin.present.presenter_joined` | `{name, label}` | Someone started sharing |
+| `plugin.present.presenter_left` | `{name, label}` | Someone stopped sharing |
 | `plugin.present.route_changed` | `{display, source}` | A display's routing assignment changed |
 | `plugin.present.error` | `{reason}` | The helper failed repeatedly and stopped restarting |
 
@@ -135,11 +159,11 @@ Event-triggered macros can read the payload with `$trigger.name`,
 
 ## The join code
 
-Every connect card shows the space's join code. It rotates when a
-presentation ends and periodically while the space is idle, so a code seen
-during one meeting can't be reused for the next. In this release the code is
-shown on the displays; the guest share flow that asks for it is part of the
-upcoming share page.
+Every connect card shows the space's join code, and the share page requires
+it before anything else happens. It rotates when a presentation ends and
+periodically while the space is idle, so a code seen during one meeting can't
+be reused for the next. Entering the code mints a short-lived session for
+that presenter only; wrong guesses are rate-limited by the server.
 
 ## Troubleshooting
 
@@ -151,6 +175,12 @@ upcoming share page.
   page.
 - **Display shows "Reconnecting to OpenAVC…":** The display can't reach the
   OpenAVC server — server down or network issue. It recovers on its own.
+- **The share page says screen sharing is unavailable:** The instance doesn't
+  have HTTPS enabled (or the guest opened a plain `http://` address directly).
+  Enable HTTPS under Settings > Security; the card's address then upgrades
+  automatically.
+- **"Someone is already presenting as …":** Two guests picked the same name.
+  The second one just needs a different name.
 - **Video connects but never appears on another device:** Make sure UDP port
   8190 is open between the display's network and the server.
 - **A display stays on the connect card while someone is sharing:** Check its
