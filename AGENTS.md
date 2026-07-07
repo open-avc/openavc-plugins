@@ -137,6 +137,7 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | `network_listen` | Plugin may open network ports; also gates `mdns_browse(service_types, duration=5.0)` (LAN service discovery via the platform's mDNS listener; feature-detect with `getattr` — added in platform 0.16.0) |
 | `usb_access` | Plugin may access USB devices |
 | `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*`; also gates `proxy_to()` (outbound requests) |
+| `guest_endpoints` | `register_guest_router()` — mount **unauthenticated** HTTP routes under `/api/plugins/<id>/guest/*` (added in platform 0.23.0; see HTTP Endpoints below) |
 
 `state_write` and `variable_write` are independent. `state_write` lets a plugin write its own namespaced state (e.g., `plugin.my_plugin.connected`). `variable_write` lets a plugin write user variables (`var.*`) — shared room-logic state. Most plugins need only `state_write`. Declare `variable_write` only when the plugin explicitly contributes to user-variable state, e.g., a sensor reporting occupancy into `var.room_occupied` or a bridge mirroring an external system. A `var.*` key the plugin *creates* (one that didn't already exist) is removed on stop/uninstall; writing to a variable already declared in the project leaves it intact.
 
@@ -414,6 +415,54 @@ platform = api.platform  # "win_x64", "linux_x64", or "linux_arm64"
 # Log a message (appears in Programmer IDE System Log)
 api.log("Connected to broker", level="info")  # level: "info", "warning", "error", "debug"
 ```
+
+### 5.7 HTTP Endpoints
+
+```python
+from fastapi import APIRouter, HTTPException
+
+# Mount authed routes under /api/plugins/<id>/ext/* (requires: http_endpoints)
+# Callers: the Programmer IDE (programmer auth) and the plugin's own panel
+# iframe (platform-minted plugin token). Call from start(); routes are mounted
+# after start() returns and removed on stop.
+router = APIRouter()
+
+@router.get("/status")
+async def status():
+    return {"ok": True}
+
+api.register_router(router)
+
+# Proxy an incoming request to another URL (requires: http_endpoints)
+# Forwards method, body, query, and headers; refuses internal/loopback hosts
+# unless allow_internal=True (explicit opt-in for a plugin's own localhost
+# sidecar).
+resp = await api.proxy_to("http://127.0.0.1:9000/path", request, allow_internal=True)
+
+# Mount UNAUTHENTICATED routes under /api/plugins/<id>/guest/*
+# (requires: guest_endpoints — a separate, bigger grant than http_endpoints;
+# added in platform 0.23.0)
+guest = APIRouter()
+
+@guest.get("/view/{room_id}")
+async def view(room_id: str, key: str = ""):
+    if not key_is_valid(room_id, key):
+        raise HTTPException(401, "Invalid or missing key")
+    ...
+
+api.register_guest_router(guest)
+```
+
+Guest routes exist for devices that have no OpenAVC login and can never get
+one — a visitor's own laptop, an unattended receiver box that must survive
+server restarts. They are reachable by anything that can reach the OpenAVC
+HTTP port, even on an instance with authentication configured, so **the plugin
+must gate every guest route itself** (a long-lived per-resource key in the
+URL, a PIN exchange, or a deliberate decision to serve something harmless
+openly). Return `401` on a bad credential — the platform's per-IP rate limiter
+counts 401 responses toward its brute-force throttle. Keep guest handlers
+minimal and read-only where possible; never expose project mutation, code
+execution, or other plugins' data through a guest route.
 
 ---
 
