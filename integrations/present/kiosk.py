@@ -58,8 +58,10 @@ from pathlib import Path
 
 try:
     import hostoutputs
+    from sidecar import bind_to_process_lifetime
 except ImportError:  # pragma: no cover - package-path import (tests/CI)
     from . import hostoutputs
+    from .sidecar import bind_to_process_lifetime
 
 # Topology watch cadence. Also bounds how quickly a crash or unplug is seen.
 _WATCH_INTERVAL = 5.0
@@ -204,6 +206,9 @@ class AsyncioProcessBackend:
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
         )
+        # A hard-killed server must never leave a kiosk browser covering the
+        # display (and holding its profile dir against the next start).
+        bind_to_process_lifetime(proc.pid)
         return _AsyncioProc(proc)
 
 
@@ -247,6 +252,7 @@ class Win32SessionBackend:  # pragma: no cover - exercised on Windows services
         # The Win32 calls are quick and synchronous; keep them off the loop.
         pid, handle = await asyncio.to_thread(_create_process_in_console_session,
                                               argv, hidden)
+        bind_to_process_lifetime(pid)
         return _Win32Proc(pid, handle)
 
 
@@ -406,6 +412,14 @@ class _BaseEnvironment:
         """Actual on-screen rect for a launched kiosk, when checkable."""
         return None
 
+    def raise_window_for_pid(self, pid):
+        """Bring the kiosk's window above others, where the OS needs help.
+
+        True = done (or nothing to do on this platform); False = window not
+        found yet, try again next tick.
+        """
+        return True
+
 
 class _UnsupportedEnvironment(_BaseEnvironment):
     supported = False
@@ -430,6 +444,12 @@ class _WindowsEnvironment(_BaseEnvironment):  # pragma: no cover - Windows only
             return hostoutputs.window_rect_for_pid(pid)
         except OSError:
             return None
+
+    def raise_window_for_pid(self, pid):
+        try:
+            return hostoutputs.raise_window_for_pid(pid)
+        except OSError:
+            return True
 
 
 class _WindowsServiceEnvironment(_BaseEnvironment):  # pragma: no cover - Windows only
@@ -586,6 +606,7 @@ class _Kiosk:
         self.next_attempt = 0.0
         self.circuit_broken = False
         self.placement_checked = False
+        self.raised = True  # window brought above others yet (per launch)
         self.last_log = ""  # dedupes repeating per-tick log lines
 
 
@@ -625,19 +646,24 @@ class KioskManager:
 
         Removed displays are torn down; a changed URL or output relaunches
         (and resets the failure trail — a config change is a fresh start).
+        Serialized against the watch tick: without the lock, a reconcile
+        already in flight can launch a browser into a record this call is
+        retiring — an untracked orphan that then holds the profile dir, so
+        every relaunch hands off to it and instantly exits.
         """
-        for display_id in list(self._kiosks):
-            if display_id not in specs:
-                await self._ensure_dead(self._kiosks.pop(display_id))
-        for display_id, spec in specs.items():
-            kiosk = self._kiosks.get(display_id)
-            if kiosk is None:
-                self._kiosks[display_id] = _Kiosk(dict(spec))
-            elif kiosk.spec != spec:
-                await self._ensure_dead(kiosk)
-                self._kiosks[display_id] = _Kiosk(dict(spec))
-        if self._kiosks and self._watch is None and not self._stopping:
-            self._watch = self._make_task(self._watch_loop())
+        async with self._reconcile_lock:
+            for display_id in list(self._kiosks):
+                if display_id not in specs:
+                    await self._ensure_dead(self._kiosks.pop(display_id))
+            for display_id, spec in specs.items():
+                kiosk = self._kiosks.get(display_id)
+                if kiosk is None:
+                    self._kiosks[display_id] = _Kiosk(dict(spec))
+                elif kiosk.spec != spec:
+                    await self._ensure_dead(kiosk)
+                    self._kiosks[display_id] = _Kiosk(dict(spec))
+            if self._kiosks and self._watch is None and not self._stopping:
+                self._watch = self._make_task(self._watch_loop())
         self._wake.set()
 
     async def stop(self):
@@ -650,10 +676,11 @@ class KioskManager:
             except BaseException:
                 pass
         self._watch = None
-        for kiosk in self._kiosks.values():
-            await self._ensure_dead(kiosk)
-            kiosk.state = "stopped"
-        self._kiosks = {}
+        async with self._reconcile_lock:
+            for kiosk in self._kiosks.values():
+                await self._ensure_dead(kiosk)
+                kiosk.state = "stopped"
+            self._kiosks = {}
 
     def state_for(self, display_id):
         if not self._env.supported:
@@ -756,6 +783,17 @@ class KioskManager:
                 else:
                     if kiosk.state == "starting" and now - kiosk.launched_at > _QUICK_EXIT_WINDOW:
                         kiosk.state = "running"
+                    if not kiosk.raised:
+                        # A window created by a background process is denied
+                        # foreground rights, so the kiosk can open BEHIND
+                        # whatever was on that screen. Pin it above normal
+                        # windows once it exists (without stealing focus).
+                        try:
+                            kiosk.raised = bool(
+                                self._env.raise_window_for_pid(kiosk.proc.pid)
+                            )
+                        except Exception:
+                            kiosk.raised = True
                     self._verify_placement(display_id, kiosk, output, now)
                     continue
 
@@ -798,6 +836,7 @@ class KioskManager:
         kiosk.launched_at = now
         kiosk.launched_rect = rect
         kiosk.placement_checked = False
+        kiosk.raised = False
         kiosk.state = "starting"
         kiosk.last_log = ""
         self._log(

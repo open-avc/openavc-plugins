@@ -114,7 +114,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.8.1",
+        "version": "0.8.2",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",

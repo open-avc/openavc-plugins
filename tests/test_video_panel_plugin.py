@@ -127,6 +127,21 @@ async def test_supervisor_circuit_breaks_on_crash_loop(monkeypatch):
         await sup.stop()
 
 
+@pytest.mark.asyncio
+async def test_bind_to_process_lifetime_smoke():
+    """Binding a real child to this process's lifetime must be silent, and an
+    unopenable pid must be a no-op (never an exception in a spawn path)."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(30)"
+    )
+    try:
+        sidecar_mod.bind_to_process_lifetime(proc.pid)
+    finally:
+        proc.kill()
+        await proc.wait()
+    sidecar_mod.bind_to_process_lifetime(0)  # pid 0 can't be opened: no-op
+
+
 # ──── Plugin helpers ────
 
 

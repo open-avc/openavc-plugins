@@ -121,12 +121,21 @@ _DISPLAY = {"id": "main", "label": "Main Screen", "display_key": "k3y-k3y-k3y"}
 _DISPLAY2 = {"id": "overflow", "label": "Overflow TV", "display_key": "0th3r-k3y"}
 
 
+class _FakeSupervisor:
+    """Stands in for the SidecarSupervisor; the poll only reads .running."""
+
+    def __init__(self, running=True):
+        self.running = running
+        self.pid = 4242
+
+
 def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     plugin = PresentPlugin()
     cfg = {"displays": [dict(d) for d in (displays or [])]}
     cfg.update(config or {})
     plugin.api = _FakeApi(cfg, state=state)
     plugin._auth_pass = auth_pass
+    plugin._supervisor = _FakeSupervisor()
     plugin._displays = [dict(d) for d in (displays or [])]
     plugin._routing = {d["id"]: "auto" for d in plugin._displays}
     plugin._rotate_code()
@@ -1340,3 +1349,49 @@ async def test_load_displays_normalizes_local_output():
     assert by_id["a"].get("local_output") == "MON-1"
     assert "local_output" not in by_id["b"]
     assert "local_output" not in by_id["c"]
+
+
+# ──── Sidecar ownership (orphan/imposter protection) ────
+
+
+@pytest.mark.asyncio
+async def test_poll_ignores_imposter_sidecar():
+    """A reachable media API is not enough: if OUR supervisor isn't running,
+    whatever answers the port is an imposter (an orphan from an unclean
+    shutdown) and must not flip running back to True."""
+    plugin = _plugin()
+    plugin._supervisor = _FakeSupervisor(running=False)
+    scans = []
+
+    async def fake_scan():
+        scans.append(1)
+        return set()
+
+    plugin._scan_presenters = fake_scan
+    await plugin._poll()
+    assert plugin.api.state["running"] is False
+    assert not scans  # doesn't even ask the imposter
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_when_media_ports_already_answer(tmp_path, monkeypatch):
+    """Something already answering the control port means our sidecar could
+    never bind — refuse with a clear message instead of crash-looping into
+    the circuit breaker behind a half-working orphan."""
+    plugin = _plugin()
+    plugin._supervisor = None  # start() must refuse before ever creating one
+    plugin.api.data_dir = tmp_path
+    monkeypatch.setattr(
+        PresentPlugin, "_resolve_dep", staticmethod(lambda name: tmp_path / name)
+    )
+    monkeypatch.setattr(PresentPlugin, "_ensure_executable", staticmethod(lambda p: None))
+
+    async def imposter_answers(path):
+        return {"items": []}
+
+    plugin._api_get = imposter_answers
+    with pytest.raises(RuntimeError, match="already using"):
+        await plugin.start(plugin.api)
+    assert plugin.api.state["running"] is False
+    assert "unclean shutdown" in plugin.api.state["error"]
+    assert plugin._supervisor is None  # never spawned anything

@@ -273,6 +273,8 @@ class _FakeEnv:
         self.outputs = outputs if outputs is not None else []
         self.err = ""
         self.console = True
+        self.raise_calls = []
+        self.raise_result = True
 
     def launch_env(self):
         return None
@@ -285,6 +287,10 @@ class _FakeEnv:
 
     def window_rect_for_pid(self, pid):
         return None
+
+    def raise_window_for_pid(self, pid):
+        self.raise_calls.append(pid)
+        return self.raise_result
 
 
 class _DroppedTask:
@@ -555,3 +561,69 @@ def test_remove_profile_best_effort(tmp_path):
     assert not profile.exists()
     # Nonexistent is fine too.
     kiosk.remove_profile(tmp_path, "never-existed")
+
+
+def test_manager_sync_serializes_with_inflight_tick(tmp_path):
+    """A config change while a tick is mid-launch must not orphan the
+    launching browser: without the lock, the tick's launch lands in a record
+    sync() just retired — an untracked process that keeps the profile dir,
+    so every relaunch hands off to it and instantly exits."""
+    async def run():
+        manager, env, clock = _manager(tmp_path, outputs=[_OUT_A])
+        await manager.sync(_SPEC)
+
+        release = asyncio.Event()
+        real_spawn = env.backend.spawn
+
+        async def slow_spawn(argv, env=None, hidden=False):
+            await release.wait()
+            return await real_spawn(argv, env=env, hidden=hidden)
+
+        env.backend.spawn = slow_spawn
+        tick = asyncio.create_task(manager.reconcile())
+        await asyncio.sleep(0.05)  # tick is now blocked inside the launch
+        sync_task = asyncio.create_task(
+            manager.sync({"main": {"output": "HDMI-A-2", "url": "http://new"}})
+        )
+        await asyncio.sleep(0.05)
+        release.set()
+        await tick
+        await sync_task
+        env.backend.spawn = real_spawn
+        await manager.reconcile()  # launches the new spec
+
+        alive = [p for p in env.backend.procs if p.alive()]
+        assert len(alive) == 1  # exactly one browser, no orphan
+        assert env.backend.spawned[-1][0][-1] == "http://new"
+
+    asyncio.run(run())
+
+
+def test_manager_raises_window_after_launch(tmp_path):
+    """The kiosk window is brought above other windows once it exists —
+    retried each tick until the environment reports success, once per
+    launch."""
+    async def run():
+        manager, env, clock = _manager(tmp_path, outputs=[_OUT_A])
+        env.raise_result = False  # window not up yet
+        await manager.sync(_SPEC)
+        await manager.reconcile()  # launch
+        assert env.raise_calls == []
+        await manager.reconcile()  # alive -> raise attempt
+        await manager.reconcile()  # still not found -> retried
+        assert len(env.raise_calls) == 2
+        env.raise_result = True
+        await manager.reconcile()  # found + raised
+        await manager.reconcile()  # done; no more attempts
+        assert len(env.raise_calls) == 3
+
+        # A relaunch raises again: unplug, replug.
+        env.outputs = []
+        await manager.reconcile()
+        env.outputs = [_OUT_A]
+        clock["t"] += 10
+        await manager.reconcile()  # relaunch
+        await manager.reconcile()
+        assert len(env.raise_calls) == 4
+
+    asyncio.run(run())

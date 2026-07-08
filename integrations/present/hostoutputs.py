@@ -188,6 +188,50 @@ if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
             return None
         return max(rects, key=lambda r: r[2] * r[3])
 
+    def raise_window_for_pid(pid):
+        """Pin the pid's main window above normal windows, without focus.
+
+        Windows denies foreground activation to windows created by a
+        background process (the server), so a kiosk browser can open BEHIND
+        whatever was already on that screen. HWND_TOPMOST changes z-order
+        without needing foreground rights, and SWP_NOACTIVATE keeps the
+        user's keyboard focus where it was. Returns True once a window was
+        raised; False when the pid has no visible window yet (retry later).
+        """
+        user32 = ctypes.windll.user32
+        _EnumWindowsProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+        windows = []
+
+        @_EnumWindowsProc
+        def _collect(hwnd, _lparam):
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid and user32.IsWindowVisible(hwnd):
+                r = _RECT()
+                if user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                    w, h = r.right - r.left, r.bottom - r.top
+                    if w > 0 and h > 0:
+                        windows.append((hwnd, w * h))
+            return True
+
+        user32.EnumWindows(_collect, 0)
+        if not windows:
+            return False
+        hwnd = max(windows, key=lambda item: item[1])[0]
+        SetWindowPos = user32.SetWindowPos
+        SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.UINT,
+        ]
+        HWND_TOPMOST = wintypes.HWND(-1)
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+        return True
+
 
 # ──── Linux graphical-session detection ────
 

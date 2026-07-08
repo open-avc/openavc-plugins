@@ -57,8 +57,21 @@ from pathlib import Path
 
 try:
     import encoders
+    from sidecar import bind_to_process_lifetime
 except ImportError:  # pragma: no cover - package-path import (tests/CI)
     from . import encoders
+    from .sidecar import bind_to_process_lifetime
+
+
+async def _spawn_bound(*args, **kwargs):
+    """Default process spawn: exec + bind to this process's lifetime, so a
+    hard-killed server never leaves encoders/pumps running (see sidecar.py).
+    Injected test spawns bypass this on purpose — binding a fake pid would
+    hand some unrelated real process to the kill-on-close job."""
+    proc = await asyncio.create_subprocess_exec(*args, **kwargs)
+    bind_to_process_lifetime(proc.pid)
+    return proc
+
 
 # ──── Fixed output profile (must never change mid-stream) ────
 
@@ -421,7 +434,7 @@ class OutputController:
         self._font = font
         self._log_fn = log
         self._make_task = task_factory or (lambda coro: asyncio.create_task(coro))
-        self._spawn = spawn or asyncio.create_subprocess_exec
+        self._spawn = spawn or _spawn_bound
 
         self.state = "stopped"
         self._stopping = False

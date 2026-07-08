@@ -202,7 +202,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.5.0",
+        "version": "0.5.1",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -400,6 +400,21 @@ class PresentPlugin:
         self._auth_pass = self._load_or_create_auth()
         self._config_path = self.api.data_dir / "mediamtx.yml"
         self._config_path.write_text(self._render_config(), encoding="utf-8")
+
+        # If something already answers on the control port, our MediaMTX
+        # could never bind — it would crash-loop into the circuit breaker
+        # while the imposter (usually an orphan from an unclean shutdown)
+        # half-serves traffic. Refuse loudly instead.
+        if await self._api_get("/v3/paths/list") is not None:
+            msg = (
+                f"Another process is already using this plugin's media ports "
+                f"(something answers on {_API_HOST}:{_API_PORT}) — usually a "
+                "MediaMTX left over from an unclean shutdown. Close it (or "
+                "restart this computer), then enable the plugin again."
+            )
+            await self.api.state_set("running", False)
+            await self.api.state_set("error", msg)
+            raise RuntimeError(msg)
 
         await self.api.state_set("running", False)
         await self.api.state_set("error", "")
@@ -970,6 +985,13 @@ class PresentPlugin:
         return live
 
     async def _poll(self):
+        # Only OUR sidecar counts. Without this guard, an imposter answering
+        # the API port (an orphaned MediaMTX from an unclean shutdown) would
+        # keep flipping running back to True while the supervisor sits
+        # circuit-broken — masking the failure until someone presents.
+        if self._supervisor is None or not self._supervisor.running:
+            await self.api.state_set("running", False)
+            return
         live = await self._scan_presenters()
         if live is None:
             await self.api.state_set("running", False)
