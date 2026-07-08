@@ -132,6 +132,7 @@ def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     # the test host's NICs or whether the server package is importable.
     plugin._detect_local_ip = lambda: "192.0.2.10"
     plugin._http_port = lambda: 8080
+    plugin._tls_state = lambda: (False, 0)
     return plugin
 
 
@@ -1138,3 +1139,34 @@ async def test_refresh_card_writes_only_on_change(tmp_path, monkeypatch):
     await plugin._refresh_card()
     await plugin._refresh_card()
     assert writes == [("space", "Bench"), ("join", "192.0.2.10:8080/present")]
+
+
+# ──── Join URL vs TLS state ────
+
+
+def test_join_url_plain_http():
+    plugin = _plugin()
+    assert plugin._join_url() == "192.0.2.10:8080/present"
+    # Port 80 drops from the short form.
+    plugin._http_port = lambda: 80
+    assert plugin._join_url() == "192.0.2.10/present"
+
+
+def test_join_url_https_is_scheme_qualified():
+    """With TLS on the card must show the full https URL. A scheme-less
+    host:8080 gets rewritten to https-on-8080 by browsers with automatic
+    HTTPS upgrades (TLS handshake into the plain listener); a scheme-less
+    host:8443 defaults to http against the TLS listener. Only the explicit
+    https form works everywhere."""
+    plugin = _plugin()
+    plugin._tls_state = lambda: (True, 8443)
+    assert plugin._join_url() == "https://192.0.2.10:8443/present"
+    # Port 443 drops (the https default).
+    plugin._tls_state = lambda: (True, 443)
+    assert plugin._join_url() == "https://192.0.2.10/present"
+
+
+def test_join_url_honors_configured_join_address_with_tls():
+    plugin = _plugin(config={"join_address": "present.example.org"})
+    plugin._tls_state = lambda: (True, 8443)
+    assert plugin._join_url() == "https://present.example.org:8443/present"

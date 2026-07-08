@@ -24,9 +24,10 @@ card. Displays come in two kinds:
   a second of latency and a brief blip at each source switch.
 
 Presenters join with nothing installed: the connect card on every display
-shows a short address (for example `192.168.1.20:8080/present`) and a rotating
-join code. A guest types the address into a laptop browser, enters the code
-and their name, and picks a screen or window to share.
+shows an address (`https://192.168.1.20:8443/present` when the instance runs
+HTTPS, `192.168.1.20:8080/present` without it) and a rotating join code. A
+guest types the address into a laptop browser, enters the code and their
+name, and picks a screen or window to share.
 
 Between presenters and displays sits **routing**, and it works like a matrix
 switcher with no frame: every display follows a source. `Auto` (the default)
@@ -65,8 +66,8 @@ is installed. No manual setup is required on Windows or Linux.
 
 ## Sharing your screen (presenters)
 
-1. Open a browser on a laptop and go to the address on the display
-   (for example `192.168.1.20:8080/present`).
+1. Open a browser on a laptop and go to the address on the display, exactly
+   as shown.
 2. Enter your name and the join code shown on the display.
 3. Pick the screen, window, or tab to share in the browser's picker.
 
@@ -81,7 +82,11 @@ video only.
 
 By default the connect card shows the server's detected LAN address. If
 guests reach the server at a different address (multiple networks, VLANs, a
-DNS name), set **Join Address** in the plugin's configuration.
+DNS name), set **Join Address** in the plugin's configuration. With HTTPS
+enabled the card shows the full `https://` address on purpose: it works in
+every browser as typed, including browsers set to "always use secure
+connections", which mangle a bare `host:port` address into a broken
+same-port https attempt.
 
 ## Displays
 

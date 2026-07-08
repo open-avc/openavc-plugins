@@ -198,7 +198,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.4.0",
+        "version": "0.4.1",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -506,12 +506,24 @@ class PresentPlugin:
     def _join_url(self):
         """The address a guest types, exactly as the connect cards show it.
 
-        Scheme-less on purpose: guests type it into the address bar, and the
-        platform's HTTP->HTTPS redirect upgrades it when TLS is enabled.
+        With HTTPS on, the card shows the full https URL — accurate beats
+        short. A scheme-less <host>:8080 relies on the platform's redirect,
+        and browsers with automatic HTTPS upgrades ("Always use secure
+        connections") rewrite it to https on the SAME port before the
+        redirect can answer, landing a TLS handshake on the plain-HTTP
+        listener (observed on the bench: an SSL error for the guest). A
+        scheme-less <host>:8443 is just as broken the other way around —
+        typed addresses default to http. Only the explicit https form works
+        in every browser with no settings. With TLS off, the short
+        <host>:8080 form works everywhere and stays.
         """
         address = (self.api.config.get("join_address") or "").strip()
         if not address:
             address = self._detect_local_ip()
+        tls_enabled, tls_port = self._tls_state()
+        if tls_enabled:
+            host = address if tls_port == 443 else f"{address}:{tls_port}"
+            return f"https://{host}/{_GUEST_ALIAS}"
         port = self._http_port()
         host = address if port == 80 else f"{address}:{port}"
         return f"{host}/{_GUEST_ALIAS}"
@@ -549,6 +561,25 @@ class PresentPlugin:
             return int(get_system_config().get("network", "http_port"))
         except Exception:
             return 8080
+
+    @staticmethod
+    def _tls_state():
+        """(enabled, port) for the instance's HTTPS listener.
+
+        Same config source the platform's /api/system/tls-status reads. TLS
+        toggles take a server restart to apply, so config and the running
+        listener only disagree in the brief toggled-but-not-restarted window
+        the Settings UI already warns about.
+        """
+        try:
+            from server.system_config import get_system_config
+
+            cfg = get_system_config()
+            if cfg.get("tls", "enabled"):
+                return True, int(cfg.get("tls", "port") or 8443)
+        except Exception:
+            pass
+        return False, 0
 
     # ──── Displays ────
 
