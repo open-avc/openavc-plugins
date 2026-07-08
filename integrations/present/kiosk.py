@@ -81,6 +81,10 @@ _TERMINATE_GRACE = 5.0
 
 # How long the in-session enumeration helper may take.
 _HELPER_TIMEOUT = 20.0
+# The helper is a PowerShell spawn with a C# compile — too heavy to run on
+# every 5 s watch tick. Its answer is cached this long; unplug/replug
+# detection in service mode is bounded by watch interval + this.
+_HELPER_CACHE_SECONDS = 10.0
 
 # Linux browser binaries, in discovery order.
 _LINUX_BROWSERS = ("chromium-browser", "chromium", "google-chrome", "google-chrome-stable")
@@ -439,11 +443,21 @@ class _WindowsServiceEnvironment(_BaseEnvironment):  # pragma: no cover - Window
         self._ps1 = Path(plugin_dir) / "enum_outputs.ps1"
         self._out_file = Path(data_dir) / "kiosk" / "outputs.json"
         self._log = log
+        self._cached = None  # ((outputs, err), at_monotonic)
 
     def console_user_available(self):
         return hostoutputs.console_session_id() is not None
 
     async def enumerate(self):
+        if self._cached is not None:
+            result, at = self._cached
+            if time.monotonic() - at < _HELPER_CACHE_SECONDS:
+                return result
+        result = await self._enumerate_in_session()
+        self._cached = (result, time.monotonic())
+        return result
+
+    async def _enumerate_in_session(self):
         if not self.console_user_available():
             return [], "no user is signed in on this server's console"
         self._out_file.parent.mkdir(parents=True, exist_ok=True)
