@@ -202,7 +202,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.5.1",
+        "version": "0.5.2",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -281,7 +281,9 @@ class PresentPlugin:
             "one of its own video outputs. Route a specific presenter to a "
             "display from this page, a macro's Route Display step, or a "
             "script. Screen capture in the guest's browser requires HTTPS "
-            "(enable it in Settings > Security)."
+            "(enable it in Settings > Security); on a cloud-paired system, "
+            "installing a trusted certificate there also removes the guest "
+            "browser warning entirely."
         ),
     }
 
@@ -550,12 +552,12 @@ class PresentPlugin:
         if space != self._card_space:
             self._card.write_space(space)
             self._card_space = space
-        join = self._join_url()
+        join = await self._join_url()
         if join != self._card_join:
             self._card.write_join(join)
             self._card_join = join
 
-    def _join_url(self):
+    async def _join_url(self):
         """The address a guest types, exactly as the connect cards show it.
 
         With HTTPS on, the card shows the full https URL — accurate beats
@@ -568,12 +570,25 @@ class PresentPlugin:
         typed addresses default to http. Only the explicit https form works
         in every browser with no settings. With TLS off, the short
         <host>:8080 form works everywhere and stays.
+
+        One tier sits above all of that: when a cloud-issued trusted
+        certificate is installed AND the platform's http→https redirect is
+        on, the card shows the explicit http URL instead. The redirect sends
+        the guest to the certified hostname (a real CA certificate), so they
+        land on a green-lock page with no browser warning at all — the
+        direct https form would serve the self-signed cert and put the
+        interstitial right back.
         """
         address = (self.api.config.get("join_address") or "").strip()
         if not address:
             address = self._detect_local_ip()
         tls_enabled, tls_port = self._tls_state()
         if tls_enabled:
+            cert = await self.api.state_get("system.cloud.cert_status")
+            if cert == "installed" and self._redirect_http_enabled():
+                port = self._http_port()
+                host = address if port == 80 else f"{address}:{port}"
+                return f"http://{host}/{_GUEST_ALIAS}"
             host = address if tls_port == 443 else f"{address}:{tls_port}"
             return f"https://{host}/{_GUEST_ALIAS}"
         port = self._http_port()
@@ -632,6 +647,17 @@ class PresentPlugin:
         except Exception:
             pass
         return False, 0
+
+    @staticmethod
+    def _redirect_http_enabled():
+        """Whether the platform redirects plain-HTTP requests to the TLS
+        listener (tls.redirect_http, same config source as _tls_state)."""
+        try:
+            from server.system_config import get_system_config
+
+            return bool(get_system_config().get("tls", "redirect_http"))
+        except Exception:
+            return False
 
     # ──── Displays ────
 
@@ -1231,7 +1257,7 @@ class PresentPlugin:
                 # What the idle card tells guests to type — plugin-chosen, not
                 # derived from the display's own vantage (which is wrong on
                 # the server host and on multi-network installs).
-                "join_url": self._join_url(),
+                "join_url": await self._join_url(),
             }
 
         # ── WHEP (WebRTC playback) reverse proxy ──
@@ -1327,7 +1353,7 @@ class PresentPlugin:
                 "mediamtx_version": _MEDIAMTX_VERSION,
                 "space_name": await self._space_name(),
                 "code": self._current_code(),
-                "join_url": self._join_url(),
+                "join_url": await self._join_url(),
                 "presenters": presenters,
                 "active_presenters": len(presenters),
                 "sources": self._sources_options(),

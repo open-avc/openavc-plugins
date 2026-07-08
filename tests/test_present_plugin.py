@@ -144,6 +144,7 @@ def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     plugin._detect_local_ip = lambda: "192.0.2.10"
     plugin._http_port = lambda: 8080
     plugin._tls_state = lambda: (False, 0)
+    plugin._redirect_http_enabled = lambda: False
     return plugin
 
 
@@ -745,16 +746,17 @@ async def test_presenter_labels_flow_and_prune(monkeypatch):
     assert "aaron_todd" not in plugin._labels
 
 
-def test_join_url_configured_address_and_port_handling():
+@pytest.mark.asyncio
+async def test_join_url_configured_address_and_port_handling():
     # Configured join_address wins over detection.
     plugin = _plugin(config={"join_address": "av.example.edu"})
-    assert plugin._join_url() == "av.example.edu:8080/present"
+    assert await plugin._join_url() == "av.example.edu:8080/present"
     # Port 80 is implicit in what a human types.
     plugin._http_port = lambda: 80
-    assert plugin._join_url() == "av.example.edu/present"
+    assert await plugin._join_url() == "av.example.edu/present"
     # Blank config falls back to the (pinned) auto-detected LAN address.
     plugin2 = _plugin()
-    assert plugin2._join_url() == "192.0.2.10:8080/present"
+    assert await plugin2._join_url() == "192.0.2.10:8080/present"
 
 
 def test_slugify_presenter():
@@ -1155,15 +1157,17 @@ async def test_refresh_card_writes_only_on_change(tmp_path, monkeypatch):
 # ──── Join URL vs TLS state ────
 
 
-def test_join_url_plain_http():
+@pytest.mark.asyncio
+async def test_join_url_plain_http():
     plugin = _plugin()
-    assert plugin._join_url() == "192.0.2.10:8080/present"
+    assert await plugin._join_url() == "192.0.2.10:8080/present"
     # Port 80 drops from the short form.
     plugin._http_port = lambda: 80
-    assert plugin._join_url() == "192.0.2.10/present"
+    assert await plugin._join_url() == "192.0.2.10/present"
 
 
-def test_join_url_https_is_scheme_qualified():
+@pytest.mark.asyncio
+async def test_join_url_https_is_scheme_qualified():
     """With TLS on the card must show the full https URL. A scheme-less
     host:8080 gets rewritten to https-on-8080 by browsers with automatic
     HTTPS upgrades (TLS handshake into the plain listener); a scheme-less
@@ -1171,16 +1175,64 @@ def test_join_url_https_is_scheme_qualified():
     https form works everywhere."""
     plugin = _plugin()
     plugin._tls_state = lambda: (True, 8443)
-    assert plugin._join_url() == "https://192.0.2.10:8443/present"
+    assert await plugin._join_url() == "https://192.0.2.10:8443/present"
     # Port 443 drops (the https default).
     plugin._tls_state = lambda: (True, 443)
-    assert plugin._join_url() == "https://192.0.2.10/present"
+    assert await plugin._join_url() == "https://192.0.2.10/present"
 
 
-def test_join_url_honors_configured_join_address_with_tls():
+@pytest.mark.asyncio
+async def test_join_url_honors_configured_join_address_with_tls():
     plugin = _plugin(config={"join_address": "present.example.org"})
     plugin._tls_state = lambda: (True, 8443)
-    assert plugin._join_url() == "https://present.example.org:8443/present"
+    assert await plugin._join_url() == "https://present.example.org:8443/present"
+
+
+@pytest.mark.asyncio
+async def test_join_url_trusted_cert_rides_the_redirect():
+    """With a cloud-issued trusted certificate installed and the platform's
+    http->https redirect on, the card shows the explicit http URL: the
+    redirect lands guests on the certified hostname (real CA cert, no
+    browser warning). The direct https form would serve the self-signed
+    cert and bring the interstitial back."""
+    plugin = _plugin(state={"system.cloud.cert_status": "installed"})
+    plugin._tls_state = lambda: (True, 8443)
+    plugin._redirect_http_enabled = lambda: True
+    assert await plugin._join_url() == "http://192.0.2.10:8080/present"
+    # Port 80 drops (the http default).
+    plugin._http_port = lambda: 80
+    assert await plugin._join_url() == "http://192.0.2.10/present"
+    # A configured join address rides the redirect the same way.
+    plugin2 = _plugin(
+        state={"system.cloud.cert_status": "installed"},
+        config={"join_address": "av.example.edu"},
+    )
+    plugin2._tls_state = lambda: (True, 8443)
+    plugin2._redirect_http_enabled = lambda: True
+    assert await plugin2._join_url() == "http://av.example.edu:8080/present"
+
+
+@pytest.mark.asyncio
+async def test_join_url_trusted_cert_needs_redirect_and_installed():
+    # Cert installed but the redirect is off: an http address would dead-end
+    # on the plain listener, so the https form stays.
+    plugin = _plugin(state={"system.cloud.cert_status": "installed"})
+    plugin._tls_state = lambda: (True, 8443)
+    assert await plugin._join_url() == "https://192.0.2.10:8443/present"
+    # Redirect on but no installed cert (absent or mid-issuance): the
+    # redirect would land on the self-signed cert, so the https form stays.
+    plugin = _plugin()
+    plugin._tls_state = lambda: (True, 8443)
+    plugin._redirect_http_enabled = lambda: True
+    assert await plugin._join_url() == "https://192.0.2.10:8443/present"
+    plugin = _plugin(state={"system.cloud.cert_status": "issuing"})
+    plugin._tls_state = lambda: (True, 8443)
+    plugin._redirect_http_enabled = lambda: True
+    assert await plugin._join_url() == "https://192.0.2.10:8443/present"
+    # TLS off: the short form is untouched by cert state.
+    plugin = _plugin(state={"system.cloud.cert_status": "installed"})
+    plugin._redirect_http_enabled = lambda: True
+    assert await plugin._join_url() == "192.0.2.10:8080/present"
 
 
 # ──── Local outputs (browser display on one of this host's video outputs) ────

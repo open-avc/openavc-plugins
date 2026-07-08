@@ -24,8 +24,8 @@ card. Displays come in two kinds:
   a second of latency and a brief blip at each source switch.
 
 Presenters join with nothing installed: the connect card on every display
-shows an address (`https://192.168.1.20:8443/present` when the instance runs
-HTTPS, `192.168.1.20:8080/present` without it) and a rotating join code. A
+shows an address (like `https://192.168.1.20:8443/present` — the exact form
+follows the instance's HTTPS setup) and a rotating join code. A
 guest types the address into a laptop browser, enters the code and their
 name, and picks a screen or window to share.
 
@@ -45,9 +45,11 @@ plugin page, a macro step, a script, or a state key write.
   screen capture on a secure page, so the share page needs the instance's
   HTTPS support enabled (Settings > Security in the Programmer). With the
   auto-generated certificate, guests click through a one-time browser
-  warning; with a CA-issued certificate they don't. Without HTTPS the share
-  page still loads but tells the guest sharing is unavailable. Displays are
-  not affected.
+  warning; a CA-issued certificate removes it — including the trusted
+  certificate a cloud-paired system can install from that same Settings
+  page, which takes the guest browser warning away entirely. Without HTTPS
+  the share page still loads but tells the guest sharing is unavailable.
+  Displays are not affected.
 - **Network:** WebRTC media travels over **UDP port 8190** directly between
   browsers and the server. Stream displays are pulled from the server over
   **TCP port 8554** (RTSP) or **UDP port 8899** (SRT). On a normal LAN this
@@ -86,7 +88,10 @@ DNS name), set **Join Address** in the plugin's configuration. With HTTPS
 enabled the card shows the full `https://` address on purpose: it works in
 every browser as typed, including browsers set to "always use secure
 connections", which mangle a bare `host:port` address into a broken
-same-port https attempt.
+same-port https attempt. With a trusted certificate installed (and the
+http-to-https redirect on, its default), the card shows the plain `http://`
+address instead: the server redirects guests to the certified https
+address, so they land on a secure page with no certificate warning at all.
 
 ## Displays
 
