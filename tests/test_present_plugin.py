@@ -62,6 +62,8 @@ class _FakeApi:
         self.proxy_location = None  # canned WHEP/WHIP Location for POST responses
         self.minted = []  # (scope, ttl) from mint_guest_token
         self.tokens = {}  # token -> scope
+        # Kiosk profile cleanup rmtree()s under here; nonexistent = no-op.
+        self.data_dir = Path("nonexistent-plugin-data")
 
     @property
     def config(self):
@@ -1170,3 +1172,171 @@ def test_join_url_honors_configured_join_address_with_tls():
     plugin = _plugin(config={"join_address": "present.example.org"})
     plugin._tls_state = lambda: (True, 8443)
     assert plugin._join_url() == "https://present.example.org:8443/present"
+
+
+# ──── Local outputs (browser display on one of this host's video outputs) ────
+
+
+class _FakeKiosk:
+    """Stands in for kiosk.KioskManager in plugin wiring tests."""
+
+    def __init__(self):
+        self.synced = []  # every spec set handed to sync()
+        self.states = {}
+        self.names = {"MON-1": "Projector"}
+        self.stopped = False
+
+    async def sync(self, specs):
+        self.synced.append({k: dict(v) for k, v in specs.items()})
+
+    async def stop(self):
+        self.stopped = True
+
+    def state_for(self, display_id):
+        return self.states.get(display_id, "starting")
+
+    def output_name(self, output_id):
+        return self.names.get(output_id, "")
+
+    def output_connected(self, output_id):
+        return output_id in self.names
+
+    async def describe_outputs(self, in_use=None):
+        return {
+            "supported": True,
+            "reason": "",
+            "outputs": [{
+                "id": "MON-1", "name": "Projector", "x": 1920, "y": 0,
+                "width": 1920, "height": 1080, "primary": False,
+                "in_use_by": (in_use or {}).get("MON-1", ""),
+            }],
+        }
+
+
+def test_add_display_with_local_output_syncs_kiosk():
+    client, plugin, api = _ext_client()
+    plugin._kiosk = _FakeKiosk()
+    resp = client.post("/displays", json={"label": "Lobby TV", "local_output": "MON-1"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "browser"
+    assert body["local_output"] == "MON-1"
+    assert body["local_state"] == "starting"
+    assert body["local_output_name"] == "Projector"
+    assert body["local_output_connected"] is True
+    # The kiosk manager got the spec: this display's own URL on that output.
+    spec = plugin._kiosk.synced[-1]["lobby_tv"]
+    assert spec["output"] == "MON-1"
+    assert spec["url"].startswith("http://127.0.0.1:8080/present/display/lobby_tv?key=")
+
+
+def test_browser_display_without_local_output_reports_empty():
+    client, plugin, api = _ext_client([_DISPLAY])
+    plugin._kiosk = _FakeKiosk()
+    body = client.get("/displays").json()[0]
+    assert body["local_output"] == ""
+    # The window-status fields only exist when a local output is set.
+    assert "local_state" not in body
+
+
+def test_local_output_rejected_on_stream_display():
+    client, plugin, api = _ext_client()
+    plugin._kiosk = _FakeKiosk()
+    resp = client.post(
+        "/displays",
+        json={"label": "Decoder Feed", "kind": "stream", "local_output": "MON-1"},
+    )
+    assert resp.status_code == 422
+    assert "browser display" in resp.json()["detail"]
+
+
+def test_local_output_conflict_is_409():
+    client, plugin, api = _ext_client(
+        [{**_DISPLAY, "kind": "browser", "local_output": "MON-1"}]
+    )
+    plugin._kiosk = _FakeKiosk()
+    resp = client.post("/displays", json={"label": "Second", "local_output": "MON-1"})
+    assert resp.status_code == 409
+    assert "Main Screen" in resp.json()["detail"]
+    # Editing the holder itself is not a conflict.
+    resp = client.put(
+        "/displays/main",
+        json={"label": "Main Screen", "local_output": "MON-1"},
+    )
+    assert resp.status_code == 200
+
+
+def test_edit_kind_change_clears_local_output():
+    client, plugin, api = _ext_client(
+        [{**_DISPLAY, "kind": "browser", "local_output": "MON-1"}]
+    )
+    plugin._kiosk = _FakeKiosk()
+    resp = client.put("/displays/main", json={"label": "Main Screen", "kind": "stream"})
+    assert resp.status_code == 200
+    assert "local_output" not in resp.json()  # stream views carry no local fields
+    assert plugin._find_display("main").get("local_output") is None
+    assert plugin._kiosk.synced[-1] == {}  # and the window is torn down
+
+
+def test_edit_clears_local_output_with_empty_string():
+    client, plugin, api = _ext_client(
+        [{**_DISPLAY, "kind": "browser", "local_output": "MON-1"}]
+    )
+    plugin._kiosk = _FakeKiosk()
+    # None (field omitted) keeps the assignment.
+    resp = client.put("/displays/main", json={"label": "Main Screen"})
+    assert resp.json()["local_output"] == "MON-1"
+    # "" clears it.
+    resp = client.put("/displays/main", json={"label": "Main Screen", "local_output": ""})
+    assert resp.json()["local_output"] == ""
+    assert plugin._find_display("main").get("local_output") is None
+    assert plugin._kiosk.synced[-1] == {}
+
+
+def test_outputs_route_marks_in_use():
+    client, plugin, api = _ext_client(
+        [{**_DISPLAY, "kind": "browser", "local_output": "MON-1"}]
+    )
+    plugin._kiosk = _FakeKiosk()
+    body = client.get("/outputs").json()
+    assert body["supported"] is True
+    assert body["outputs"][0]["in_use_by"] == "main"
+
+
+def test_outputs_route_before_start():
+    client, plugin, api = _ext_client()
+    body = client.get("/outputs").json()
+    assert body["supported"] is False
+    assert body["outputs"] == []
+
+
+def test_local_display_url_follows_tls_state():
+    plugin = _plugin([_DISPLAY])
+    display = plugin._displays[0]
+    url = plugin._local_display_url(display)
+    assert url == "http://127.0.0.1:8080/present/display/main?key=k3y-k3y-k3y"
+    plugin._tls_state = lambda: (True, 8443)
+    url = plugin._local_display_url(display)
+    assert url == "https://127.0.0.1:8443/present/display/main?key=k3y-k3y-k3y"
+
+
+@pytest.mark.asyncio
+async def test_load_displays_normalizes_local_output():
+    plugin = PresentPlugin()
+    plugin.api = _FakeApi({
+        "displays": [
+            {"id": "a", "label": "A", "display_key": "k", "kind": "browser",
+             "local_output": "MON-1"},
+            # Hand-edited: a stream display can't hold a local output.
+            {"id": "b", "label": "B", "display_key": "k", "kind": "stream",
+             "stream_key": "s", "local_output": "MON-2"},
+            # Hand-edited: one output, one window — the duplicate loses it.
+            {"id": "c", "label": "C", "display_key": "k", "kind": "browser",
+             "local_output": "MON-1"},
+        ],
+    })
+    await plugin._load_displays()
+    by_id = {d["id"]: d for d in plugin._displays}
+    assert by_id["a"].get("local_output") == "MON-1"
+    assert "local_output" not in by_id["b"]
+    assert "local_output" not in by_id["c"]

@@ -125,6 +125,42 @@ has been interacted with, so a plain (non-kiosk) browser may show a **Tap for
 sound** button on the first share. Kiosk launchers can disable that policy
 (for Chromium: `--autoplay-policy=no-user-gesture-required`).
 
+## Show a display from this server
+
+If the OpenAVC server itself sits at the display — a mini PC or all-in-one
+appliance with an HDMI run to the projector or TV — a browser display can
+skip the separate receiver box entirely. Edit the display and pick one of
+this server's video outputs under **Show on this server's output**: the
+plugin opens the display fullscreen on that output in a kiosk browser window
+and keeps it there.
+
+- The usual setup is a machine with two outputs: the primary is the console
+  or touch panel, the second goes to the projector. Picking the primary
+  output is allowed but it will cover whatever else that screen is for.
+- The window is supervised. If the browser crashes it restarts; if the
+  output is unplugged or the display powers off, the window closes rather
+  than jumping onto another screen, and it reopens automatically when the
+  output comes back — including overnight TV power cycles.
+- A Chromium-family browser must be installed (Chrome, Chromium, or Edge).
+  One is found automatically; the plugin's **Browser Path** setting
+  overrides it.
+
+Per-platform notes:
+
+| Host | Support |
+|------|---------|
+| Windows (desktop / tray) | Works. Chrome preferred when both Chrome and Edge are installed. |
+| Windows (installed as a service) | Works while a user is signed in on the console. The service can't draw on the desktop by itself, so the window opens in the signed-in user's session; the display shows "waiting for sign-in" until then. For kiosk boxes, enable Windows auto-logon so the display comes up on boot. If Edge is the only browser and shows a first-run screen in the kiosk window, either install Chrome or set the Edge `HideFirstRunExperience` policy. |
+| Linux, X11 desktop | Works (`xrandr` provides output layout). Some desktops (GNOME on X11) may override window placement; if the window lands on the wrong screen, check the System Log for a placement warning. |
+| Linux, Wayland with wlroots (labwc, sway — includes Raspberry Pi OS) | Works via XWayland. Needs `wlr-randr` installed to list outputs (preinstalled on the OpenAVC Pi image). |
+| Linux, GNOME/KDE Wayland | Output enumeration isn't available on these desktops. Use the fallback below. |
+| Raspberry Pi 4 / 5 | Both micro-HDMI outputs work: panel kiosk on one, Present on the other. |
+
+**Fallback for any unsupported setup:** open the display's link in a browser
+on that machine, move it to the right screen, and press F11 (or use any
+kiosk launcher). Local fullscreen is a convenience wrapper around the same
+Display page — nothing else changes.
+
 ## Setting up a stream display (hardware decoders)
 
 A stream display publishes a **continuous, never-changing stream** — H.264

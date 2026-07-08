@@ -262,6 +262,22 @@
     else document.documentElement.requestFullscreen().catch(() => {});
   });
 
+  // A pointer parked on a display looks broken: hide the cursor after a few
+  // idle seconds (page-wide, so the idle card is covered too — the live
+  // video already hides it via CSS), show it again on movement.
+  const CURSOR_HIDE_MS = 3000;
+  let cursorTimer = null;
+  function armCursorHide() {
+    document.documentElement.classList.remove('cursor-hidden');
+    clearTimeout(cursorTimer);
+    cursorTimer = setTimeout(
+      () => document.documentElement.classList.add('cursor-hidden'),
+      CURSOR_HIDE_MS
+    );
+  }
+  document.addEventListener('mousemove', armCursorHide);
+  armCursorHide();
+
   window.addEventListener('pagehide', stopLive);
 
   // ──── SDP helpers (offer parse + trickle fragment) ────

@@ -71,9 +71,10 @@ except ImportError:  # pragma: no cover - exercised only via package-path import
 
 try:
     import encoders
+    import kiosk
     import output
 except ImportError:  # pragma: no cover - exercised only via package-path import
-    from . import encoders, output
+    from . import encoders, kiosk, output
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 
@@ -178,6 +179,9 @@ class DisplayIn(BaseModel):
     label: str
     display_id: str | None = None
     kind: str | None = None  # "browser" | "stream"; None keeps/defaults
+    # Show this browser display on one of this server's own video outputs.
+    # None keeps the current value; "" clears it.
+    local_output: str | None = None
 
 
 class RouteIn(BaseModel):
@@ -198,7 +202,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.4.1",
+        "version": "0.5.0",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -272,10 +276,12 @@ class PresentPlugin:
             "persistent RTSP/SRT stream a hardware decoder pulls by URL. "
             "Either way the display shows a connect card with the join "
             "address and code; a guest types that address into a browser, "
-            "enters the code and a name, and shares their screen. Route a "
-            "specific presenter to a display from this page, a macro's Route "
-            "Display step, or a script. Screen capture in the guest's "
-            "browser requires HTTPS (enable it in Settings > Security)."
+            "enters the code and a name, and shares their screen. A browser "
+            "display can also be shown by this server itself, fullscreen on "
+            "one of its own video outputs. Route a specific presenter to a "
+            "display from this page, a macro's Route Display step, or a "
+            "script. Screen capture in the guest's browser requires HTTPS "
+            "(enable it in Settings > Security)."
         ),
     }
 
@@ -298,6 +304,16 @@ class PresentPlugin:
                 "the LAN address. Set it on multi-network installs where "
                 "guests reach the server on a different network than the "
                 "displays."
+            ),
+            "default": "",
+        },
+        "local_browser_path": {
+            "type": "string",
+            "label": "Browser Path",
+            "description": (
+                "Full path to the Chrome, Chromium, or Edge executable used "
+                "when a display is shown on this server's own video output. "
+                "Leave blank to find an installed browser automatically."
             ),
             "default": "",
         },
@@ -358,6 +374,8 @@ class PresentPlugin:
         self._encoder_lock = asyncio.Lock()
         self._card_join = None  # last join line written to the card
         self._card_space = None  # last space name written to the card
+        # Local-fullscreen kiosk browsers (browser displays with local_output):
+        self._kiosk = None  # kiosk.KioskManager once start() has a data_dir
 
     # ──── Lifecycle ────
 
@@ -418,6 +436,18 @@ class PresentPlugin:
             for display in self._displays:
                 if display.get("kind") == "stream":
                     await self._start_output(display)
+            # Local-fullscreen windows: one supervised kiosk browser per
+            # browser display pinned to one of this host's video outputs.
+            self._kiosk = kiosk.KioskManager(
+                environment=kiosk.detect_environment(
+                    _PLUGIN_DIR, self.api.data_dir, self.api.log
+                ),
+                data_dir=self.api.data_dir,
+                log=self.api.log,
+                task_factory=self.api.create_task,
+                browser_resolver=self._resolve_browser,
+            )
+            await self._sync_kiosks()
             # The routing state key is the matrix's write surface: macros
             # (state.set), scripts, and the API drive it directly. Subscribe
             # after the initial publish; our own writes no-op in the handler.
@@ -432,15 +462,22 @@ class PresentPlugin:
                 f"{_API_HOST}:{_API_PORT}, {len(self._displays)} display(s)"
             )
         except Exception:
-            # Don't leave an orphaned sidecar if start() fails partway.
+            # Don't leave orphaned processes if start() fails partway.
+            if self._kiosk is not None:
+                await self._kiosk.stop()
+                self._kiosk = None
             await self._supervisor.stop()
             self._supervisor = None
             raise
 
     async def stop(self):
         # State keys, subscriptions, and managed tasks are cleaned up by the
-        # platform; we only need to stop the external processes — output
-        # encoders first (they publish into the sidecar), then the sidecar.
+        # platform; we only need to stop the external processes — kiosk
+        # browsers and output encoders first (the encoders publish into the
+        # sidecar), then the sidecar.
+        if self._kiosk is not None:
+            await self._kiosk.stop()
+            self._kiosk = None
         for display_id in list(self._controllers):
             await self._stop_output(display_id)
         if self._supervisor is not None:
@@ -608,7 +645,22 @@ class PresentPlugin:
             if display["kind"] == "stream" and not display.get("stream_key"):
                 display["stream_key"] = self._new_stream_key()
                 changed = True
+            # local_output is a browser-display feature, and one host output
+            # can only hold one window (hand-edited files can violate both).
+            if display.get("local_output") and display["kind"] != "browser":
+                display.pop("local_output", None)
+                changed = True
             self._displays.append(display)
+        seen_outputs = set()
+        for display in self._displays:
+            local_output = display.get("local_output")
+            if not local_output:
+                continue
+            if local_output in seen_outputs:
+                display.pop("local_output", None)
+                changed = True
+            else:
+                seen_outputs.add(local_output)
         if changed:
             await self._persist_displays()
         # Routing is runtime state: every display comes up following the
@@ -675,6 +727,62 @@ class PresentPlugin:
         display by regenerating the key.
         """
         return f"{_OUTPUT_PREFIX}/{display['id']}-{display.get('stream_key', '')}"
+
+    # ──── Local-fullscreen kiosks (browser displays on this host's outputs) ────
+
+    def _resolve_browser(self):
+        """The kiosk browser, honoring the Browser Path config override."""
+        override = (self.api.config.get("local_browser_path") or "").strip()
+        return kiosk.find_browser(override or None)
+
+    def _local_display_url(self, display):
+        """The Display URL the kiosk browser opens — this host, so localhost.
+
+        Scheme-qualified the same way the join URL is: with TLS on, go
+        straight to the HTTPS listener rather than through the redirect hop
+        (--allow-insecure-localhost keeps the self-signed interstitial away).
+        """
+        tls_enabled, tls_port = self._tls_state()
+        if tls_enabled:
+            origin = f"https://127.0.0.1:{tls_port}"
+        else:
+            origin = f"http://127.0.0.1:{self._http_port()}"
+        return f"{origin}{self._display_path(display)}"
+
+    async def _sync_kiosks(self):
+        """Hand the kiosk manager the current local-display set.
+
+        Called on start and after every display change that affects a local
+        window: local_output edits, kind changes, renames (new URL + state
+        keys), display-key regeneration (new URL), deletes.
+        """
+        if self._kiosk is None:
+            return
+        specs = {}
+        for display in self._displays:
+            if display.get("kind") == "browser" and display.get("local_output"):
+                specs[display["id"]] = {
+                    "output": display["local_output"],
+                    "url": self._local_display_url(display),
+                }
+        await self._kiosk.sync(specs)
+
+    def _validate_local_output(self, output_id, kind, exclude_id=None):
+        """422/409 when a local_output assignment isn't allowed."""
+        if kind != "browser":
+            raise HTTPException(
+                422,
+                "Only a browser display can be shown on one of this "
+                "server's video outputs.",
+            )
+        for display in self._displays:
+            if display.get("id") == exclude_id:
+                continue
+            if display.get("local_output") == output_id:
+                label = display.get("label") or display["id"]
+                raise HTTPException(
+                    409, f"That output is already showing display '{label}'."
+                )
 
     # ──── Routing (the internal matrix) ────
 
@@ -1208,6 +1316,22 @@ class PresentPlugin:
         async def list_displays():
             return [self._display_view(d) for d in self._displays]
 
+        @router.get("/outputs")
+        async def list_outputs():
+            """This server's video outputs, for the local-output picker."""
+            if self._kiosk is None:
+                return {
+                    "supported": False,
+                    "reason": "The plugin is not running.",
+                    "outputs": [],
+                }
+            in_use = {
+                d["local_output"]: d["id"]
+                for d in self._displays
+                if d.get("local_output")
+            }
+            return await self._kiosk.describe_outputs(in_use=in_use)
+
         @router.post("/displays")
         async def add_display(data: DisplayIn):
             label = (data.label or "").strip()
@@ -1218,6 +1342,9 @@ class PresentPlugin:
             self._validate_display_id(display_id)
             if self._find_display(display_id):
                 raise HTTPException(409, f"A display with id '{display_id}' already exists.")
+            local_output = (data.local_output or "").strip()
+            if local_output:
+                self._validate_local_output(local_output, kind)
             display = {
                 "id": display_id,
                 "label": label,
@@ -1226,12 +1353,15 @@ class PresentPlugin:
             }
             if kind == "stream":
                 display["stream_key"] = self._new_stream_key()
+            if local_output:
+                display["local_output"] = local_output
             self._displays.append(display)
             self._routing[display_id] = _AUTO
             await self._persist_displays()
             await self._publish_all()
             if kind == "stream":
                 await self._start_output(display)
+            await self._sync_kiosks()
             return self._display_view(display)
 
         @router.put("/displays/{display_id}")
@@ -1252,6 +1382,18 @@ class PresentPlugin:
             display["kind"] = kind
             if kind == "stream" and not display.get("stream_key"):
                 display["stream_key"] = self._new_stream_key()
+            if kind != "browser":
+                # Local windows are a browser-display feature; a kind change
+                # drops the assignment rather than carrying it invisibly.
+                display.pop("local_output", None)
+            if data.local_output is not None:
+                local_output = data.local_output.strip()
+                if local_output:
+                    self._validate_local_output(local_output, kind,
+                                                exclude_id=display_id)
+                    display["local_output"] = local_output
+                else:
+                    display.pop("local_output", None)
             if new_id != display_id:
                 # The id is baked into the Display URL, the stream URLs, and
                 # the state keys, so a rename moves the routing and clears old
@@ -1262,6 +1404,7 @@ class PresentPlugin:
                 await self._clear_display_state(display_id)
                 display["id"] = new_id
                 self._routing[new_id] = routed
+                kiosk.remove_profile(self.api.data_dir, display_id)
             await self._persist_displays()
             await self._publish_all()
             # Reconcile the output pipeline with the (possibly new) kind/id.
@@ -1270,6 +1413,7 @@ class PresentPlugin:
                     await self._start_output(display)
             else:
                 await self._stop_output(display["id"])
+            await self._sync_kiosks()
             return self._display_view(display)
 
         @router.delete("/displays/{display_id}")
@@ -1282,6 +1426,8 @@ class PresentPlugin:
             await self._persist_displays()
             await self._clear_display_state(display_id)
             await self._publish_all()
+            await self._sync_kiosks()
+            kiosk.remove_profile(self.api.data_dir, display_id)
             return {"ok": True, "display_id": display_id}
 
         @router.post("/displays/{display_id}/regenerate_key")
@@ -1291,9 +1437,11 @@ class PresentPlugin:
                 raise HTTPException(404, f"No display with id '{display_id}'.")
             # Invalidate every existing Display URL for this display; open
             # Display pages get a 401 on their next poll and show the
-            # "link isn't valid" card.
+            # "link isn't valid" card. A local window relaunches on the new
+            # URL (its old one just died with the key).
             display["display_key"] = self._new_display_key()
             await self._persist_displays()
+            await self._sync_kiosks()
             return self._display_view(display)
 
         @router.post("/displays/{display_id}/regenerate_stream_key")
@@ -1333,6 +1481,22 @@ class PresentPlugin:
             "showing": showing,
             "output_state": "live" if showing else "idle",
         }
+        local_output = display.get("local_output") or ""
+        if view["kind"] == "browser":
+            view["local_output"] = local_output
+        if local_output:
+            # View-only, like encoder_state: the IDE's status chip reads
+            # these; automation triggers on output_state/showing as usual.
+            if self._kiosk is not None:
+                view["local_state"] = self._kiosk.state_for(display_id)
+                view["local_output_name"] = self._kiosk.output_name(local_output)
+                view["local_output_connected"] = self._kiosk.output_connected(
+                    local_output
+                )
+            else:
+                view["local_state"] = "stopped"
+                view["local_output_name"] = ""
+                view["local_output_connected"] = False
         if view["kind"] == "stream":
             # The IDE composes the copyable URLs from the host it reached the
             # server on plus these; the path embeds the stream key.
