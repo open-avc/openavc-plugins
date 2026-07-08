@@ -14,6 +14,15 @@ source ("auto" = the active presenter, or a pinned presenter), drivable from
 macros (``present.route``), scripts (``openavc.plugins.present.route``), and
 writes to the ``plugin.present.display.<id>.source`` state key.
 
+Displays come in two kinds. A **browser display** opens the plugin's Display
+page (below) — sub-second, seamless switching, no transcode. A **stream
+display** is for hardware decoders that pull a stream URL: the plugin runs a
+persistent fixed-profile output per display (see ``output.py``) that a decoder
+locks onto over RTSP or SRT, showing the connect card when nothing is routed.
+The decoder-facing RTSP/SRT listeners are LAN-facing with anonymous read
+granted on ``out/*`` paths only — each output path embeds a per-display
+stream key, so the URL itself is the secret, revocable like a display key.
+
 Because neither surface has an OpenAVC login, both ride the plugin's guest
 routes (``/api/plugins/present/guest/*``, also mounted at the top-level
 ``/present/*`` via the ``guest_alias``):
@@ -60,17 +69,27 @@ try:
 except ImportError:  # pragma: no cover - exercised only via package-path import
     from .sidecar import SidecarSupervisor
 
+try:
+    import encoders
+    import output
+except ImportError:  # pragma: no cover - exercised only via package-path import
+    from . import encoders, output
+
 _PLUGIN_DIR = Path(__file__).resolve().parent
 
-# MediaMTX listeners. Everything is on localhost except the WebRTC media UDP
-# port, which browsers connect to directly for low-latency LAN media. All
-# ports are distinct from the Video Panel plugin's (8889/8189/9997/8556) so
-# both plugins can run side by side.
+# MediaMTX listeners. Signaling and the control API are loopback-only; three
+# listeners face the LAN: the WebRTC media UDP port (browsers connect to it
+# directly for low-latency media) and the RTSP + SRT listeners hardware
+# decoders pull stream-display outputs from (read-only, out/* paths, see
+# _render_config). All ports are distinct from the Video Panel plugin's
+# (8889/8189/9997/8556) so both plugins can run side by side.
 _API_HOST = "127.0.0.1"
 _API_PORT = 9998
 _WEBRTC_HOST = "127.0.0.1"
 _WEBRTC_PORT = 8890
 _WEBRTC_UDP_PORT = 8190
+_RTSP_PORT = 8554
+_SRT_PORT = 8899
 _READY_TIMEOUT = 10.0
 # Presence poll cadence. Also the ceiling on how stale a Display page's
 # idle/live decision can be (it polls its status route at the same rate).
@@ -102,10 +121,16 @@ _NAME_MAX_CHARS = 60
 # The auto-detected join address is re-resolved at most this often.
 _IP_CACHE_SECONDS = 60.0
 
-# Presenters publish their screen to in/<presenter>; per-display encoder
-# outputs (stream displays, future) will live under out/<display>. The prefix
-# keeps the two namespaces apart on the sidecar.
+# Presenters publish their screen to in/<presenter>; each stream display's
+# encoder publishes to out/<display>-<stream_key>. The prefixes keep the two
+# namespaces apart on the sidecar — and the sidecar's anonymous LAN read
+# permission is scoped to out/*, so a decoder can never pull an ingest.
 _INGEST_PREFIX = "in"
+_OUTPUT_PREFIX = "out"
+
+# The display kinds. Browser displays open the Display page; stream displays
+# are pulled by hardware decoders from the persistent per-display output.
+_DISPLAY_KINDS = ("browser", "stream")
 
 # The routing value that means "follow the active presenter" rather than a
 # pinned one. Reserved everywhere a presenter or display name could collide
@@ -152,6 +177,7 @@ class DisplayIn(BaseModel):
 
     label: str
     display_id: str | None = None
+    kind: str | None = None  # "browser" | "stream"; None keeps/defaults
 
 
 class RouteIn(BaseModel):
@@ -172,7 +198,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.3.1",
+        "version": "0.4.0",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -214,16 +240,42 @@ class PresentPlugin:
                     },
                 },
             },
+            {
+                "id": "ffmpeg",
+                "name": "FFmpeg (LGPL build)",
+                "version": "7.1",
+                "license": "LGPL-2.1",
+                "required": True,
+                "platforms": {
+                    "win_x64": {
+                        "type": "zip",
+                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-7.1.zip",
+                        "extract": "ffmpeg-n7.1-latest-win64-lgpl-7.1/bin/ffmpeg.exe",
+                    },
+                    "linux_x64": {
+                        "type": "tar.xz",
+                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-lgpl-7.1.tar.xz",
+                        "extract": "ffmpeg-n7.1-latest-linux64-lgpl-7.1/bin/ffmpeg",
+                    },
+                    "linux_arm64": {
+                        "type": "tar.xz",
+                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linuxarm64-lgpl-7.1.tar.xz",
+                        "extract": "ffmpeg-n7.1-latest-linuxarm64-lgpl-7.1/bin/ffmpeg",
+                    },
+                },
+            },
         ],
         "usage": (
-            "Add a display on this plugin page, then open its display link in "
-            "a browser on the device driving that display (full screen). The "
-            "display shows a connect card with the join address and code; a "
-            "guest types that address into a browser, enters the code and a "
-            "name, and shares their screen. Route a specific presenter to a "
-            "display from this page, a macro's Route Display step, or a "
-            "script. Screen capture in the guest's browser requires HTTPS "
-            "(enable it in Settings > Security)."
+            "Add a display on this plugin page, then put it on glass: a "
+            "browser display's link opens in a browser on the device driving "
+            "that screen (full screen); a stream display publishes a "
+            "persistent RTSP/SRT stream a hardware decoder pulls by URL. "
+            "Either way the display shows a connect card with the join "
+            "address and code; a guest types that address into a browser, "
+            "enters the code and a name, and shares their screen. Route a "
+            "specific presenter to a display from this page, a macro's Route "
+            "Display step, or a script. Screen capture in the guest's "
+            "browser requires HTTPS (enable it in Settings > Security)."
         ),
     }
 
@@ -288,6 +340,7 @@ class PresentPlugin:
         self.api = None
         self._supervisor = None
         self._mediamtx_bin = None
+        self._ffmpeg_bin = None
         self._auth_pass = ""
         self._config_path = None
         self._displays = []  # configured display dicts (the source of truth)
@@ -297,6 +350,14 @@ class PresentPlugin:
         self._code = ("", 0.0)  # (join code, rotated_at monotonic)
         self._labels = {}  # presenter slug -> the display name the guest typed
         self._detected_ip = ("", 0.0)  # (auto-detected join address, at monotonic)
+        # Stream-display output pipeline:
+        self._controllers = {}  # display_id -> output.OutputController
+        self._card = None  # output.IdleCard once start() has a data_dir
+        self._font = None
+        self._encoder_name = None  # detected once, first stream display start
+        self._encoder_lock = asyncio.Lock()
+        self._card_join = None  # last join line written to the card
+        self._card_space = None  # last space name written to the card
 
     # ──── Lifecycle ────
 
@@ -304,9 +365,11 @@ class PresentPlugin:
         self.api = api
 
         self._mediamtx_bin = self._resolve_dep(self._binary_name("mediamtx"))
-        if self._mediamtx_bin is None:
+        self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
+        if self._mediamtx_bin is None or self._ffmpeg_bin is None:
+            missing = "MediaMTX" if self._mediamtx_bin is None else "FFmpeg"
             msg = (
-                "MediaMTX binary not found in plugin_repo/.deps/. Native "
+                f"{missing} binary not found in plugin_repo/.deps/. Native "
                 "dependencies install when the plugin is installed from the "
                 "community repository; reinstall the Present plugin."
             )
@@ -314,6 +377,7 @@ class PresentPlugin:
             await self.api.state_set("error", msg)
             raise RuntimeError(msg)
         self._ensure_executable(self._mediamtx_bin)
+        self._ensure_executable(self._ffmpeg_bin)
 
         self._auth_pass = self._load_or_create_auth()
         self._config_path = self.api.data_dir / "mediamtx.yml"
@@ -343,8 +407,17 @@ class PresentPlugin:
             self.api.register_router(self._build_ext_router())
             self.api.register_guest_router(self._build_guest_router())
             await self._load_displays()
+            # The connect card's dynamic text lives in small files the stream
+            # displays' idle pumps re-read every frame; set them up before the
+            # first code rotation so it lands on the card.
+            self._card = output.IdleCard(self.api.data_dir / "card")
+            self._font = output.find_font()
             self._rotate_code()
+            await self._refresh_card()
             await self._publish_all()
+            for display in self._displays:
+                if display.get("kind") == "stream":
+                    await self._start_output(display)
             # The routing state key is the matrix's write surface: macros
             # (state.set), scripts, and the API drive it directly. Subscribe
             # after the initial publish; our own writes no-op in the handler.
@@ -366,7 +439,10 @@ class PresentPlugin:
 
     async def stop(self):
         # State keys, subscriptions, and managed tasks are cleaned up by the
-        # platform; we only need to stop the external process.
+        # platform; we only need to stop the external processes — output
+        # encoders first (they publish into the sidecar), then the sidecar.
+        for display_id in list(self._controllers):
+            await self._stop_output(display_id)
         if self._supervisor is not None:
             await self._supervisor.stop()
             self._supervisor = None
@@ -400,10 +476,32 @@ class PresentPlugin:
     def _rotate_code(self):
         code = "".join(secrets.choice("0123456789") for _ in range(_CODE_LENGTH))
         self._code = (code, time.monotonic())
+        if self._card is not None:
+            # Stream displays' idle pumps re-read this file every frame, so
+            # the rotated code shows on air without touching the pipeline.
+            self._card.write_code(code)
         return code
 
     def _current_code(self):
         return self._code[0]
+
+    async def _refresh_card(self):
+        """Keep the connect card's space name and join line current.
+
+        Cheap enough to call from the poll: writes only happen when the value
+        actually changed (the join line can move when the auto-detected LAN
+        address changes; the space name when the project is renamed).
+        """
+        if self._card is None:
+            return
+        space = await self._space_name()
+        if space != self._card_space:
+            self._card.write_space(space)
+            self._card_space = space
+        join = self._join_url()
+        if join != self._card_join:
+            self._card.write_join(join)
+            self._card_join = join
 
     def _join_url(self):
         """The address a guest types, exactly as the connect cards show it.
@@ -473,6 +571,12 @@ class PresentPlugin:
             if not display.get("display_key"):
                 display["display_key"] = self._new_display_key()
                 changed = True
+            if display.get("kind") not in _DISPLAY_KINDS:
+                display["kind"] = "browser"
+                changed = True
+            if display["kind"] == "stream" and not display.get("stream_key"):
+                display["stream_key"] = self._new_stream_key()
+                changed = True
             self._displays.append(display)
         if changed:
             await self._persist_displays()
@@ -512,6 +616,13 @@ class PresentPlugin:
     def _new_display_key():
         return secrets.token_urlsafe(24)
 
+    @staticmethod
+    def _new_stream_key():
+        # Deliberately short: decoder UIs are often typed with a remote.
+        # Guessing runs against MediaMTX directly (no platform rate limiter),
+        # but 8 URL-safe chars is far beyond LAN brute-force reach.
+        return secrets.token_urlsafe(6)
+
     def _display_path(self, display):
         """Site-relative Display URL; the plugin page prepends the origin.
 
@@ -522,6 +633,17 @@ class PresentPlugin:
             f"/{_GUEST_ALIAS}/display/{display['id']}"
             f"?key={display.get('display_key', '')}"
         )
+
+    @staticmethod
+    def _stream_path(display):
+        """The sidecar path a stream display's encoder publishes to.
+
+        The embedded stream key is the read secret: the sidecar grants
+        anonymous LAN read on out/* only, so knowing the URL is what
+        authorizes a decoder — same model as the Display URLs, revocable per
+        display by regenerating the key.
+        """
+        return f"{_OUTPUT_PREFIX}/{display['id']}-{display.get('stream_key', '')}"
 
     # ──── Routing (the internal matrix) ────
 
@@ -607,6 +729,80 @@ class PresentPlugin:
     async def script_route(self, display: str, source: str = _AUTO) -> None:
         await self._route(display, source)
 
+    # ──── Stream-display outputs (the per-display encoder pipeline) ────
+
+    async def _start_output(self, display):
+        """Bring up the persistent output for a stream display."""
+        display_id = display["id"]
+        if display_id in self._controllers:
+            return
+        if self._font is None:
+            # No system font means no renderable connect card. Surface it
+            # loudly; the display's encoder_state reads "error" until fixed.
+            self.api.log(
+                f"stream display '{display_id}': no usable system font for "
+                "the connect card (install DejaVu fonts); output not started",
+                "error",
+            )
+            return
+        await self._ensure_encoder()
+        controller = output.OutputController(
+            display_id=display_id,
+            ffmpeg_bin=self._ffmpeg_bin,
+            encoder=self._encoder_name,
+            publish_url=f"rtsp://127.0.0.1:{_RTSP_PORT}/{self._stream_path(display)}",
+            ingest_url_for=self._ingest_url,
+            tracks_for=self._ingest_tracks,
+            card=self._card,
+            font=self._font,
+            log=self.api.log,
+            task_factory=self.api.create_task,
+        )
+        self._controllers[display_id] = controller
+        await controller.start()
+        # Catch up with current routing (a presenter may already be live).
+        await self._publish_display(display_id, set(self._presence))
+
+    async def _stop_output(self, display_id):
+        controller = self._controllers.pop(display_id, None)
+        if controller is not None:
+            await controller.stop()
+
+    async def _restart_output(self, display):
+        """Stream path changed (id or key): the old URL dies, a new one starts."""
+        await self._stop_output(display["id"])
+        await self._start_output(display)
+
+    async def _ensure_encoder(self):
+        """Detect the H.264 encoder once (hardware when present, else
+        libopenh264). Serialized: parallel display adds must not both probe."""
+        async with self._encoder_lock:
+            if self._encoder_name is None:
+                self._encoder_name = await encoders.select_encoder(
+                    self._ffmpeg_bin, "auto", self.api.log
+                )
+
+    def _ingest_url(self, presenter):
+        """The live pump's read URL for a presenter's ingest.
+
+        Reads require credentials (anonymous loopback carries publish only),
+        so inject the internal user — same pattern as the WHEP proxy.
+        """
+        cred = f"{_SIDECAR_USER}:{self._auth_pass}@" if self._auth_pass else ""
+        return f"rtsp://{cred}127.0.0.1:{_RTSP_PORT}/{_INGEST_PREFIX}/{presenter}"
+
+    async def _ingest_tracks(self, presenter):
+        """Track names on a presenter's ingest (None when the API is down).
+
+        The live pump maps real audio only when the ingest actually carries
+        an audio track; otherwise it maps silence, keeping the intermediate's
+        stream layout constant for the never-restarted encoder.
+        """
+        data = await self._api_get(f"/v3/paths/get/{_INGEST_PREFIX}/{presenter}")
+        if data is None:
+            return None
+        return data.get("tracks") or []
+
     # ──── Presence (sidecar paths -> state keys + events) ────
 
     async def _scan_presenters(self):
@@ -662,6 +858,7 @@ class PresentPlugin:
         elif not is_live and time.monotonic() - rotated_at > _CODE_ROTATE_SECONDS:
             self._rotate_code()
 
+        await self._refresh_card()
         await self._publish_all()
 
     def _label_for(self, presenter):
@@ -721,6 +918,13 @@ class PresentPlugin:
         await self.api.state_set(
             f"display.{display_id}.output_state", "live" if showing else "idle"
         )
+        # A stream display's output follows the same resolution: hand the
+        # target to its controller (a no-op when nothing changed). Routing
+        # changes land here immediately via _route; presence changes via the
+        # 2 s poll.
+        controller = self._controllers.get(display_id)
+        if controller is not None:
+            controller.show(showing)
 
     async def _clear_display_state(self, display_id):
         for suffix in ("source", "showing", "output_state"):
@@ -978,15 +1182,25 @@ class PresentPlugin:
             label = (data.label or "").strip()
             if not label:
                 raise HTTPException(422, "Display name is required.")
+            kind = self._validate_kind(data.kind)
             display_id = (data.display_id or "").strip() or self._unique_display_id(label)
             self._validate_display_id(display_id)
             if self._find_display(display_id):
                 raise HTTPException(409, f"A display with id '{display_id}' already exists.")
-            display = {"id": display_id, "label": label, "display_key": self._new_display_key()}
+            display = {
+                "id": display_id,
+                "label": label,
+                "kind": kind,
+                "display_key": self._new_display_key(),
+            }
+            if kind == "stream":
+                display["stream_key"] = self._new_stream_key()
             self._displays.append(display)
             self._routing[display_id] = _AUTO
             await self._persist_displays()
             await self._publish_all()
+            if kind == "stream":
+                await self._start_output(display)
             return self._display_view(display)
 
         @router.put("/displays/{display_id}")
@@ -997,21 +1211,34 @@ class PresentPlugin:
             label = (data.label or "").strip()
             if not label:
                 raise HTTPException(422, "Display name is required.")
+            old_kind = display.get("kind", "browser")
+            kind = self._validate_kind(data.kind) if data.kind is not None else old_kind
             new_id = (data.display_id or "").strip() or display_id
             self._validate_display_id(new_id)
             if new_id != display_id and self._find_display(new_id):
                 raise HTTPException(409, f"A display with id '{new_id}' already exists.")
             display["label"] = label
+            display["kind"] = kind
+            if kind == "stream" and not display.get("stream_key"):
+                display["stream_key"] = self._new_stream_key()
             if new_id != display_id:
-                # The id is baked into the Display URL and the state keys, so
-                # a rename moves the routing and clears old keys. (Any open
-                # Display page for the old id stops at its next poll.)
+                # The id is baked into the Display URL, the stream URLs, and
+                # the state keys, so a rename moves the routing and clears old
+                # keys. (Any open Display page for the old id stops at its
+                # next poll; a decoder on the old stream URL must be repointed.)
                 routed = self._routing.get(display_id, _AUTO)
+                await self._stop_output(display_id)
                 await self._clear_display_state(display_id)
                 display["id"] = new_id
                 self._routing[new_id] = routed
             await self._persist_displays()
             await self._publish_all()
+            # Reconcile the output pipeline with the (possibly new) kind/id.
+            if kind == "stream":
+                if display["id"] not in self._controllers:
+                    await self._start_output(display)
+            else:
+                await self._stop_output(display["id"])
             return self._display_view(display)
 
         @router.delete("/displays/{display_id}")
@@ -1020,6 +1247,7 @@ class PresentPlugin:
             if not display:
                 raise HTTPException(404, f"No display with id '{display_id}'.")
             self._displays.remove(display)
+            await self._stop_output(display_id)
             await self._persist_displays()
             await self._clear_display_state(display_id)
             await self._publish_all()
@@ -1037,6 +1265,20 @@ class PresentPlugin:
             await self._persist_displays()
             return self._display_view(display)
 
+        @router.post("/displays/{display_id}/regenerate_stream_key")
+        async def regenerate_stream_key(display_id: str):
+            display = self._find_display(display_id)
+            if not display:
+                raise HTTPException(404, f"No display with id '{display_id}'.")
+            if display.get("kind") != "stream":
+                raise HTTPException(422, "Only stream displays have a stream key.")
+            # New key = new output path: every decoder holding the old URL
+            # loses the stream and must be given the new one.
+            display["stream_key"] = self._new_stream_key()
+            await self._persist_displays()
+            await self._restart_output(display)
+            return self._display_view(display)
+
         @router.post("/displays/{display_id}/route")
         async def route_display(display_id: str, data: RouteIn):
             try:
@@ -1050,15 +1292,30 @@ class PresentPlugin:
     def _display_view(self, display):
         display_id = display["id"]
         showing = self._resolve_source(display_id, set(self._presence))
-        return {
+        view = {
             "id": display_id,
             "label": display.get("label") or display_id,
+            "kind": display.get("kind", "browser"),
             "display_key": display.get("display_key", ""),
             "display_path": self._display_path(display),
             "source": self._routing.get(display_id, _AUTO),
             "showing": showing,
             "output_state": "live" if showing else "idle",
         }
+        if view["kind"] == "stream":
+            # The IDE composes the copyable URLs from the host it reached the
+            # server on plus these; the path embeds the stream key.
+            view["stream_path"] = self._stream_path(display)
+            view["rtsp_port"] = _RTSP_PORT
+            view["srt_port"] = _SRT_PORT
+            controller = self._controllers.get(display_id)
+            if controller is not None:
+                view["encoder_state"] = controller.state
+            else:
+                # Running plugin but no controller = the output could not be
+                # started (missing font); before start() it is simply off.
+                view["encoder_state"] = "error" if self._supervisor else "stopped"
+        return view
 
     @staticmethod
     def _validate_display_id(display_id):
@@ -1069,6 +1326,13 @@ class PresentPlugin:
             )
         if display_id in _RESERVED_DISPLAY_IDS:
             raise HTTPException(422, f"'{display_id}' is a reserved name; pick another display ID.")
+
+    @staticmethod
+    def _validate_kind(kind):
+        kind = (kind or "browser").strip().lower()
+        if kind not in _DISPLAY_KINDS:
+            raise HTTPException(422, "Display kind must be 'browser' or 'stream'.")
+        return kind
 
     @staticmethod
     def _validate_presenter(presenter):
@@ -1120,10 +1384,18 @@ class PresentPlugin:
             "api: true\n"
             f"apiAddress: {_API_HOST}:{_API_PORT}\n"
             "\n"
-            "rtsp: false\n"
+            # RTSP and SRT face the LAN so hardware decoders can pull the
+            # stream-display outputs; what they may pull is limited to out/*
+            # by the anonymous user below. RTSP is TCP-only: one predictable
+            # port for the network guide instead of a UDP RTP port range.
+            "rtsp: true\n"
+            f"rtspAddress: :{_RTSP_PORT}\n"
+            "rtspTransports: [tcp]\n"
+            'rtspEncryption: "no"\n'
+            "srt: true\n"
+            f"srtAddress: :{_SRT_PORT}\n"
             "rtmp: false\n"
             "hls: false\n"
-            "srt: false\n"
             "metrics: false\n"
             "pprof: false\n"
             "playback: false\n"
@@ -1133,6 +1405,10 @@ class PresentPlugin:
             f"webrtcLocalUDPAddress: :{_WEBRTC_UDP_PORT}\n"
             "webrtcAdditionalHosts: []\n"
             "\n"
+            # MediaMTX picks the FIRST entry whose credentials and source IP
+            # match, then enforces that entry's permissions — there is no
+            # fall-through, so entry order is load-bearing (verified against
+            # the real binary).
             "authInternalUsers:\n"
             f"- user: {_SIDECAR_USER}\n"
             f"  pass: '{self._auth_pass}'\n"
@@ -1146,11 +1422,26 @@ class PresentPlugin:
             "  ips: ['127.0.0.1', '::1']\n"
             "  permissions:\n"
             "  - action: api\n"
-            # Localhost publish lets a WHIP sender on this host feed an ingest
-            # path with no credentials — the signaling port is loopback-only,
-            # so nothing off-box can reach it. Guest publishing from the LAN
-            # arrives through the plugin's own proxied routes.
+            # Localhost publish lets a WHIP sender on this host and the
+            # stream-display encoders feed the sidecar with no credentials —
+            # signaling and RTSP-from-loopback both resolve to this entry.
+            # Guest publishing from the LAN arrives through the plugin's own
+            # proxied routes.
             "  - action: publish\n"
+            # Loopback read of the outputs keeps rtsp://localhost:8554/out/...
+            # working on the server host itself (bench checks, kiosk debug).
+            "  - action: read\n"
+            f"    path: ~^{_OUTPUT_PREFIX}/\n"
+            # Decoders: anonymous LAN read of the stream-display outputs ONLY.
+            # The per-display stream key embedded in each out/ path is the
+            # secret (cheap decoders take a URL, not credentials); ingests and
+            # everything else stay unreadable without the internal user.
+            "- user: any\n"
+            "  pass:\n"
+            "  ips: []\n"
+            "  permissions:\n"
+            "  - action: read\n"
+            f"    path: ~^{_OUTPUT_PREFIX}/\n"
             "\n"
             # Ingest paths (in/<presenter>) come and go with publishers and
             # can't be pre-registered per name, so accept any path. Who may

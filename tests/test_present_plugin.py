@@ -145,9 +145,53 @@ def _guest_client(displays=None):
     return TestClient(app), plugin, plugin.api
 
 
+class _FakeController:
+    """Stands in for output.OutputController in plugin wiring tests."""
+
+    def __init__(self, state="idle"):
+        self.state = state
+        self.shown = []
+
+    def show(self, source):
+        self.shown.append(source)
+
+
+def _stub_outputs(plugin):
+    """Replace the output-pipeline lifecycle with recorders.
+
+    CRUD tests exercise when the plugin starts/stops/restarts a stream
+    display's output, not the pipeline itself (that has its own tests below
+    against fake processes). The stubs keep _controllers consistent so the
+    kind-reconciliation logic ("already running -> don't restart") behaves.
+    """
+    calls = []
+
+    async def start(display):
+        calls.append(("start", display["id"]))
+        plugin._controllers[display["id"]] = _FakeController()
+
+    async def stop(display_id):
+        plugin._controllers.pop(display_id, None)
+        calls.append(("stop", display_id))
+
+    async def restart(display):
+        calls.append(("restart", display["id"]))
+        plugin._controllers[display["id"]] = _FakeController()
+
+    plugin._start_output = start
+    plugin._stop_output = stop
+    plugin._restart_output = restart
+    # Pre-seed controllers for stream displays that "already run".
+    for d in plugin._displays:
+        if d.get("kind") == "stream":
+            plugin._controllers[d["id"]] = _FakeController()
+    return calls
+
+
 def _ext_client(displays=None, presence=None):
     plugin = _plugin(displays)
     plugin._presence = dict(presence or {})
+    plugin._output_calls = _stub_outputs(plugin)
     app = FastAPI()
     app.include_router(plugin._build_ext_router())
     return TestClient(app), plugin, plugin.api
@@ -171,7 +215,10 @@ def test_plugin_info_manifest_shape():
     assert "join_address" in PresentPlugin.CONFIG_SCHEMA
 
     deps = {d["id"]: d for d in info["native_dependencies"]}
-    assert set(deps) == {"mediamtx"}  # no ffmpeg: the display path plays WebRTC as-is
+    # MediaMTX carries the WebRTC/RTSP/SRT paths; ffmpeg drives the
+    # stream-display output encoders (idle card + live transcode).
+    assert set(deps) == {"mediamtx", "ffmpeg"}
+    assert deps["ffmpeg"]["license"] == "LGPL-2.1"  # never the GPL build
     for dep in deps.values():
         for platform_key in ("win_x64", "linux_x64", "linux_arm64"):
             entry = dep["platforms"][platform_key]
@@ -199,21 +246,43 @@ def test_render_config_is_valid_and_locked_down():
     assert cfg["api"] is True and cfg["apiAddress"] == "127.0.0.1:9998"
     assert cfg["webrtc"] is True and cfg["webrtcAddress"] == "127.0.0.1:8890"
     assert cfg["webrtcLocalUDPAddress"] == ":8190"
-    # Protocols we don't use stay disabled — WebRTC in, WebRTC out.
-    assert cfg["rtsp"] is False
+    # RTSP + SRT face the LAN for stream-display decoder pulls. RTSP is
+    # TCP-only (one predictable firewall port, no UDP RTP range) and
+    # unencrypted (decoder compatibility; the LAN read grant is out/* only).
+    assert cfg["rtsp"] is True
+    assert cfg["rtspAddress"] == ":8554"
+    assert cfg["rtspTransports"] == ["tcp"]
+    assert cfg["rtspEncryption"] == "no"
+    assert cfg["srt"] is True
+    assert cfg["srtAddress"] == ":8899"
+    # Protocols we don't use stay disabled.
     assert cfg["rtmp"] is False
     assert cfg["hls"] is False
-    assert cfg["srt"] is False
 
+    # MediaMTX picks the first entry whose credentials + source IP match and
+    # enforces only that entry's permissions (no fall-through), so the order
+    # and per-entry grants here are all load-bearing.
     users = cfg["authInternalUsers"]
     assert users[0]["user"] == "openavc"
     assert users[0]["pass"] == "a1b2c3d4e5f6"
     assert {p["action"] for p in users[0]["permissions"]} == {"publish", "read", "playback"}
-    # Localhost may publish (bench WHIP sender) and use the control API, but
-    # gets no read permission — playback always rides the credentialed proxy.
+    # Localhost may publish (bench WHIP sender, output encoders) and use the
+    # control API; its read grant covers only the out/* outputs so
+    # rtsp://localhost/out/... works on the server host. Ingest playback
+    # always rides the credentialed proxy.
     assert users[1]["user"] == "any"
     assert users[1]["ips"] == ["127.0.0.1", "::1"]
-    assert {p["action"] for p in users[1]["permissions"]} == {"api", "publish"}
+    perms1 = {p["action"]: p for p in users[1]["permissions"]}
+    assert set(perms1) == {"api", "publish", "read"}
+    assert perms1["read"]["path"] == "~^out/"
+    assert "path" not in perms1["publish"]
+    # Anonymous LAN (decoders): read out/* only — the stream key in the URL
+    # is the secret. No publish, no ingest read, no API.
+    assert users[2]["user"] == "any"
+    assert users[2]["ips"] == []
+    perms2 = {p["action"]: p for p in users[2]["permissions"]}
+    assert set(perms2) == {"read"}
+    assert perms2["read"]["path"] == "~^out/"
 
     # Ingest paths (in/<presenter>) are dynamic, so the catch-all must exist.
     assert "all_others" in cfg["paths"]
@@ -896,3 +965,176 @@ async def test_load_displays_backfills_key_and_drops_invalid():
     assert plugin._routing == {"main": "auto"}
     assert plugin.api.saved  # and persisted back
     assert "rooms" not in plugin.api.saved[-1]  # legacy list dropped
+
+
+# ──── Display kinds (CRUD + views) ────
+
+
+def test_add_display_defaults_to_browser():
+    client, plugin, api = _ext_client()
+    resp = client.post("/displays", json={"label": "Lobby TV"})
+    assert resp.status_code == 200
+    view = resp.json()
+    assert view["kind"] == "browser"
+    assert "stream_path" not in view
+    assert plugin._output_calls == []  # no encoder pipeline for browser kind
+
+
+def test_add_stream_display_mints_key_and_starts_output():
+    client, plugin, api = _ext_client()
+    resp = client.post("/displays", json={"label": "Decoder Feed", "kind": "stream"})
+    assert resp.status_code == 200
+    view = resp.json()
+    assert view["kind"] == "stream"
+    stored = plugin._find_display(view["id"])
+    assert stored["stream_key"]
+    assert view["stream_path"] == f"out/{view['id']}-{stored['stream_key']}"
+    assert view["rtsp_port"] == 8554
+    assert view["srt_port"] == 8899
+    assert view["encoder_state"] == "idle"  # the (stubbed) controller's state
+    # The persistent output comes up with the display.
+    assert ("start", view["id"]) in plugin._output_calls
+    # Stream displays keep a Display-page link too (handy for debugging).
+    assert view["display_path"].startswith("/present/display/")
+
+
+def test_add_display_rejects_unknown_kind():
+    client, _plugin_, _api = _ext_client()
+    resp = client.post("/displays", json={"label": "X", "kind": "hologram"})
+    assert resp.status_code == 422
+
+
+def test_edit_kind_browser_to_stream_and_back():
+    client, plugin, _api = _ext_client(displays=[_DISPLAY])
+    resp = client.put("/displays/main", json={"label": "Main Screen", "kind": "stream"})
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "stream"
+    assert plugin._find_display("main")["stream_key"]
+    assert ("start", "main") in plugin._output_calls
+
+    resp = client.put("/displays/main", json={"label": "Main Screen", "kind": "browser"})
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "browser"
+    assert "stream_path" not in resp.json()
+    assert ("stop", "main") in plugin._output_calls
+
+
+def test_edit_stream_display_label_only_does_not_restart_output():
+    stream_display = {**_DISPLAY, "kind": "stream", "stream_key": "s3cret"}
+    client, plugin, _api = _ext_client(displays=[stream_display])
+    resp = client.put("/displays/main", json={"label": "Renamed", "kind": "stream"})
+    assert resp.status_code == 200
+    # Controller was pre-seeded as running; a label edit must not bounce it.
+    assert plugin._output_calls == []
+
+
+def test_edit_stream_display_rename_restarts_output():
+    stream_display = {**_DISPLAY, "kind": "stream", "stream_key": "s3cret"}
+    client, plugin, _api = _ext_client(displays=[stream_display])
+    resp = client.put("/displays/main", json={"label": "Main", "display_id": "stage", "kind": "stream"})
+    assert resp.status_code == 200
+    # The id is part of the output path, so the old URL dies with the rename.
+    assert ("stop", "main") in plugin._output_calls
+    assert ("start", "stage") in plugin._output_calls
+
+
+def test_delete_stream_display_stops_output():
+    stream_display = {**_DISPLAY, "kind": "stream", "stream_key": "s3cret"}
+    client, plugin, _api = _ext_client(displays=[stream_display])
+    resp = client.delete("/displays/main")
+    assert resp.status_code == 200
+    assert ("stop", "main") in plugin._output_calls
+
+
+def test_regenerate_stream_key():
+    stream_display = {**_DISPLAY, "kind": "stream", "stream_key": "0ld-k3y"}
+    client, plugin, _api = _ext_client(displays=[stream_display])
+    resp = client.post("/displays/main/regenerate_stream_key")
+    assert resp.status_code == 200
+    new_key = plugin._find_display("main")["stream_key"]
+    assert new_key and new_key != "0ld-k3y"
+    assert resp.json()["stream_path"] == f"out/main-{new_key}"
+    assert ("restart", "main") in plugin._output_calls
+
+    # Browser displays have no stream key.
+    client2, _p2, _a2 = _ext_client(displays=[_DISPLAY2])
+    assert client2.post("/displays/overflow/regenerate_stream_key").status_code == 422
+    assert client2.post("/displays/ghost/regenerate_stream_key").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_load_displays_normalizes_kind_and_mints_stream_key():
+    plugin = PresentPlugin()
+    plugin.api = _FakeApi({
+        "displays": [
+            {"id": "tv", "label": "TV", "kind": "stream"},  # no keys at all
+            {"id": "lobby", "label": "Lobby", "display_key": "k", "kind": "bogus"},
+        ],
+    })
+    await plugin._load_displays()
+    by_id = {d["id"]: d for d in plugin._displays}
+    assert by_id["tv"]["kind"] == "stream"
+    assert by_id["tv"]["stream_key"]
+    assert by_id["lobby"]["kind"] == "browser"
+    assert plugin.api.saved  # normalization persisted
+
+
+def test_ingest_url_injects_sidecar_credentials():
+    plugin = _plugin()
+    assert plugin._ingest_url("alice") == (
+        "rtsp://openavc:sidecarpass@127.0.0.1:8554/in/alice"
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_display_drives_stream_controller():
+    plugin = _plugin(displays=[_DISPLAY])
+    controller = _FakeController()
+    plugin._controllers["main"] = controller
+    plugin._presence = {"alice": 100}
+    await plugin._publish_display("main", {"alice"})
+    assert controller.shown == ["alice"]
+    await plugin._publish_display("main", set())
+    assert controller.shown == ["alice", ""]
+
+
+# ──── Idle card files ────
+
+
+def test_idle_card_writes_and_rotation(tmp_path):
+    from integrations.present import output as output_mod
+
+    card = output_mod.IdleCard(tmp_path / "card")
+    card.write_all("Bench Space", "192.0.2.10:8080/present", "1234")
+    assert (tmp_path / "card" / "space.txt").read_text(encoding="utf-8") == "Bench Space"
+    assert (tmp_path / "card" / "join.txt").read_text(encoding="utf-8") == "192.0.2.10:8080/present"
+    assert (tmp_path / "card" / "code.txt").read_text(encoding="utf-8") == "1234"
+    card.write_code("9999")
+    assert (tmp_path / "card" / "code.txt").read_text(encoding="utf-8") == "9999"
+    # No stray temp file left behind (writes are atomic replaces).
+    assert sorted(p.name for p in (tmp_path / "card").iterdir()) == [
+        "code.txt", "join.txt", "space.txt",
+    ]
+
+
+def test_rotate_code_updates_card_file(tmp_path):
+    from integrations.present import output as output_mod
+
+    plugin = _plugin()
+    plugin._card = output_mod.IdleCard(tmp_path / "card")
+    code = plugin._rotate_code()
+    assert (tmp_path / "card" / "code.txt").read_text(encoding="utf-8") == code
+
+
+@pytest.mark.asyncio
+async def test_refresh_card_writes_only_on_change(tmp_path, monkeypatch):
+    from integrations.present import output as output_mod
+
+    plugin = _plugin(config={"space_name": "Bench"})
+    plugin._card = output_mod.IdleCard(tmp_path / "card")
+    writes = []
+    monkeypatch.setattr(plugin._card, "write_space", lambda v: writes.append(("space", v)))
+    monkeypatch.setattr(plugin._card, "write_join", lambda v: writes.append(("join", v)))
+    await plugin._refresh_card()
+    await plugin._refresh_card()
+    assert writes == [("space", "Bench"), ("join", "192.0.2.10:8080/present")]
