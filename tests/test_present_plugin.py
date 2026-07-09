@@ -21,6 +21,7 @@ Run from the openavc-plugins root: pytest tests/test_present_plugin.py -v
 
 import asyncio
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -122,11 +123,20 @@ _DISPLAY2 = {"id": "overflow", "label": "Overflow TV", "display_key": "0th3r-k3y
 
 
 class _FakeSupervisor:
-    """Stands in for the SidecarSupervisor; the poll only reads .running."""
+    """Stands in for the SidecarSupervisor; the poll reads .running, and the
+    join-host-change path stops and starts it."""
 
     def __init__(self, running=True):
         self.running = running
         self.pid = 4242
+        self.restarts = 0  # completed stop -> start cycles
+
+    async def stop(self):
+        self.running = False
+
+    async def start(self):
+        self.running = True
+        self.restarts += 1
 
 
 def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
@@ -145,6 +155,9 @@ def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     plugin._http_port = lambda: 8080
     plugin._tls_state = lambda: (False, 0)
     plugin._redirect_http_enabled = lambda: False
+    # As if the sidecar config had been rendered at start with that address,
+    # so the poll's join-host-change check starts from a stable baseline.
+    plugin._rendered_join_host = plugin._join_host()
     return plugin
 
 
@@ -253,12 +266,17 @@ def test_matrix_verbs_are_declared():
 def test_render_config_is_valid_and_locked_down():
     plugin = PresentPlugin()
     plugin._auth_pass = "a1b2c3d4e5f6"
+    plugin._detect_local_ip = lambda: "192.0.2.10"
     cfg = yaml.safe_load(plugin._render_config())
 
     # Distinct ports from the video_panel plugin so both can run side by side.
     assert cfg["api"] is True and cfg["apiAddress"] == "127.0.0.1:9998"
     assert cfg["webrtc"] is True and cfg["webrtcAddress"] == "127.0.0.1:8890"
     assert cfg["webrtcLocalUDPAddress"] == ":8190"
+    # The join host rides in every WebRTC offer as an extra host candidate;
+    # pion's own interface list goes stale the moment the host's IP changes.
+    assert cfg["webrtcAdditionalHosts"] == ["192.0.2.10"]
+    assert plugin._rendered_join_host == "192.0.2.10"
     # RTSP + SRT face the LAN for stream-display decoder pulls. RTSP is
     # TCP-only (one predictable firewall port, no UDP RTP range) and
     # unencrypted (decoder compatibility; the LAN read grant is out/* only).
@@ -299,6 +317,49 @@ def test_render_config_is_valid_and_locked_down():
 
     # Ingest paths (in/<presenter>) are dynamic, so the catch-all must exist.
     assert "all_others" in cfg["paths"]
+
+
+def test_render_config_advertises_an_explicit_join_address():
+    plugin = _plugin(config={"join_address": "10.1.2.3"})
+    cfg = yaml.safe_load(plugin._render_config())
+    assert cfg["webrtcAdditionalHosts"] == ["10.1.2.3"]
+    assert plugin._rendered_join_host == "10.1.2.3"
+
+
+def test_render_config_resolves_a_hostname_join_address(monkeypatch):
+    """Only IP literals land in webrtcAdditionalHosts: MediaMTX re-resolves a
+    hostname entry on every connect and treats a lookup failure as fatal for
+    that session, so hostnames are resolved once at render time instead."""
+    plugin = _plugin(config={"join_address": "av.example.com"})
+
+    def fake_getaddrinfo(host, port, family=0, **kwargs):
+        assert host == "av.example.com"
+        return [
+            (None, None, None, None, ("10.0.0.5", 0)),
+            (None, None, None, None, ("10.0.0.5", 0)),  # duplicates collapse
+            (None, None, None, None, ("10.0.0.6", 0)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    cfg = yaml.safe_load(plugin._render_config())
+    assert cfg["webrtcAdditionalHosts"] == ["10.0.0.5", "10.0.0.6"]
+    # The recorded join host stays the hostname — it's what the cards show
+    # and what the change check compares against.
+    assert plugin._rendered_join_host == "av.example.com"
+
+
+def test_render_config_survives_an_unresolvable_join_address(monkeypatch):
+    """A join_address hostname this machine can't resolve must not poison the
+    sidecar config — the detected LAN address stands in so guests on the LAN
+    can still connect."""
+    plugin = _plugin(config={"join_address": "no-such-host.invalid"})
+
+    def fake_getaddrinfo(*args, **kwargs):
+        raise socket.gaierror("name resolution failed")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    cfg = yaml.safe_load(plugin._render_config())
+    assert cfg["webrtcAdditionalHosts"] == ["192.0.2.10"]
 
 
 # ──── Display helpers ────
@@ -956,6 +1017,66 @@ async def test_stale_idle_code_rotates(monkeypatch):
     plugin._code = (code, -10_000.0)
     await plugin._poll()
     assert plugin._code[1] > 0  # re-stamped now
+
+
+@pytest.mark.asyncio
+async def test_poll_restarts_sidecar_when_the_join_host_moves(tmp_path, monkeypatch):
+    """A host IP change under a running plugin (DHCP renewal, bench-to-rack
+    move): the poll rewrites the sidecar config with the new address and
+    bounces MediaMTX. Without it, WebRTC advertises the dead address for the
+    life of the process and connects wedge after the first session."""
+    plugin = _plugin()
+    plugin._config_path = tmp_path / "mediamtx.yml"
+    plugin._config_path.write_text(plugin._render_config(), encoding="utf-8")
+    assert "'192.0.2.10'" in plugin._config_path.read_text(encoding="utf-8")
+
+    async def ready():
+        return True
+
+    monkeypatch.setattr(plugin, "_wait_until_ready", ready)
+    scans = []
+
+    async def fake_scan():
+        scans.append(1)
+        return set()
+
+    monkeypatch.setattr(plugin, "_scan_presenters", fake_scan)
+
+    # Stable address: no restart, the poll proceeds to presence.
+    await plugin._poll()
+    assert plugin._supervisor.restarts == 0
+    assert len(scans) == 1
+
+    # The address moves: config rewritten, sidecar bounced, poll yields
+    # (presence rebuilds against the fresh sidecar on the next tick).
+    plugin._detect_local_ip = lambda: "203.0.113.7"
+    await plugin._poll()
+    assert plugin._supervisor.restarts == 1
+    assert "'203.0.113.7'" in plugin._config_path.read_text(encoding="utf-8")
+    assert plugin._rendered_join_host == "203.0.113.7"
+    assert len(scans) == 1
+
+    # Stable at the new address: back to normal polling, no more bounces.
+    await plugin._poll()
+    assert plugin._supervisor.restarts == 1
+    assert len(scans) == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_ignores_ip_moves_under_an_explicit_join_address(monkeypatch):
+    """An explicit join_address pins the advertised host — the operator said
+    what guests reach, so detected-IP drift must not bounce the sidecar.
+    (Editing the config field restarts the plugin through the platform, which
+    re-renders the config with the new value.)"""
+    plugin = _plugin(config={"join_address": "10.1.2.3"})
+
+    async def fake_scan():
+        return set()
+
+    monkeypatch.setattr(plugin, "_scan_presenters", fake_scan)
+    plugin._detect_local_ip = lambda: "203.0.113.7"
+    await plugin._poll()
+    assert plugin._supervisor.restarts == 0
 
 
 # ──── Config loading ────

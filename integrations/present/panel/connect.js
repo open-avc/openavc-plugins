@@ -210,13 +210,15 @@
     pc = null;
     resourceUrl = null;
     stopTracks();
-    if (peer) {
-      try { peer.close(); } catch { /* already closed */ }
-    }
     if (url) {
       // Best-effort; the server also drops the session when the peer
-      // connection disappears.
+      // connection disappears. Sent before peer.close(): closing first
+      // races the server's peer-disconnect reaping, which deletes the
+      // session under our DELETE and turns it into a spurious 404.
       fetch(url, { method: 'DELETE', keepalive: true }).catch(() => {});
+    }
+    if (peer) {
+      try { peer.close(); } catch { /* already closed */ }
     }
     liveView.hidden = true;
     joinView.hidden = false;

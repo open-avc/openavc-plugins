@@ -165,11 +165,16 @@ def test_stream_source_url_injects_credentials():
 def test_render_config_is_valid_and_locked_down():
     plugin = VideoPanelPlugin()
     plugin._auth_pass = "a1b2c3d4e5f6"
+    plugin._detect_local_ip = lambda: "192.0.2.10"
     cfg = yaml.safe_load(plugin._render_config())
 
     assert cfg["api"] is True and cfg["apiAddress"] == "127.0.0.1:9997"
     assert cfg["webrtc"] is True and cfg["webrtcAddress"] == "127.0.0.1:8889"
     assert cfg["webrtcLocalUDPAddress"] == ":8189"
+    # The detected LAN address rides in every WebRTC offer as an extra host
+    # candidate; pion's own interface list goes stale after a host IP change.
+    assert cfg["webrtcAdditionalHosts"] == ["192.0.2.10"]
+    assert plugin._rendered_host == "192.0.2.10"
     # RTSP is on, but only as a localhost TCP loopback for the transcode
     # pipeline; TCP-only keeps the UDP RTP/RTCP listeners closed.
     assert cfg["rtsp"] is True
@@ -810,3 +815,81 @@ def test_mjpeg_route_resolves_known_and_404s_unknown(monkeypatch):
     assert ok.status_code == 200 and captured["url"] == "http://enc/?action=stream"
     # Unknown / non-MJPEG ids 404.
     assert client.get("/mjpeg/auto-missing").status_code == 404
+
+
+# ──── Address-change sidecar rebuild ────
+
+
+class _FakeSupervisor:
+    """Stands in for the SidecarSupervisor; the address-change path reads
+    .running and stops/starts it."""
+
+    def __init__(self, running=True):
+        self.running = running
+        self.pid = 4242
+        self.restarts = 0  # completed stop -> start cycles
+
+    async def stop(self):
+        self.running = False
+
+    async def start(self):
+        self.running = True
+        self.restarts += 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_status_poll_restarts_sidecar_when_the_address_moves(tmp_path, monkeypatch):
+    """A host IP change under a running plugin (DHCP renewal, a commissioning
+    move): the status poll rewrites the sidecar config with the new address
+    and bounces MediaMTX — otherwise WebRTC advertises the dead address for
+    the life of the process and WHEP playback wedges after the first session.
+    The bounce must also re-add every stream path: registrations live in the
+    sidecar process, not its config file."""
+    stream = {
+        "stream_id": "front_door", "name": "Front Door",
+        "rtsp_url": "rtsp://cam/1", "username": "", "password": "",
+        "codec_hint": "h264", "transcode": "never", "hardware_accel": "auto",
+    }
+    client, plugin, added, deleted = _crud_client(monkeypatch, {"streams": [stream]})
+    plugin._auth_pass = "x"
+    plugin._detect_local_ip = lambda: "192.0.2.10"
+    plugin._supervisor = _FakeSupervisor()
+    plugin._config_path = tmp_path / "mediamtx.yml"
+    plugin._config_path.write_text(plugin._render_config(), encoding="utf-8")
+    assert "'192.0.2.10'" in plugin._config_path.read_text(encoding="utf-8")
+
+    async def ready():
+        return True
+
+    monkeypatch.setattr(plugin, "_wait_until_ready", ready)
+    # A discovered RTSP preview holds a sidecar path too; the bounce re-adds it.
+    plugin._discovered = {
+        "auto-cam": {"label": "Cam", "url": "rtsp://169.254.5.5/sub", "format": "rtsp"},
+    }
+    plugin._discovered_rtsp = {"auto-cam": "rtsp://169.254.5.5/sub"}
+
+    # Stable address: a normal status poll, no bounce.
+    await plugin._poll_statuses()
+    assert plugin._supervisor.restarts == 0
+    assert plugin.api.state["streams.front_door"] == "idle"
+
+    # The address moves: config rewritten, sidecar bounced, paths re-added.
+    added.clear()
+    plugin._detect_local_ip = lambda: "203.0.113.7"
+    await plugin._poll_statuses()
+    assert plugin._supervisor.restarts == 1
+    assert "'203.0.113.7'" in plugin._config_path.read_text(encoding="utf-8")
+    assert plugin._rendered_host == "203.0.113.7"
+    assert (
+        "/v3/config/paths/add/front_door",
+        {"source": "rtsp://cam/1", "sourceOnDemand": True},
+    ) in added
+    assert (
+        "/v3/config/paths/add/auto-cam",
+        {"source": "rtsp://169.254.5.5/sub", "sourceOnDemand": True},
+    ) in added
+
+    # Stable at the new address: back to normal polling, no more bounces.
+    await plugin._poll_statuses()
+    assert plugin._supervisor.restarts == 1

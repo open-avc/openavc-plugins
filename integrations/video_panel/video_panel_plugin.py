@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
 import sys
 import time
@@ -61,6 +62,9 @@ _INTERNAL_RTSP = f"rtsp://{_RTSP_HOST}:{_RTSP_PORT}"
 _TRANSCODE_PUBLISH = "rtsp"
 _READY_TIMEOUT = 10.0
 _STATUS_POLL_SECONDS = 5.0
+# The auto-detected LAN address (advertised to WebRTC clients) is re-resolved
+# at most this often.
+_IP_CACHE_SECONDS = 60.0
 
 _MEDIAMTX_VERSION = "1.18.2"
 _SIDECAR_USER = "openavc"
@@ -114,7 +118,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.8.2",
+        "version": "0.8.3",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -256,6 +260,8 @@ class VideoPanelPlugin:
         # Discovered RTSP previews we've registered a MediaMTX path for, sid->url.
         self._discovered_rtsp = {}
         self._rebuild_task = None  # debounce handle for discovery rebuilds
+        self._detected_ip = ("", 0.0)  # (auto-detected LAN address, at monotonic)
+        self._rendered_host = None  # LAN address baked into the sidecar config
 
     # ──── Lifecycle ────
 
@@ -346,6 +352,45 @@ class VideoPanelPlugin:
         await self.api.state_set("running", False)
         await self.api.state_set("error", reason)
         await self.api.event_emit("error", {"reason": reason})
+
+    async def _maybe_apply_address_change(self):
+        """Rebuild the sidecar when the host's LAN address has moved (True if
+        it did). Every WHEP session live at that moment already carries the
+        old address in its ICE candidates, so the brief outage from the
+        restart is strictly better than advertising a dead address until the
+        next plugin restart."""
+        if self._supervisor is None or not self._supervisor.running:
+            return False
+        host = self._detect_local_ip()
+        if host == self._rendered_host:
+            return False
+        self.api.log(
+            f"LAN address changed ({self._rendered_host} -> {host}); "
+            "restarting MediaMTX so WebRTC advertises the new address",
+            "warning",
+        )
+        await self._restart_sidecar()
+        return True
+
+    async def _restart_sidecar(self):
+        """Bounce MediaMTX on a freshly rendered config, then re-register
+        every stream path — path registrations live in the sidecar process,
+        not its config file, so a restart forgets them all."""
+        await self._supervisor.stop()
+        self._config_path.write_text(self._render_config(), encoding="utf-8")
+        await self._supervisor.start()
+        if not await self._wait_until_ready():
+            self.api.log(
+                f"MediaMTX did not respond on {_API_HOST}:{_API_PORT} within "
+                f"{int(_READY_TIMEOUT)}s of an address-change restart",
+                "error",
+            )
+            await self.api.state_set("running", False)
+            return
+        for stream in self._streams:
+            await self._sync_path_add(stream)
+        self._discovered_rtsp = {}
+        await self._sync_discovered_rtsp()
 
     # ──── Streams ────
 
@@ -569,6 +614,8 @@ class VideoPanelPlugin:
         await self.api.state_set("stream_ids", json.dumps(listing))
 
     async def _poll_statuses(self):
+        if await self._maybe_apply_address_change():
+            return  # sidecar just bounced; statuses refresh on the next tick
         data = await self._api_get("/v3/paths/list")
         if data is None:
             await self.api.state_set("running", False)
@@ -1077,6 +1124,15 @@ class VideoPanelPlugin:
     # ──── Config + binaries ────
 
     def _render_config(self):
+        # The sidecar's pion stack enumerates interface IPs once at process
+        # start and advertises them as WebRTC host candidates for its whole
+        # life; after a host IP change (DHCP renewal, a commissioning move,
+        # WiFi/Ethernet swap) browsers aim their ICE checks at dead addresses
+        # and WHEP playback wedges. Advertising the detected LAN address keeps
+        # a reachable candidate in every offer; the status poll rewrites this
+        # file and bounces the sidecar when that address changes.
+        host = self._detect_local_ip()
+        self._rendered_host = host
         # MediaMTX 1.18.x uses true/false booleans (not yes/no). The password is
         # hex (token_hex) and single-quoted, so it is always a safe YAML scalar.
         return (
@@ -1104,7 +1160,7 @@ class VideoPanelPlugin:
             "webrtc: true\n"
             f"webrtcAddress: {_WEBRTC_HOST}:{_WEBRTC_PORT}\n"
             f"webrtcLocalUDPAddress: :{_WEBRTC_UDP_PORT}\n"
-            "webrtcAdditionalHosts: []\n"
+            f"webrtcAdditionalHosts: ['{host}']\n"
             "\n"
             "authInternalUsers:\n"
             f"- user: {_SIDECAR_USER}\n"
@@ -1128,6 +1184,29 @@ class VideoPanelPlugin:
             "\n"
             "paths: {}\n"
         )
+
+    def _detect_local_ip(self):
+        """Best-guess LAN address via the UDP-connect trick (no packets sent).
+
+        Same method the platform's mDNS advertiser uses. Always an IP literal,
+        which matters here: MediaMTX treats a webrtcAdditionalHosts hostname
+        that fails DNS as fatal for that session.
+        """
+        ip, at = self._detected_ip
+        if ip and time.monotonic() - at < _IP_CACHE_SECONDS:
+            return ip
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.settimeout(0.5)
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
+        except OSError:
+            ip = "127.0.0.1"
+        self._detected_ip = (ip, time.monotonic())
+        return ip
 
     def _load_or_create_auth(self):
         auth_file = self.api.data_dir / "sidecar.auth"

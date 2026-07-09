@@ -44,6 +44,7 @@ routers.
 """
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -202,7 +203,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.5.2",
+        "version": "0.5.3",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -368,6 +369,7 @@ class PresentPlugin:
         self._code = ("", 0.0)  # (join code, rotated_at monotonic)
         self._labels = {}  # presenter slug -> the display name the guest typed
         self._detected_ip = ("", 0.0)  # (auto-detected join address, at monotonic)
+        self._rendered_join_host = None  # join host baked into the sidecar config
         # Stream-display output pipeline:
         self._controllers = {}  # display_id -> output.OutputController
         self._card = None  # output.IdleCard once start() has a data_dir
@@ -518,6 +520,46 @@ class PresentPlugin:
         await self.api.state_set("error", reason)
         await self.api.event_emit("error", {"reason": reason})
 
+    async def _maybe_apply_join_host_change(self):
+        """Rebuild the sidecar when the join host has moved (True if it did).
+
+        Every session live at that moment already carries the old address in
+        its ICE candidates, so the brief outage from the restart is strictly
+        better than advertising a dead address until the next plugin restart.
+        """
+        host = self._join_host()
+        if host == self._rendered_join_host:
+            return False
+        self.api.log(
+            f"join address changed ({self._rendered_join_host} -> {host}); "
+            "restarting MediaMTX so WebRTC advertises the new address",
+            "warning",
+        )
+        await self._restart_sidecar()
+        return True
+
+    async def _restart_sidecar(self):
+        """Bounce MediaMTX on a freshly rendered config, plus the output
+        encoders that publish into it (left running they'd only crash-loop
+        through their backoff while it's down). Stream-display decoders
+        re-acquire on their own retry once the output path is back."""
+        for display_id in list(self._controllers):
+            await self._stop_output(display_id)
+        await self._supervisor.stop()
+        self._config_path.write_text(self._render_config(), encoding="utf-8")
+        await self._supervisor.start()
+        if not await self._wait_until_ready():
+            self.api.log(
+                f"MediaMTX did not respond on {_API_HOST}:{_API_PORT} within "
+                f"{int(_READY_TIMEOUT)}s of an address-change restart",
+                "error",
+            )
+            await self.api.state_set("running", False)
+            return
+        for display in self._displays:
+            if display.get("kind") == "stream":
+                await self._start_output(display)
+
     # ──── Space ────
 
     async def _space_name(self):
@@ -579,9 +621,7 @@ class PresentPlugin:
         direct https form would serve the self-signed cert and put the
         interstitial right back.
         """
-        address = (self.api.config.get("join_address") or "").strip()
-        if not address:
-            address = self._detect_local_ip()
+        address = self._join_host()
         tls_enabled, tls_port = self._tls_state()
         if tls_enabled:
             cert = await self.api.state_get("system.cloud.cert_status")
@@ -594,6 +634,47 @@ class PresentPlugin:
         port = self._http_port()
         host = address if port == 80 else f"{address}:{port}"
         return f"{host}/{_GUEST_ALIAS}"
+
+    def _join_host(self):
+        """The host guests reach this instance at — the explicit join_address
+        config when set, else the auto-detected LAN address. One resolution
+        point for the join URL and the sidecar's advertised WebRTC host."""
+        address = ""
+        if self.api is not None:
+            address = (self.api.config.get("join_address") or "").strip()
+        return address or self._detect_local_ip()
+
+    def _advertised_ips(self, host):
+        """IP literals to advertise as WebRTC host candidates for ``host``.
+
+        Only IP literals go into webrtcAdditionalHosts: MediaMTX resolves a
+        hostname entry server-side on every connect and treats a lookup
+        failure as fatal for that session, so one bad DNS day would kill all
+        publishing. A join_address hostname is resolved here once at render
+        time instead; if it doesn't resolve from this machine, the detected
+        LAN address stands in (loudly) so guests can still connect.
+        """
+        try:
+            ipaddress.ip_address(host)
+            return [host]
+        except ValueError:
+            pass
+        try:
+            infos = socket.getaddrinfo(host, None, family=socket.AF_INET)
+            ips = list(dict.fromkeys(info[4][0] for info in infos))
+            if ips:
+                return ips
+        except OSError:
+            pass
+        detected = self._detect_local_ip()
+        if self.api is not None:
+            self.api.log(
+                f"join_address '{host}' does not resolve from this machine; "
+                f"advertising the detected LAN address {detected} to WebRTC "
+                "clients instead",
+                "warning",
+            )
+        return [detected]
 
     def _detect_local_ip(self):
         """Best-guess LAN address via the UDP-connect trick (no packets sent).
@@ -1018,6 +1099,8 @@ class PresentPlugin:
         if self._supervisor is None or not self._supervisor.running:
             await self.api.state_set("running", False)
             return
+        if await self._maybe_apply_join_host_change():
+            return  # sidecar just bounced; the next poll rebuilds presence
         live = await self._scan_presenters()
         if live is None:
             await self.api.state_set("running", False)
@@ -1616,6 +1699,16 @@ class PresentPlugin:
     # ──── Config + binaries ────
 
     def _render_config(self):
+        # The sidecar's pion stack enumerates interface IPs once at process
+        # start and advertises them as WebRTC host candidates for its whole
+        # life; after a host IP change (DHCP renewal, bench-to-rack move,
+        # WiFi/Ethernet swap) browsers aim their ICE checks at dead addresses
+        # and connects wedge. Advertising the join host keeps a reachable
+        # candidate in every offer; the presence poll rewrites this file and
+        # bounces the sidecar when that host changes.
+        host = self._join_host()
+        advertised = ", ".join(f"'{ip}'" for ip in self._advertised_ips(host))
+        self._rendered_join_host = host
         # MediaMTX 1.18.x uses true/false booleans (not yes/no). The password is
         # hex (token_hex) and single-quoted, so it is always a safe YAML scalar.
         return (
@@ -1646,7 +1739,7 @@ class PresentPlugin:
             "webrtc: true\n"
             f"webrtcAddress: {_WEBRTC_HOST}:{_WEBRTC_PORT}\n"
             f"webrtcLocalUDPAddress: :{_WEBRTC_UDP_PORT}\n"
-            "webrtcAdditionalHosts: []\n"
+            f"webrtcAdditionalHosts: [{advertised}]\n"
             "\n"
             # MediaMTX picks the FIRST entry whose credentials and source IP
             # match, then enforces that entry's permissions — there is no
