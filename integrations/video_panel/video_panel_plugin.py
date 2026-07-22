@@ -118,13 +118,15 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.8.3",
+        "version": "0.9.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        "min_openavc_version": "0.15.0",
+        # 0.24.0: register_router(panel_paths=...) — older platforms fail
+        # start() on the unknown keyword.
+        "min_openavc_version": "0.24.0",
         "capabilities": [
             "state_read",
             "state_write",
@@ -312,7 +314,14 @@ class VideoPanelPlugin:
                     f"within {int(_READY_TIMEOUT)}s"
                 )
             await self.api.state_set("running", True)
-            self.api.register_router(self._build_router())
+            # panel_paths: the media routes the video_stream panel element
+            # calls, reachable with a panel-scoped token from a standalone
+            # (unauthenticated) room panel on a claimed instance. Stream CRUD
+            # (/streams and /streams/probe) stays programmer-only.
+            self.api.register_router(
+                self._build_router(),
+                panel_paths=["/whep/*", "GET /mjpeg/*"],
+            )
             await self._load_streams()
             await self._publish_streams()
             await self._setup_discovery()

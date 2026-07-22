@@ -201,7 +201,7 @@ def test_plugin_info_manifest_shape():
     info = VideoPanelPlugin.PLUGIN_INFO
     assert info["id"] == "video_panel"
     assert info["category"] == "integration"
-    assert info["min_openavc_version"] == "0.15.0"
+    assert info["min_openavc_version"] == "0.24.0"
     assert info["platforms"] == ["win_x64", "linux_x64", "linux_arm64"]
     assert "http_endpoints" in info["capabilities"]
 

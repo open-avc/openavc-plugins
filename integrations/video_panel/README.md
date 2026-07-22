@@ -52,6 +52,10 @@ properties and pick the stream from the **Stream** list. Other options:
 The element shows a spinner while connecting and a Retry button if the stream
 goes offline. Playback is muted and starts on its own.
 
+Video tiles work on any panel, including wall tablets and kiosks on an
+instance that has a password set (OpenAVC 0.24.0 or newer). Managing the
+stream list still requires signing in to the Programmer.
+
 ## Switching the source at runtime
 
 By default a Video Stream element shows one fixed source. To let a button, macro,

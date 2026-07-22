@@ -435,6 +435,19 @@ async def status():
 
 api.register_router(router)
 
+# Optional panel_paths keyword (added in platform 0.24.0): mark specific ext
+# routes reachable from a STANDALONE room panel (wall tablet / kiosk —
+# unauthenticated by design) on a claimed instance. Without it, panel elements
+# calling /ext/* only work where the panel is embedded in the authenticated
+# Programmer IDE. Each entry is a path glob relative to the /ext mount,
+# optionally prefixed with one HTTP method ("GET /streams"); * crosses path
+# segments. Declare only what panel elements need (read-only media/signaling
+# paths) — a declared route is reachable by anything that can load the panel.
+# Keep CRUD routes undeclared; they stay programmer-only. Malformed patterns
+# raise ValueError at registration. Plugins using it must set
+# min_openavc_version >= 0.24.0.
+#     api.register_router(router, panel_paths=["/whep/*", "GET /mjpeg/*"])
+
 # Proxy an incoming request to another URL (requires: http_endpoints)
 # Forwards method, body, query, and headers; refuses internal/loopback hosts
 # unless allow_internal=True (explicit opt-in for a plugin's own localhost
