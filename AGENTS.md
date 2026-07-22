@@ -1013,7 +1013,16 @@ window.parent.postMessage({
 }, "*");
 ```
 
-**Security:** Iframes are sandboxed with `allow-scripts` only. The iframe runs with an **opaque origin**, which means it cannot access the parent DOM, cannot read or write cookies / localStorage / sessionStorage, cannot make credentialed fetch requests to the host, and cannot navigate the parent page. All interaction with the panel goes through the postMessage API above.
+**Security:** By default, iframes are sandboxed with `allow-scripts` only and run with an **opaque origin** — no parent DOM access, no cookies / localStorage / sessionStorage, no credentialed fetch requests to the host, no navigating the parent page. All interaction with the panel goes through the postMessage API above.
+
+A panel element can opt into extra permissions with two optional fields on its declaration. The server filters both against whitelists; unknown tokens are dropped with a warning in the system log.
+
+| Field | Allowed tokens | Deliberately excluded |
+|-------|----------------|-----------------------|
+| `sandbox_permissions` (extra `iframe.sandbox` tokens) | `allow-same-origin`, `allow-forms`, `allow-modals`, `allow-popups` | `allow-top-navigation`, `allow-popups-to-escape-sandbox`, `allow-pointer-lock` (sandbox escapes) |
+| `allow_features` (Permissions-Policy tokens) | `autoplay`, `encrypted-media`, `fullscreen`, `picture-in-picture` | `camera`, `microphone`, `geolocation` (sensor access) |
+
+**`allow-same-origin` is a trust grant.** Combined with the always-present `allow-scripts`, it gives the element's UI the same origin as the panel page — its storage and credentialed fetches — effectively removing the iframe sandbox boundary in the browser. That is an accepted posture (a plugin is already arbitrary Python on the server; the sandbox is defense-in-depth, not the trust boundary), but it is part of the trust a user extends at install time: the Programmer IDE surfaces each plugin's sandbox permissions alongside its capabilities, and review expects a plugin declaring `allow-same-origin` to clearly need it (same-origin fetches or storage). Declare it only when the element cannot work without it.
 
 ---
 
