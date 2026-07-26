@@ -1181,7 +1181,9 @@ openavc-plugins/
 ├── template/            # Plugin template (copy to start)
 ├── tests/               # Test files
 ├── docs/                # Contributing guide
+├── scripts/             # build_manifest.py (rebuilds manifest.json)
 ├── index.json           # Plugin catalog
+├── manifest.json        # Generated per-file SHA-256 for every published plugin
 ├── validate.py          # Validation script
 └── AGENTS.md            # This file
 ```
@@ -1267,6 +1269,19 @@ Every plugin must have an entry in `index.json`. The catalog is used by the Prog
 | `min_openavc_version` | No | Minimum compatible OpenAVC version. |
 | `manufacturer` | No | Hardware manufacturer (for control surface plugins). |
 
+### manifest.json (generated — regenerate it, don't hand-edit)
+
+`manifest.json` holds a SHA-256 for every committed file in every published plugin. OpenAVC installs a plugin by asking GitHub for its directory listing and downloading what it is told about, so it checks each file against this manifest before writing anything: a file whose hash doesn't match, a file the manifest doesn't list, and a manifest entry that never arrived are all refused. Per-file hashes on their own wouldn't be enough — without the "nothing extra" rule, an injected file would sail through.
+
+Regenerate it in the same pull request as any change to your plugin's files, including files that aren't code (a README, an asset, a font):
+
+```bash
+python scripts/build_manifest.py            # rewrite manifest.json
+python scripts/build_manifest.py --check    # verify it is in sync (what CI runs)
+```
+
+The file set comes from `git ls-files`, so commit your files first — anything untracked is invisible to the manifest and would be refused at install time. A stale manifest fails CI, and would otherwise break installs of the plugin that changed.
+
 ---
 
 ## 16. Validation
@@ -1277,6 +1292,7 @@ Run the validation script before submitting:
 python validate.py                                   # Validate all plugins
 python validate.py integrations/mqtt                  # Validate a specific plugin
 python validate.py --check-index                      # Also validate index.json consistency
+python scripts/build_manifest.py --check              # Verify manifest.json is in sync
 ```
 
 The validator checks:

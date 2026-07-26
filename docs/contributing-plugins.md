@@ -95,6 +95,16 @@ Add your plugin to `index.json` in the root of the repository:
 }
 ```
 
+## manifest.json
+
+`manifest.json` records a SHA-256 for every file in every published plugin. OpenAVC checks each file it downloads against it and refuses anything that doesn't match, so the manifest has to be rebuilt whenever your plugin's files change — code, README, assets, all of it:
+
+```bash
+python scripts/build_manifest.py
+```
+
+Commit your files first: the manifest is built from what git tracks, so an uncommitted file is invisible to it and would be rejected at install time. Include the regenerated `manifest.json` in your pull request. CI fails if it's out of date.
+
 ## Categories
 
 Place your plugin directory under the correct category:
@@ -114,6 +124,7 @@ Run the validator before submitting:
 python validate.py                               # Validate all plugins
 python validate.py integrations/mqtt              # Validate a specific plugin
 python validate.py --check-index                  # Also check index.json consistency
+python scripts/build_manifest.py --check          # Check manifest.json is in sync
 ```
 
 ## Using an AI Assistant

@@ -1,0 +1,72 @@
+{
+  "_meta": {
+    "generator_version": "1.0.0",
+    "schema_version": "1",
+    "total_plugins": 6
+  },
+  "plugins": {
+    "audio_player": {
+      "files": {
+        "utility/audio_player/README.md": "fcf99c78785322ac9825274bb7aed5f8c34be6a7e0c555da909f6bdce0f76d80",
+        "utility/audio_player/audio_player_plugin.py": "7f7fdba2bb889fc2c570d6895f86db7762dd9ee98637ecb272fa3118a179aa94",
+        "utility/audio_player/plugin.json": "aaca2b72305b11fef5738f0c6d948c163f9941e516a85d73c6a6305550db034d"
+      }
+    },
+    "dante": {
+      "files": {
+        "integrations/dante/dante_plugin.py": "43b9d9c42a9a2c55a5bd665d9b4d49791c93ef894a3fde3937e081390273adf0",
+        "integrations/dante/plugin.json": "7b4ad58e063648afbba08de6253214d0afc9a38612299152c4cacdac43812f06"
+      }
+    },
+    "mqtt": {
+      "files": {
+        "integrations/mqtt/mqtt_bridge_plugin.py": "50d8c4897bbf9ae1ff53d3a1fc37a5d05bfb858972cd02483231757d463b6cdc",
+        "integrations/mqtt/plugin.json": "19de260ed0e75caed9f95d77763d16c520242add407b8faa0f5f039d37f2ea22"
+      }
+    },
+    "present": {
+      "files": {
+        "integrations/present/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
+        "integrations/present/README.md": "c178db07bddc93d2e934c318e53a5e4076e830b210a3c97ad8fe988e661e82f6",
+        "integrations/present/encoders.py": "8eb08c3f3e11683681a3126fdea7c9c5316575feb4ac5017ab162cb79e4fa242",
+        "integrations/present/enum_outputs.ps1": "a9646fee2f56883a09c674400ee185f795b1d5d0a027c9fa152c691a76fa2587",
+        "integrations/present/hostoutputs.py": "cda3fe37f70dad3968eea3bb74b589f83511642bb2b0eff6c0d06b7e6b39aaa6",
+        "integrations/present/kiosk.py": "c90e08bb08cac8f1df1fd68fc965999f8ce38cbff0e2147bb0572633b1beb48f",
+        "integrations/present/output.py": "62334085d9bc4687e2cd36e86333c7f5af165cc847f5873ece383c67513a133c",
+        "integrations/present/panel/connect.css": "79ed80bc24f53a7faeda87f7a518e7e4c49c375d0c72c00e056ebfca46ec48cd",
+        "integrations/present/panel/connect.html": "8d03d59d4169a618cde20f5d7768b7fe26a49b8e80fba2049d2d991e4db82f56",
+        "integrations/present/panel/connect.js": "ee300abbecbcee91368b9a2c4564fc854e6a43d1e5d8806730676918213ee364",
+        "integrations/present/panel/display.css": "ae58056cd8e270024b479ccf006572f318405acfa6a3b3515b6263b0fd2c76c8",
+        "integrations/present/panel/display.html": "74c971a0529923fa81f60a5629dcee72cc14d895faef2e4818216f2033e4074c",
+        "integrations/present/panel/display.js": "c5348255ea2d3271bfd5a206f9991730312a819fa398585cdec799446acc3966",
+        "integrations/present/plugin.json": "656a434c400b7970f09a0e657566bc961a49f28633fc950dcbb85bdd88c99fd9",
+        "integrations/present/present_plugin.py": "859d4709967a491df78deb4da03840f9c09b7ec1041ef8d41cc078aec3f3fbf4",
+        "integrations/present/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4"
+      }
+    },
+    "streamdeck": {
+      "files": {
+        "control_surfaces/streamdeck/README.md": "a67476fc3eb055203fce8cc800dc37eacc38833f48298b35b786121683fa3f7f",
+        "control_surfaces/streamdeck/fonts/DejaVuSans.ttf": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+        "control_surfaces/streamdeck/fonts/LICENSE": "25f744fa9dd47ff9d3a6fb7fc43f1077dbdc981a043339275bc3cf804d383104",
+        "control_surfaces/streamdeck/fonts/lucide-info.json": "951a23c65a08f084d8e0153fb2a9febc48f65cfeecddebdccb43fe20f773935d",
+        "control_surfaces/streamdeck/fonts/lucide.ttf": "0ff17e4ce16364d2dae72689336262960e7d5067cfcdb07ca283465a2a34af48",
+        "control_surfaces/streamdeck/plugin.json": "c957b974d3ca865e998f306efad776c22935940e128ef29e23e705365751c324",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "67dac4a16386e3c2025c0c7c7f41c2942799b316f0509399c1ead2600c186837"
+      }
+    },
+    "video_panel": {
+      "files": {
+        "integrations/video_panel/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
+        "integrations/video_panel/README.md": "74f5fce5d52ce9e6de795eb700c90913f137a7e6846b60810fedd5e38c156780",
+        "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
+        "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
+        "integrations/video_panel/panel/video_stream.js": "25100a39a2f71d4ba005526f80e33e425d0adf82e61ed91bcd0898498df545fd",
+        "integrations/video_panel/plugin.json": "0e804660c9bfce6c51b6efa29bfefb6f63b206284b23be72c20f75f63af907ff",
+        "integrations/video_panel/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4",
+        "integrations/video_panel/transcode.py": "ff5a268e47dd0ef899746d8043ad3a9cf95ff0b4ffcb98b1075136537c8ba80e",
+        "integrations/video_panel/video_panel_plugin.py": "0051275a56317c6eeeae80cc7ff78ea5f52795cd90c9035337d0f1c892d854b7"
+      }
+    }
+  }
+}
