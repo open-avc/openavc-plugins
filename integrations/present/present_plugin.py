@@ -203,7 +203,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.5.3",
+        "version": "0.6.0",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -1445,7 +1445,7 @@ class PresentPlugin:
 
         @router.get("/displays")
         async def list_displays():
-            return [self._display_view(d) for d in self._displays]
+            return {"displays": [self._display_view(d) for d in self._displays]}
 
         @router.get("/outputs")
         async def list_outputs():
@@ -1559,7 +1559,7 @@ class PresentPlugin:
             await self._publish_all()
             await self._sync_kiosks()
             kiosk.remove_profile(self.api.data_dir, display_id)
-            return {"ok": True, "display_id": display_id}
+            return {"status": "deleted", "display_id": display_id}
 
         @router.post("/displays/{display_id}/regenerate_key")
         async def regenerate_key(display_id: str):

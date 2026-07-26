@@ -861,7 +861,7 @@ def test_crud_add_list_edit_delete():
     assert r.json()["id"] == "main_screen_2"
 
     # List returns both.
-    listing = client.get("/displays").json()
+    listing = client.get("/displays").json()["displays"]
     assert {x["id"] for x in listing} == {"main_screen", "main_screen_2"}
 
     # Edit: rename keeps the key; an id change clears the old state keys and
@@ -878,7 +878,7 @@ def test_crud_add_list_edit_delete():
 
     # Delete removes it from the list, persists, and clears its state keys.
     r = client.delete("/displays/left")
-    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.status_code == 200 and r.json()["status"] == "deleted"
     assert [x["id"] for x in api.saved[-1]["displays"]] == ["main_screen_2"]
     assert api.state["display.left.output_state"] is None
     assert "left" not in plugin._routing
@@ -1415,7 +1415,7 @@ def test_add_display_with_local_output_syncs_kiosk():
 def test_browser_display_without_local_output_reports_empty():
     client, plugin, api = _ext_client([_DISPLAY])
     plugin._kiosk = _FakeKiosk()
-    body = client.get("/displays").json()[0]
+    body = client.get("/displays").json()["displays"][0]
     assert body["local_output"] == ""
     # The window-status fields only exist when a local output is set.
     assert "local_state" not in body

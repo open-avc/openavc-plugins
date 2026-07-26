@@ -3632,7 +3632,7 @@ def test_test_route_validates_and_reports_refused():
     loop = __import__("asyncio").new_event_loop()
     try:
         bad = loop.run_until_complete(test_ep({"host": ""}))
-        assert bad["ok"] is False
+        assert bad["success"] is False
         # A localhost port nothing listens on -> connection refused
         import socket as _socket
         probe = _socket.socket()
@@ -3642,7 +3642,7 @@ def test_test_route_validates_and_reports_refused():
         refused = loop.run_until_complete(
             test_ep({"host": "127.0.0.1", "port": free_port})
         )
-        assert refused["ok"] is False and refused["error"]
+        assert refused["success"] is False and refused["error"]
         # And a live listener -> ok
         srv = _socket.socket()
         srv.bind(("127.0.0.1", 0))
@@ -3651,6 +3651,6 @@ def test_test_route_validates_and_reports_refused():
             test_ep({"host": "127.0.0.1", "port": srv.getsockname()[1]})
         )
         srv.close()
-        assert ok["ok"] is True
+        assert ok["success"] is True
     finally:
         loop.close()

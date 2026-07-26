@@ -118,7 +118,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.9.0",
+        "version": "0.10.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -782,7 +782,7 @@ class VideoPanelPlugin:
         @router.get("/streams")
         async def list_streams():
             live = await self._live_status_map()
-            return [self._stream_view(s, live) for s in self._streams]
+            return {"streams": [self._stream_view(s, live) for s in self._streams]}
 
         @router.post("/streams")
         async def add_stream(data: StreamIn):
@@ -830,7 +830,7 @@ class VideoPanelPlugin:
             await self._sync_path_delete(stream_id)
             await self.api.state_set(f"streams.{stream_id}", None)
             await self._publish_streams()
-            return {"ok": True, "stream_id": stream_id}
+            return {"status": "deleted", "stream_id": stream_id}
 
         @router.post("/streams/probe")
         async def probe_stream(body: ProbeIn):
@@ -1036,14 +1036,14 @@ class VideoPanelPlugin:
                 *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
             )
         except OSError as e:
-            return {"ok": False, "message": f"Could not run ffmpeg: {e}"}
+            return {"success": False, "message": f"Could not run ffmpeg: {e}"}
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_PROBE_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             return {
-                "ok": False,
+                "success": False,
                 "message": "Timed out connecting to the source. Check the URL, "
                 "credentials, and that the device is reachable on the network.",
             }
@@ -1058,17 +1058,17 @@ class VideoPanelPlugin:
         if not vid_line:
             lowered = text.lower()
             if "401 unauthorized" in lowered or "authorization failed" in lowered:
-                return {"ok": False, "message": "Authentication failed. Check the username and password."}
+                return {"success": False, "message": "Authentication failed. Check the username and password."}
             if any(s in lowered for s in ("connection refused", "no route to host", "timed out", "timeout")):
-                return {"ok": False, "message": "Could not reach the source. Check the URL and that the device is online."}
-            return {"ok": False, "message": "No video stream was found at that URL."}
+                return {"success": False, "message": "Could not reach the source. Check the URL and that the device is online."}
+            return {"success": False, "message": "No video stream was found at that URL."}
         m = re.search(r"Video:\s*([A-Za-z0-9_]+)(?:\s*\(([^)]*)\))?", vid_line)
         codec = m.group(1).lower() if m else ""
         profile = (m.group(2) or "").strip() if m else ""
         res = re.search(r"(\d{2,5})x(\d{2,5})", vid_line)
         fps_m = re.search(r"(\d+(?:\.\d+)?)\s*fps", vid_line)
         result = {
-            "ok": True,
+            "success": True,
             "codec": codec,
             "profile": profile,
             "width": int(res.group(1)) if res else None,

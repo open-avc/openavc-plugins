@@ -1157,7 +1157,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.34.0",
+        "version": "1.35.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -2274,17 +2274,17 @@ class StreamDeckPlugin:
             try:
                 port = int(payload.get("port", _NET_DEFAULT_PORT))
             except (TypeError, ValueError):
-                return {"ok": False, "error": "invalid port"}
+                return {"success": False, "error": "invalid port"}
             if not host or not (0 < port < 65536):
-                return {"ok": False, "error": "enter a host or IP address"}
+                return {"success": False, "error": "enter a host or IP address"}
             try:
                 _reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port), timeout=3.0
                 )
             except Exception as e:
-                return {"ok": False, "error": _classify_net_error(e)}
+                return {"success": False, "error": _classify_net_error(e)}
             writer.close()
-            return {"ok": True}
+            return {"success": True}
 
         return router
 

@@ -253,7 +253,7 @@ _PROBE_H264_HIGH = (
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_parse_probe_hevc_recommends_transcode():
     r = VideoPanelPlugin._parse_probe(_PROBE_HEVC)
-    assert r["ok"] is True
+    assert r["success"] is True
     assert r["codec"] == "hevc" and r["profile"] == "Main"
     assert (r["width"], r["height"]) == (1920, 1080)
     assert r["fps"] == 20.0
@@ -279,9 +279,9 @@ def test_parse_probe_h264_high_plays_without_transcode():
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_parse_probe_surfaces_auth_and_unreachable_errors():
     auth = VideoPanelPlugin._parse_probe("rtsp://cam: 401 Unauthorized\n")
-    assert auth["ok"] is False and "password" in auth["message"].lower()
+    assert auth["success"] is False and "password" in auth["message"].lower()
     down = VideoPanelPlugin._parse_probe("rtsp://cam: Connection refused\n")
-    assert down["ok"] is False and "reach" in down["message"].lower()
+    assert down["success"] is False and "reach" in down["message"].lower()
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
@@ -415,7 +415,7 @@ def test_crud_add_list_edit_delete(monkeypatch):
     assert r.json()["stream_id"] == "front_door_2"
 
     # List returns both.
-    listing = client.get("/streams").json()
+    listing = client.get("/streams").json()["streams"]
     assert {c["stream_id"] for c in listing} == {"front_door", "front_door_2"}
 
     # Edit changes the source: delete-then-add against the live sidecar.
@@ -427,7 +427,7 @@ def test_crud_add_list_edit_delete(monkeypatch):
 
     # Delete removes it from the list, the sidecar, and persists.
     r = client.delete("/streams/front_door")
-    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.status_code == 200 and r.json()["status"] == "deleted"
     assert "/v3/config/paths/delete/front_door" in deleted
     assert [c["stream_id"] for c in plugin.api.saved[-1]["streams"]] == ["front_door_2"]
 
