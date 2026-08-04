@@ -931,7 +931,7 @@ EXTENSIONS = {
             "type": "status_display",           # Unique type; also names the file: panel/status_display.html
             "label": "Status Display",          # Shown in Element Palette
             "renderer": "iframe",               # Only "iframe" supported
-            "default_size": {"col_span": 3, "row_span": 2},
+            "default_size": {"w": 25, "h": 25},   # % of the page, when dropped
             "config_schema": [
                 {"key": "title", "type": "string", "label": "Title", "default": "Status"},
                 {"key": "state_key", "type": "state_key", "label": "State Key", "default": ""},

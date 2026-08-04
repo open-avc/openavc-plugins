@@ -62,10 +62,10 @@
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
         "integrations/video_panel/panel/video_stream.js": "25100a39a2f71d4ba005526f80e33e425d0adf82e61ed91bcd0898498df545fd",
-        "integrations/video_panel/plugin.json": "0e804660c9bfce6c51b6efa29bfefb6f63b206284b23be72c20f75f63af907ff",
+        "integrations/video_panel/plugin.json": "e0eb6147710c78158ddc28cd4240de4fe5d0129046ecd2a00c5dcfe267887d38",
         "integrations/video_panel/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4",
         "integrations/video_panel/transcode.py": "ff5a268e47dd0ef899746d8043ad3a9cf95ff0b4ffcb98b1075136537c8ba80e",
-        "integrations/video_panel/video_panel_plugin.py": "0051275a56317c6eeeae80cc7ff78ea5f52795cd90c9035337d0f1c892d854b7"
+        "integrations/video_panel/video_panel_plugin.py": "0a034fcd513bbe3d792f3f942d1fe2365766c9eb7b48670256c3bc30b87f8b90"
       }
     }
   }

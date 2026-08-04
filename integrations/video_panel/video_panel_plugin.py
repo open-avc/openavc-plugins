@@ -118,7 +118,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.10.0",
+        "version": "0.10.1",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -197,7 +197,7 @@ class VideoPanelPlugin:
                 "type": "video_stream",
                 "label": "Video Stream",
                 "renderer": "iframe",
-                "default_size": {"col_span": 6, "row_span": 4},
+                "default_size": {"w": 50, "h": 50},
                 # allow-same-origin: the iframe is served same-origin and must
                 # send a fetch with the platform session so its /ext/* calls
                 # authenticate. autoplay: start playback without a user gesture.
