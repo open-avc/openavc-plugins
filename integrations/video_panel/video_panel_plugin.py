@@ -118,7 +118,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.10.1",
+        "version": "0.10.2",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -126,7 +126,7 @@ class VideoPanelPlugin:
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
         # 0.24.0: register_router(panel_paths=...) — older platforms fail
         # start() on the unknown keyword.
-        "min_openavc_version": "0.24.0",
+        "min_openavc_version": "0.25.0",
         "capabilities": [
             "state_read",
             "state_write",
@@ -1234,7 +1234,7 @@ class VideoPanelPlugin:
 
     @staticmethod
     def _resolve_dep(filename):
-        from server.system_config import PLUGIN_REPO_DIR
+        from openavc.system_config import PLUGIN_REPO_DIR
 
         path = PLUGIN_REPO_DIR / ".deps" / filename
         return path if path.exists() else None

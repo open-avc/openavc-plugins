@@ -291,7 +291,7 @@ If a field has `required: True` and no `default` value, the IDE shows a **Setup 
 
 The `PluginAPI` object is passed to your `start()` method. It is your only interface to the OpenAVC runtime.
 
-**Source reference:** [`server/core/plugin_api.py`](https://github.com/open-avc/openavc/blob/main/server/core/plugin_api.py)
+**Source reference:** [`openavc/core/plugin_api.py`](https://github.com/open-avc/openavc/blob/main/openavc/core/plugin_api.py)
 
 ### 5.1 State Methods
 
@@ -1132,10 +1132,10 @@ PLUGIN_INFO = {
 
 OpenAVC provides a test harness for plugin development.
 
-**Source reference:** [`server/core/plugin_test_harness.py`](https://github.com/open-avc/openavc/blob/main/server/core/plugin_test_harness.py)
+**Source reference:** [`openavc/core/plugin_test_harness.py`](https://github.com/open-avc/openavc/blob/main/openavc/core/plugin_test_harness.py)
 
 ```python
-from server.core.plugin_test_harness import PluginTestHarness
+from openavc.core.plugin_test_harness import PluginTestHarness
 
 async def test_my_plugin():
     harness = PluginTestHarness()

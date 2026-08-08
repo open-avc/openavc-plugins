@@ -19,10 +19,11 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-# Add openavc server to the import path for the test harness
-_OPENAVC_ROOT = Path(__file__).resolve().parents[2] / "openavc"
-if str(_OPENAVC_ROOT) not in sys.path:
-    sys.path.insert(0, str(_OPENAVC_ROOT))
+# The openavc checkout on the import path, for PluginAPI / the test harness.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _platform_root import add_platform_to_path  # noqa: E402
+
+add_platform_to_path()
 
 # Add plugins root so we can import the plugin
 _PLUGINS_ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +31,8 @@ if str(_PLUGINS_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGINS_ROOT))
 
 try:
-    from server.core.plugin_test_harness import PluginTestHarness
-    from server.core.plugin_loader import validate_macro_actions, validate_script_api
+    from openavc.core.plugin_test_harness import PluginTestHarness
+    from openavc.core.plugin_loader import validate_macro_actions, validate_script_api
 except ModuleNotFoundError:
     pytest.skip(
         "openavc repo not available as sibling directory",

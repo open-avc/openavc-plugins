@@ -150,7 +150,7 @@ def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     plugin._routing = {d["id"]: "auto" for d in plugin._displays}
     plugin._rotate_code()
     # Pin the join-address inputs so join_url is deterministic regardless of
-    # the test host's NICs or whether the server package is importable.
+    # the test host's NICs or whether the openavc package is importable.
     plugin._detect_local_ip = lambda: "192.0.2.10"
     plugin._http_port = lambda: 8080
     plugin._tls_state = lambda: (False, 0)
@@ -230,7 +230,7 @@ def test_plugin_info_manifest_shape():
     info = PresentPlugin.PLUGIN_INFO
     assert info["id"] == "present"
     assert info["category"] == "integration"
-    assert info["min_openavc_version"] == "0.23.0"
+    assert info["min_openavc_version"] == "0.25.0"
     assert info["platforms"] == ["win_x64", "linux_x64", "linux_arm64"]
     # Guest routes are the point of this plugin; both HTTP grants are needed.
     assert "http_endpoints" in info["capabilities"]

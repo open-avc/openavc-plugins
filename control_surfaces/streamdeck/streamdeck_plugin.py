@@ -94,8 +94,8 @@ def _unwrap_binding(value):
 # ──── Condition Evaluation ────
 #
 # Self-contained copy of the platform's condition evaluator
-# (server/core/condition_eval.py). Vendored rather than imported so this
-# community plugin stays portable and doesn't couple to server internals.
+# (openavc/core/condition_eval.py). Vendored rather than imported so this
+# community plugin stays portable and doesn't couple to platform internals.
 # Semantics are kept identical to the platform evaluator so a `visible_when`
 # or `auto_page` condition behaves the same here as in a macro skip_if or a
 # trigger guard.
@@ -1174,11 +1174,12 @@ class StreamDeckPlugin:
         "category": "control_surface",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        # Verified against the v0.15.1 tag: every API this plugin calls
-        # (variable_set, register_router, subscriptions, periodic tasks) and
-        # both gated capabilities (variable_write, http_endpoints) exist
-        # there. on_config_changed simply isn't called on older cores.
-        "min_openavc_version": "0.15.1",
+        # The APIs this plugin calls (variable_set, register_router,
+        # subscriptions, periodic tasks) and both gated capabilities
+        # (variable_write, http_endpoints) go back to v0.15.1, but its routes
+        # return the response shapes the Programmer settled on in 0.24.0, so
+        # that is the floor.
+        "min_openavc_version": "0.24.0",
         "dependencies": ["streamdeck", "pillow>=10.0"],
         "native_dependencies": [
             {

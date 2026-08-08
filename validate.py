@@ -43,7 +43,7 @@ VALID_CONFIG_TYPES = {
 VALID_PLATFORMS = {"all", "win_x64", "linux_x64", "linux_arm64"}
 
 # Top-level path segments a guest_alias may not shadow. Mirrors
-# server/core/plugin_loader.py RESERVED_GUEST_ALIASES.
+# openavc/core/plugin_loader.py RESERVED_GUEST_ALIASES.
 RESERVED_GUEST_ALIASES = {
     "api", "panel", "programmer", "pair", "setup", "ws", "isc",
     "docs", "redoc", "openapi.json", "assets", "themes", "health",
@@ -52,7 +52,7 @@ RESERVED_GUEST_ALIASES = {
 
 # EXTENSIONS types the panel/IDE understand, and the field that uniquely
 # identifies an entry within each type (panel_elements are keyed by `type`,
-# every other type by `id`). Mirrors server/core/plugin_loader.py.
+# every other type by `id`). Mirrors openavc/core/plugin_loader.py.
 VALID_EXTENSION_TYPES = {
     "views", "device_panels", "status_cards", "context_actions", "panel_elements",
 }
@@ -78,7 +78,7 @@ def is_safe_requirement(req):
     could run install-time code from an attacker-chosen index/repo. Flag them
     here so contributors learn at PR time. Extras ('pkg[extra]'), version
     specifiers, and environment markers are allowed. Mirrors
-    server/core/plugin_installer.py:_is_safe_requirement.
+    openavc/core/plugin_installer.py:_is_safe_requirement.
     """
     s = str(req).strip()
     if not s or s[0] in "-./\\":
@@ -111,30 +111,88 @@ def validate_id_format(plugin_id):
     return bool(re.match(r'^[a-z][a-z0-9_]*$', plugin_id))
 
 
+def _module_level_assignments(tree):
+    """Module-level `NAME = <literal>` values, for resolving references."""
+    consts = {}
+    nodes = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                nodes[target.id] = node.value
+                try:
+                    consts[target.id] = ast.literal_eval(node.value)
+                except Exception:
+                    pass
+    return consts, nodes
+
+
+def _find_assignment(tree, name):
+    """The value node assigned to `name`, class-level first then module-level."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, ast.Assign):
+                    for target in item.targets:
+                        if isinstance(target, ast.Name) and target.id == name:
+                            return item.value
+    _, nodes = _module_level_assignments(tree)
+    return nodes.get(name)
+
+
 def extract_plugin_info(content):
-    """Try to extract PLUGIN_INFO dict from Python source using AST.
-    Falls back to regex if AST extraction fails.
+    """Extract the PLUGIN_INFO dict from plugin source using AST.
+
+    Returns ``(info, unresolved)`` -- the keys it could evaluate, and the names
+    of the keys it could not. Both halves matter: a plugin whose PLUGIN_INFO
+    can't be read gets NO validation at all, and reading it as a single
+    ``literal_eval`` is too strict for two shapes real plugins use. One holds a
+    module constant as a value (``"guest_alias": _GUEST_ALIAS``), the other
+    aliases a module-level dict into the class (``PLUGIN_INFO = PLUGIN_INFO``).
+    Either one used to make the whole extraction return None, silently, so
+    three of the shipped plugins were validated on plugin.json alone -- which
+    is how one of them shipped enforcing a lower min_openavc_version than its
+    catalog entry advertised. So: resolve module constants, follow one alias,
+    and evaluate the dict a key at a time rather than all-or-nothing.
     """
     try:
         tree = ast.parse(content)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                for item in node.body:
-                    if isinstance(item, ast.Assign):
-                        for target in item.targets:
-                            if isinstance(target, ast.Name) and target.id == "PLUGIN_INFO":
-                                return ast.literal_eval(item.value)
-    except Exception:
-        pass
-    return None
+    except SyntaxError:
+        return None, []
+
+    consts, _ = _module_level_assignments(tree)
+    node = _find_assignment(tree, "PLUGIN_INFO")
+    # `PLUGIN_INFO = PLUGIN_INFO` in the class body -- follow it to the module.
+    if isinstance(node, ast.Name):
+        _, module_nodes = _module_level_assignments(tree)
+        node = module_nodes.get(node.id)
+    if not isinstance(node, ast.Dict):
+        return None, []
+
+    info, unresolved = {}, []
+    for key, value in zip(node.keys, node.values):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            continue
+        try:
+            info[key.value] = ast.literal_eval(value)
+        except Exception:
+            if isinstance(value, ast.Name) and value.id in consts:
+                info[key.value] = consts[value.id]
+            else:
+                unresolved.append(key.value)
+    return info, unresolved
 
 
-def validate_plugin_info(plugin_info, result, source="PLUGIN_INFO"):
-    """Validate a PLUGIN_INFO dict."""
+def validate_plugin_info(plugin_info, result, source="PLUGIN_INFO", unresolved=()):
+    """Validate a PLUGIN_INFO dict.
+
+    `unresolved` names keys that are present in the source but whose value is
+    computed at runtime -- they are declared, so they are not missing.
+    """
 
     # Required fields
     for field in REQUIRED_MANIFEST_FIELDS:
-        if field not in plugin_info:
+        if field not in plugin_info and field not in unresolved:
             result.error(f"{source}: missing required field '{field}'")
 
     # ID format
@@ -322,9 +380,15 @@ def validate_plugin_dir(plugin_path, result):
         result.error(f"{main_file.name}: missing PLUGIN_INFO class attribute")
 
     # Try to extract and validate PLUGIN_INFO
-    plugin_info = extract_plugin_info(content)
+    plugin_info, unresolved = extract_plugin_info(content)
+    if plugin_info is None:
+        result.warn(f"{main_file.name}: could not read PLUGIN_INFO statically -- "
+                    "it is not being validated. Declare it as a dict literal.")
+    if unresolved:
+        result.warn(f"{main_file.name}: PLUGIN_INFO values built at runtime are not "
+                    f"validated: {sorted(unresolved)}")
     if plugin_info:
-        validate_plugin_info(plugin_info, result)
+        validate_plugin_info(plugin_info, result, unresolved=unresolved)
 
         # Check ID matches directory name
         plugin_id = plugin_info.get("id", "")
@@ -381,9 +445,13 @@ def validate_plugin_dir(plugin_path, result):
                 manifest = json.load(f)
             validate_plugin_info(manifest, result, source="plugin.json")
 
-            # Cross-reference with PLUGIN_INFO
+            # Cross-reference with PLUGIN_INFO. min_openavc_version is in here
+            # because PLUGIN_INFO is the copy the platform actually enforces --
+            # a plugin.json that claims a higher floor than PLUGIN_INFO reads as
+            # gated in the catalog while installing onto a core that can't run it.
             if plugin_info:
-                for field in ("id", "name", "version", "category", "license"):
+                for field in ("id", "name", "version", "category", "license",
+                              "min_openavc_version"):
                     if field in plugin_info and field in manifest:
                         if str(plugin_info[field]) != str(manifest[field]):
                             result.error(
@@ -480,7 +548,8 @@ def validate_index_json(repo_root, results):
                 try:
                     with open(plugin_json, encoding="utf-8") as f:
                         manifest = json.load(f)
-                    for field in ("id", "name", "version", "category", "license"):
+                    for field in ("id", "name", "version", "category", "license",
+                                  "min_openavc_version"):
                         if field in manifest and field in entry:
                             if str(manifest[field]) != str(entry[field]):
                                 result.error(

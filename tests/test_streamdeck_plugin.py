@@ -26,10 +26,11 @@ from pathlib import Path
 
 import pytest
 
-# openavc server on the import path (for PluginAPI / harness)
-_OPENAVC_ROOT = Path(__file__).resolve().parents[2] / "openavc"
-if str(_OPENAVC_ROOT) not in sys.path:
-    sys.path.insert(0, str(_OPENAVC_ROOT))
+# The openavc checkout on the import path, for PluginAPI / the test harness.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _platform_root import add_platform_to_path  # noqa: E402
+
+add_platform_to_path()
 
 # plugins root, so the plugin imports by its package path
 _PLUGINS_ROOT = Path(__file__).resolve().parents[1]
@@ -46,11 +47,11 @@ from control_surfaces.streamdeck.streamdeck_plugin import (  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 
 try:
-    from server.core.plugin_api import PluginAPI
-    from server.core.plugin_registry import PluginRegistry
-    from server.core.state_store import StateStore
-    from server.core.event_bus import EventBus
-    from server.core.plugin_test_harness import MockDeviceManager, MockMacroEngine
+    from openavc.core.plugin_api import PluginAPI
+    from openavc.core.plugin_registry import PluginRegistry
+    from openavc.core.state_store import StateStore
+    from openavc.core.event_bus import EventBus
+    from openavc.core.plugin_test_harness import MockDeviceManager, MockMacroEngine
 except ModuleNotFoundError:
     pytest.skip(
         "openavc repo not available as sibling directory",

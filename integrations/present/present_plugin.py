@@ -203,13 +203,13 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.6.0",
+        "version": "0.6.1",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        "min_openavc_version": "0.23.0",
+        "min_openavc_version": "0.25.0",
         "capabilities": [
             "state_read",
             "state_write",
@@ -701,10 +701,10 @@ class PresentPlugin:
     @staticmethod
     def _http_port():
         # The plugin runs in the server process, so the platform config is
-        # importable; the fallback keeps unit tests (no server package on the
+        # importable; the fallback keeps unit tests (no openavc package on the
         # path) and any config surprise on the default port.
         try:
-            from server.system_config import get_system_config
+            from openavc.system_config import get_system_config
 
             return int(get_system_config().get("network", "http_port"))
         except Exception:
@@ -720,7 +720,7 @@ class PresentPlugin:
         the Settings UI already warns about.
         """
         try:
-            from server.system_config import get_system_config
+            from openavc.system_config import get_system_config
 
             cfg = get_system_config()
             if cfg.get("tls", "enabled"):
@@ -734,7 +734,7 @@ class PresentPlugin:
         """Whether the platform redirects plain-HTTP requests to the TLS
         listener (tls.redirect_http, same config source as _tls_state)."""
         try:
-            from server.system_config import get_system_config
+            from openavc.system_config import get_system_config
 
             return bool(get_system_config().get("tls", "redirect_http"))
         except Exception:
@@ -1803,7 +1803,7 @@ class PresentPlugin:
 
     @staticmethod
     def _resolve_dep(filename):
-        from server.system_config import PLUGIN_REPO_DIR
+        from openavc.system_config import PLUGIN_REPO_DIR
 
         path = PLUGIN_REPO_DIR / ".deps" / filename
         return path if path.exists() else None
