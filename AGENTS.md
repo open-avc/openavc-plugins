@@ -964,8 +964,8 @@ The iframe communicates with the panel via `postMessage`.
 
 | Type | When | Payload |
 |------|------|---------|
-| `openavc:init` | Once, on iframe load | `{config, theme, state, elementId}` — `state` is a snapshot of keys in this plugin's namespace (`plugin.<plugin_id>.*`); other namespaces are not included |
-| `openavc:state` | When a key in this plugin's namespace changes | `{key, value}` — scoped to `plugin.<plugin_id>.*`, like the init snapshot; the iframe never sees other devices', variables', or plugins' state |
+| `openavc:init` | Once, on iframe load | `{config, theme, state, elementId, grant}` — `state` is a snapshot of this plugin's own namespace (`plugin.<plugin_id>.*`) plus whatever the element was granted; `grant` is `{devices, variables, macros, navigate}` |
+| `openavc:state` | When a key this element may see changes | `{key, value}` — the same scope as the init snapshot, so a key absent there never arrives as an update |
 
 Theme changes after the iframe loads are not pushed. Read theme variables from `openavc:init` and cache them.
 
@@ -977,17 +977,26 @@ All outbound messages use `type: "openavc:action"` (with an `action` field selec
 |------|----------|---------|---------|
 | `openavc:action` | `device.command` | Send a device command | `{device, command, params}` |
 | `openavc:action` | `state.set` | Write a state value | `{key, value}` |
+| `openavc:action` | `macro.run` | Run a macro | `{macro}` |
 | `openavc:navigate` | — | Navigate to a page | `{page}` |
 
-`openavc:action` requests are gated by the plugin's declared `capabilities`, mirroring the server-side checks: `device.command` requires `device_command`; `state.set` to a `plugin.<plugin_id>.*` key requires `state_write`; `state.set` to a `var.*` key requires `variable_write`. Writes to `device.*`, `system.*`, `isc.*`, `ui.*`, another plugin's namespace, or any action whose capability the plugin didn't declare are dropped.
+**This bridge is gated by the element's grant, not by your plugin's `capabilities`.** Whoever places your element on a page ticks the devices and variables it may reach, plus switches for running a macro and changing pages ("Can reach" in the UI Builder properties panel). Your declared `capabilities` still gate the server-side PluginAPI; they have no effect here.
+
+- `device.command` — only a device on the element's list.
+- `state.set` — your own `plugin.<plugin_id>.*` keys always (that state is your plugin's), and `var.<name>` only when that variable is on the list. `device.*`, `system.*`, `isc.*`, `ui.*` and another plugin's namespace are always dropped.
+- `macro.run` / `openavc:navigate` — only with the matching switch.
+
+An element can be placed with nothing granted, and that is the default. **Read `grant` out of `openavc:init` and adapt** rather than assuming a device is reachable: hide the control you cannot use. A dropped action logs a `[panel]` console warning and returns nothing your code can catch.
 
 **Example iframe JavaScript:**
 
 ```javascript
 window.addEventListener("message", (event) => {
     if (event.data.type === "openavc:init") {
-        const { config, theme, state, elementId } = event.data;
-        // Initialize with current config, theme, and namespace-filtered state snapshot
+        const { config, theme, state, elementId, grant } = event.data;
+        // Initialize from the config, the theme, and the state this element
+        // may see. Use `grant` to hide anything it was not given:
+        //   if (!grant.devices.includes("projector1")) hidePowerButton();
     }
     if (event.data.type === "openavc:state") {
         const { key, value } = event.data;
