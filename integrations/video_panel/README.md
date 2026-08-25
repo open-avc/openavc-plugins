@@ -203,6 +203,27 @@ software.
 |-------|---------|-------------|
 | `plugin.video_panel.error` | `{reason}` | The helper failed repeatedly and stopped restarting |
 
+## Watching from outside the building
+
+Streams play on panels in the space with no extra setup. Watching one remotely,
+through OpenAVC Cloud, works differently and has to be turned on for the space.
+
+On the local network the panel receives video over WebRTC, which sends its
+picture directly between the server and the panel. That direct path does not
+exist for someone connected through the cloud, so those viewers are served the
+same stream over HLS instead. The switch happens on its own, per viewer. There
+is nothing to configure on the element and nothing different to author: the same
+Video Stream tile covers both.
+
+Remote viewing is an add-on to the price of a space, because the video travels
+over the cloud connection. Where a space does not have it, the tile says the
+picture is not available remotely and keeps playing normally on panels in the
+room.
+
+A remote picture is a second or two behind a local one. That is the nature of
+HLS and is fine for a confidence monitor; it is not intended for anything where
+you are reacting to what you see.
+
 ## Troubleshooting
 
 - **Plugin shows Error on start:** The MediaMTX helper could not start. Check the
@@ -219,6 +240,11 @@ software.
   separate from the control network the controller is on.
 - **High CPU use:** An H.265 source is being re-encoded. Switch the source to
   H.264 if possible, or reduce its resolution / frame rate.
+- **"Remote video is not included in this plan":** The space does not have the
+  remote viewing add-on. Panels in the room are unaffected and keep playing.
+- **Remote video stutters:** The picture is travelling over the site's internet
+  connection. Reduce the source's bitrate or resolution at the camera or
+  encoder; the plugin sends what it is given.
 
 ## Bundled components
 
@@ -232,6 +258,18 @@ install time and are not redistributed in this repository.
 
 The FFmpeg build is the LGPL variant (no GPL components) so it remains
 compatible with this repository's MIT license.
+
+One further component ships in this repository rather than being downloaded:
+
+| Component | License | Purpose |
+|-----------|---------|---------|
+| hls.js (light build) | Apache-2.0 | HLS playback for remote viewers |
+
+It is included rather than fetched because the rooms this runs in frequently
+have no route to the internet, and because a panel must not depend on a public
+CDN to draw a picture. Only Safari plays HLS without it. It is loaded solely
+when a viewer is being served remotely, so panels in the space never download
+it. `panel/hls.light.min.js.LICENSE` carries its licence text.
 
 ## License
 

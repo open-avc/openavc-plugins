@@ -15,6 +15,15 @@
 // teardown. MediaMTX is the upstream; its flow is mirrored from the server's
 // own reference reader, plus low-latency tuning and reconnect logic the panel
 // needs and the reference lacks.
+//
+// HOW to play is not ours to decide. WebRTC's media is UDP straight to a LAN
+// address, so it reaches a panel in the room and never reaches somebody on the
+// far side of the cloud tunnel -- who gets HLS instead, over plain HTTP the
+// tunnel already relays. That answer is per viewer, and the stream list is one
+// value for everybody, so it cannot live there: we ask /ext/delivery on every
+// playback and dispatch on what comes back. hls.js is fetched only if that
+// answer is 'hls', so a panel in the room never pays for 385 KB it will not
+// use.
 
 (() => {
   const videoEl = document.getElementById('video');
@@ -39,7 +48,14 @@
   let token; // undefined on an open instance
   let streamId = '';
   let streamLabel = '';
-  let streamMode = 'webrtc'; // 'webrtc' (WHEP <video>) or 'mjpeg' (<img>)
+  // Set from the server's delivery answer at each start, never guessed here.
+  let streamMode = '';
+  // The kind the stream list last advertised. NOT what we dispatch on -- only a
+  // change-detector, so a source that changes format under a stable id still
+  // restarts onto the right path.
+  let listedKind = '';
+  let hlsPlayer = null;
+  let hlsLibPromise = null;
   // When the element is bound to a channel it follows the plugin-namespaced
   // selection key instead of its static stream_id, so a macro/script/API can
   // switch the source at runtime. streamListRaw caches the last stream list so
@@ -133,11 +149,11 @@
     }
   }
 
-  // Resolve the current stream's label + render mode from the cached list and
-  // update the on-screen label. Returns the mode so callers decide whether a
-  // change warrants a restart. Defaults gracefully when the id isn't listed yet.
+  // Resolve the current stream's label from the cached list and put it on
+  // screen. Returns the kind the list advertises, which is used only to notice
+  // that something changed — the delivery route decides how we actually play.
   function resolveMeta() {
-    let mode = streamMode;
+    let kind = listedKind;
     streamLabel = streamId;
     if (streamListRaw) {
       try {
@@ -145,7 +161,7 @@
         const found = Array.isArray(list) && list.find((e) => e && e.value === streamId);
         if (found) {
           streamLabel = found.label || streamId;
-          if (found.mode) mode = found.mode;
+          if (found.mode) kind = found.mode;
         }
       } catch {
         // keep streamLabel = streamId
@@ -153,16 +169,17 @@
     }
     labelEl.textContent = streamLabel || '';
     labelEl.hidden = !(config.show_label && streamLabel);
-    return mode;
+    return kind;
   }
 
   function updateLabelFromList(raw) {
     streamListRaw = raw;
-    const nextMode = resolveMeta();
-    // A mode flip (the list arrived after init, or the source changed kind)
-    // means we'd be playing the wrong way — restart on the correct path.
-    if (nextMode !== streamMode) {
-      streamMode = nextMode;
+    const nextKind = resolveMeta();
+    // The source changed kind under a stable id (a driver republished it with a
+    // different preview format). We'd be playing the wrong way, so restart and
+    // let the server say how.
+    if (nextKind !== listedKind) {
+      listedKind = nextKind;
       if (active && streamId) {
         teardown();
         reconnectAttempts = 0;
@@ -179,7 +196,8 @@
     if (newId === streamId) return;
     teardown();
     streamId = newId;
-    streamMode = resolveMeta();
+    listedKind = resolveMeta();
+    streamMode = '';
     if (!streamId) {
       active = false;
       showOverlay({ spinner: false, text: 'No stream selected' });
@@ -192,10 +210,47 @@
 
   // ──── Playback dispatch ────
 
-  // Dispatch to the right playback path for the current stream's mode.
-  function start() {
+  function deliveryUrl() {
+    return EXT_BASE + '/delivery/' + encodeURIComponent(streamId);
+  }
+
+  // Ask the server how THIS viewer should play THIS stream, then dispatch.
+  // Asked on every start, not cached: an entitlement can be revoked mid-session
+  // and a reconnect is exactly when we should find out.
+  async function start() {
     if (!active || !streamId) return;
+    const wanted = streamId;
+    showOverlay({ spinner: true, text: reconnectAttempts > 0 ? 'Reconnecting…' : 'Connecting…' });
+
+    let delivery;
+    try {
+      const res = await fetch(deliveryUrl(), { headers: authHeaders() });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      delivery = await res.json();
+    } catch {
+      // We could not even ask. That is a connection problem like any other, so
+      // it takes the normal backoff rather than a special message.
+      if (active && streamId === wanted) scheduleReconnect();
+      return;
+    }
+    // The source was switched, or we were stopped, while that was in flight.
+    if (!active || streamId !== wanted) return;
+
+    streamMode = delivery && delivery.mode ? delivery.mode : 'webrtc';
+    if (streamMode === 'blocked') {
+      // Not a failure and not a retry storm: the plan does not include remote
+      // video. Say so, stop the spinner, and leave Retry there for the case
+      // where it gets bought while the panel is open.
+      teardown();
+      showOverlay({
+        spinner: false,
+        text: (delivery && delivery.detail) || 'Remote video is not included in this plan.',
+        retry: true,
+      });
+      return;
+    }
     if (streamMode === 'mjpeg') startMjpeg();
+    else if (streamMode === 'hls') startHls();
     else startWhep();
   }
 
@@ -217,6 +272,79 @@
     // Setting src opens the multipart connection; `load` fires on the first
     // frame, `error` if the encoder or the AV LAN is unreachable.
     imgEl.src = mjpegUrl();
+  }
+
+  // ──── HLS client (tunnelled viewers) ────
+
+  // Only Safari plays HLS in a bare <video>; Chrome, Edge and the Android
+  // WebView need Media Source Extensions driven by a library. hls.js is loaded
+  // from our own panel folder rather than a CDN, because the rooms this runs in
+  // routinely have no route to the internet.
+  function loadHlsLib() {
+    if (window.Hls) return Promise.resolve(window.Hls);
+    if (hlsLibPromise) return hlsLibPromise;
+    hlsLibPromise = new Promise((resolve, reject) => {
+      const tag = document.createElement('script');
+      tag.src = 'hls.light.min.js';
+      tag.onload = () => (window.Hls ? resolve(window.Hls) : reject(new Error('hls.js did not define Hls')));
+      tag.onerror = () => reject(new Error('hls.js failed to load'));
+      document.head.appendChild(tag);
+    });
+    // A failed load must not be cached as a permanent no: the next reconnect
+    // should be free to try again.
+    hlsLibPromise.catch(() => { hlsLibPromise = null; });
+    return hlsLibPromise;
+  }
+
+  function hlsUrl() {
+    let url = EXT_BASE + '/hls/' + encodeURIComponent(streamId) + '/index.m3u8';
+    // hls.js sets its own headers, but the segment requests it derives from the
+    // playlist inherit only the query string, so the token rides there for both.
+    if (token) url += '?_plugin_token=' + encodeURIComponent(token);
+    return url;
+  }
+
+  async function startHls() {
+    if (starting || !active || !streamId) return;
+    starting = true;
+    videoEl.hidden = false;
+    imgEl.hidden = true;
+    const wanted = streamId;
+    try {
+      // Safari (and the iOS WebView) play HLS natively and do it better than
+      // MSE does — lower power, hardware pipeline. Use it where it exists.
+      if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        videoEl.src = hlsUrl();
+        videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
+        return;
+      }
+      const Hls = await loadHlsLib();
+      if (!active || streamId !== wanted) return;
+      if (!Hls.isSupported()) {
+        showOverlay({ spinner: false, text: 'This browser cannot play remote video.', retry: false });
+        return;
+      }
+      const player = new Hls({
+        lowLatencyMode: true,
+        // The tunnel is a relay, not a pipe: it is worth waiting a moment
+        // longer for a part than tearing the session down over one late fetch.
+        manifestLoadingTimeOut: 20000,
+        fragLoadingTimeOut: 20000,
+        backBufferLength: 10,
+      });
+      hlsPlayer = player;
+      player.on(Hls.Events.ERROR, (_evt, data) => {
+        if (hlsPlayer !== player || !data || !data.fatal) return;
+        if (active) scheduleReconnect();
+      });
+      player.loadSource(hlsUrl());
+      player.attachMedia(videoEl);
+      videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
+    } catch {
+      if (active && streamId === wanted) scheduleReconnect();
+    } finally {
+      starting = false;
+    }
   }
 
   // ──── WHEP client ────
@@ -351,6 +479,19 @@
     pc = null;
     resourceUrl = null;
     if (videoEl.srcObject) videoEl.srcObject = null;
+    // HLS: destroy() stops the playlist polling and the segment fetches. Left
+    // running it keeps pulling video across the tunnel with nothing on screen,
+    // which is the one leak that costs money rather than memory.
+    if (hlsPlayer) {
+      const player = hlsPlayer;
+      hlsPlayer = null;
+      try { player.destroy(); } catch { /* already destroyed */ }
+    }
+    // The native-HLS path (Safari) sets src rather than srcObject.
+    if (videoEl.getAttribute('src')) {
+      videoEl.removeAttribute('src');
+      try { videoEl.load(); } catch { /* nothing loaded */ }
+    }
     // MJPEG: drop the src to close the multipart connection. removeAttribute
     // (not src = '') so the browser doesn't refetch the iframe's own URL.
     if (imgEl.getAttribute('src')) imgEl.removeAttribute('src');
@@ -436,6 +577,25 @@
   });
   imgEl.addEventListener('error', () => {
     if (streamMode === 'mjpeg' && active && imgEl.getAttribute('src')) {
+      scheduleReconnect();
+    }
+  });
+
+  // HLS playback feedback. WebRTC clears its overlay off the peer connection
+  // state and MJPEG off the first frame; HLS has neither, so the <video>
+  // element's own events are the signal. `playing` rather than `loadeddata`:
+  // through the tunnel the first segment can arrive well before it decodes,
+  // and clearing the overlay early shows a black rectangle.
+  videoEl.addEventListener('playing', () => {
+    if (streamMode === 'hls' && active) {
+      reconnectAttempts = 0;
+      hideOverlay();
+    }
+  });
+  videoEl.addEventListener('error', () => {
+    // Only the native-HLS path reports here; hls.js swallows media errors and
+    // reports them on its own ERROR event, handled at the player.
+    if (streamMode === 'hls' && active && videoEl.getAttribute('src')) {
       scheduleReconnect();
     }
   });

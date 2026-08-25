@@ -138,7 +138,7 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | `device_command` | `device_command()` |
 | `network_listen` | Plugin may open network ports; also gates `mdns_browse(service_types, duration=5.0)` (LAN service discovery via the platform's mDNS listener; feature-detect with `getattr` — added in platform 0.16.0) |
 | `usb_access` | Plugin may access USB devices |
-| `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*`; also gates `proxy_to()` (outbound requests) |
+| `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*`; also gates `proxy_to()` (outbound requests) and `viewer_access()` (where a caller is, and what may be sent to them — added in platform 0.31.0; feature-detect with `getattr`) |
 | `guest_endpoints` | `register_guest_router()` — mount **unauthenticated** HTTP routes under `/api/plugins/<id>/guest/*`; also gates `mint_guest_token()`/`verify_guest_token()` and the PLUGIN_INFO `guest_alias` short route (added in platform 0.23.0; see HTTP Endpoints below) |
 
 `state_write` and `variable_write` are independent. `state_write` lets a plugin write its own namespaced state (e.g., `plugin.my_plugin.connected`). `variable_write` lets a plugin write user variables (`var.*`) — shared room-logic state. Most plugins need only `state_write`. Declare `variable_write` only when the plugin explicitly contributes to user-variable state, e.g., a sensor reporting occupancy into `var.room_occupied` or a bridge mirroring an external system. A `var.*` key the plugin *creates* (one that didn't already exist) is removed on stop/uninstall; writing to a variable already declared in the project leaves it intact.
@@ -453,6 +453,19 @@ api.register_router(router)
 # unless allow_internal=True (explicit opt-in for a plugin's own localhost
 # sidecar).
 resp = await api.proxy_to("http://127.0.0.1:9000/path", request, allow_internal=True)
+
+# Where is this viewer, and may a cloud-gated feature reach them?
+# (requires: http_endpoints; added in platform 0.31.0)
+# Returns "local", "remote", or "remote_blocked". A viewer on the LAN is
+# answered WITHOUT the entitlement being consulted, so a panel on the
+# customer's own network cannot go dark because a lookup was wrong. Keep the
+# local branch first and let it return before anything else is read.
+where = api.viewer_access(request, "tunnel_video")
+if where == "local":
+    return cheap_local_answer()
+if where == "remote_blocked":
+    raise HTTPException(402, "Remote video is not included in this plan.")
+return expensive_remote_answer()
 
 # Mount UNAUTHENTICATED routes under /api/plugins/<id>/guest/*
 # (requires: guest_endpoints — a separate, bigger grant than http_endpoints;

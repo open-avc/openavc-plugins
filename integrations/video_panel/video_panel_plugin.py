@@ -50,6 +50,15 @@ _API_PORT = 9997
 _WEBRTC_HOST = "127.0.0.1"
 _WEBRTC_PORT = 8889
 _WEBRTC_UDP_PORT = 8189
+# HLS, for viewers who arrived over the cloud tunnel. WebRTC cannot serve them:
+# the signalling proxies fine, but the media is UDP straight to the LAN address
+# in webrtcAdditionalHosts, which a browser on the far side of the world cannot
+# reach -- so until now a remote viewer got a tile that spun forever. HLS is
+# plain HTTP, which is what the tunnel already relays. Localhost-only, and on a
+# non-standard port for the same reason the RTSP listener is: another MediaMTX
+# on the box must not collide with it.
+_HLS_HOST = "127.0.0.1"
+_HLS_PORT = 8890
 # Internal RTSP listener used only for the transcode pipeline: ffmpeg reads the
 # raw source path and republishes the H.264 result here, then WHEP serves it.
 # Localhost + TCP-only (no UDP RTP/RTCP ports opened), on a non-standard port so
@@ -76,6 +85,40 @@ _SNAPSHOT_TIMEOUT = 15.0
 # Stream ids become MediaMTX path names and panel-element binding values, so
 # keep them to a portable, URL-safe character set.
 _STREAM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# The routes a standalone room panel may reach with its panel-scoped token.
+# A panel on a claimed instance is unauthenticated by design, so a media route
+# missing from this list 401s on exactly the surface it exists for. Stream CRUD
+# (/streams, /streams/probe) is deliberately absent and stays programmer-only.
+_PANEL_PATHS = (
+    "/whep/*",
+    "GET /mjpeg/*",
+    "GET /delivery/*",
+    "GET /hls/*",
+)
+
+# HLS playlist and segment names MediaMTX generates. Kept to one flat segment
+# with no dots-in-a-row so nothing can climb out of the stream's own path.
+_HLS_FILE_RE = re.compile(r"[A-Za-z0-9_-]+\.(m3u8|mp4|ts)")
+
+# The three answers PluginAPI.viewer_access gives. Compared as strings: this
+# plugin imports stdlib and fastapi only, never the platform.
+VIEWER_LOCAL = "local"
+VIEWER_REMOTE = "remote"
+VIEWER_REMOTE_BLOCKED = "remote_blocked"
+
+# The cloud capability that has to be granted before video crosses the tunnel.
+# Local viewing is never gated by it, and the code path that serves a local
+# viewer never reaches this name.
+_TUNNEL_VIDEO_CAPABILITY = "tunnel_video"
+
+# What a tunnelled viewer is told when the space has no remote-video add-on.
+# It says what is true and what still works. It deliberately does not explain
+# why we sell it that way -- that is our reasoning, not their next step.
+_REMOTE_BLOCKED_DETAIL = (
+    "Remote video is not included in this plan. This stream still plays on "
+    "panels in the space."
+)
 
 # WHEP session secrets are MediaMTX-minted UUIDs; constrain to a URL-safe set
 # before they're spliced into the proxied sidecar URL.
@@ -143,7 +186,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.12.0",
+        "version": "0.13.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -371,13 +414,8 @@ class VideoPanelPlugin:
                     f"within {int(_READY_TIMEOUT)}s"
                 )
             await self.api.state_set("running", True)
-            # panel_paths: the media routes the video_stream panel element
-            # calls, reachable with a panel-scoped token from a standalone
-            # (unauthenticated) room panel on a claimed instance. Stream CRUD
-            # (/streams and /streams/probe) stays programmer-only.
             self.api.register_router(
-                self._build_router(),
-                panel_paths=["/whep/*", "GET /mjpeg/*"],
+                self._build_router(), panel_paths=list(_PANEL_PATHS)
             )
             await self._load_streams()
             await self._publish_streams()
@@ -1077,6 +1115,38 @@ class VideoPanelPlugin:
                 headers={"Cache-Control": "no-store"},
             )
 
+        # ── How should THIS viewer play THIS stream? ──
+        # The element used to answer that itself, off the shared stream list.
+        # It cannot any more: the answer now depends on where the viewer is,
+        # and a state key is one value for everybody. So the element asks, per
+        # playback, and dispatches on what comes back.
+        @router.get("/delivery/{stream_id}")
+        async def delivery(stream_id: str, request: Request):
+            self._validate_stream_id(stream_id)
+            if not self._is_known_stream(stream_id):
+                raise HTTPException(404, f"No stream with id '{stream_id}'.")
+            return self._delivery_for(stream_id, request)
+
+        # ── HLS reverse proxy (tunnelled viewers only) ──
+        # Playlists and segments are ordinary small GETs, which is the whole
+        # reason this exists: the tunnel relays them and cannot relay WebRTC's
+        # UDP media. MediaMTX writes playlist entries as plain relative names,
+        # so the browser resolves them against this same mount and every
+        # follow-up comes back through here authenticated.
+        @router.get("/hls/{stream_id}/{filename}")
+        async def hls(stream_id: str, filename: str, request: Request):
+            self._validate_stream_id(stream_id)
+            if not self._is_known_stream(stream_id):
+                raise HTTPException(404, f"No stream with id '{stream_id}'.")
+            if not _HLS_FILE_RE.fullmatch(filename or ""):
+                raise HTTPException(422, "Invalid HLS file name.")
+            # Re-checked on every fetch, not just at the delivery call: a plan
+            # can be revoked mid-session, and the segment fetches are the part
+            # that actually spends the bandwidth.
+            if self._viewer_access(request) == VIEWER_REMOTE_BLOCKED:
+                raise HTTPException(402, _REMOTE_BLOCKED_DETAIL)
+            return await self._hls_stream_response(self._hls_url(stream_id, filename))
+
         # ── MJPEG (multipart-over-HTTP) reverse proxy ──
         # Auto-discovered MJPEG previews (e.g. a Chazy encoder's ?action=stream
         # secondary stream) are rendered by an <img> in the panel element. An
@@ -1085,11 +1155,17 @@ class VideoPanelPlugin:
         # already accepts. We stream the upstream multipart body straight back so
         # only the OpenAVC host needs a route to the AV/video LAN.
         @router.get("/mjpeg/{stream_id}")
-        async def mjpeg(stream_id: str):
+        async def mjpeg(stream_id: str, request: Request):
             self._validate_stream_id(stream_id)
             url = self._resolve_mjpeg_url(stream_id)
             if not url:
                 raise HTTPException(404, f"No MJPEG preview for '{stream_id}'.")
+            # MJPEG crosses the tunnel perfectly well on its own -- which is
+            # exactly why it is gated too. It carries no interframe compression,
+            # so it is the most expensive of the three paths per minute, and a
+            # switch that let the dearest one through would not be a switch.
+            if self._viewer_access(request) == VIEWER_REMOTE_BLOCKED:
+                raise HTTPException(402, _REMOTE_BLOCKED_DETAIL)
             return await self._mjpeg_stream_response(url)
 
         # ── WHEP (WebRTC playback) reverse proxy ──
@@ -1134,6 +1210,97 @@ class VideoPanelPlugin:
             )
 
         return router
+
+    def _viewer_access(self, request):
+        """Where this viewer is, as far as tunnel video is concerned.
+
+        Feature-detected: an instance older than 0.31.0 cannot tell us where a
+        caller came from, so everybody is local, nothing is gated, and the
+        plugin behaves exactly as it shipped. Degrading the other way -- gating
+        when we cannot tell -- would take out panels on the LAN, which is the
+        one thing this must never do.
+        """
+        ask = getattr(self.api, "viewer_access", None)
+        if ask is None:
+            return VIEWER_LOCAL
+        return ask(request, _TUNNEL_VIDEO_CAPABILITY)
+
+    def _delivery_for(self, stream_id, request):
+        """How this viewer should play this stream.
+
+        The local answer is decided first and returns before the entitlement is
+        anywhere in the picture -- deliberately, and matching the shape the
+        platform call already has. A panel in the room does not care what the
+        account is paying for.
+        """
+        where = self._viewer_access(request)
+        is_mjpeg = self._resolve_mjpeg_url(stream_id) is not None
+        if where == VIEWER_LOCAL:
+            return {"stream_id": stream_id, "mode": "mjpeg" if is_mjpeg else "webrtc"}
+        if where == VIEWER_REMOTE_BLOCKED:
+            return {
+                "stream_id": stream_id,
+                "mode": "blocked",
+                "detail": _REMOTE_BLOCKED_DETAIL,
+            }
+        # Remote and allowed. MJPEG already crosses the tunnel as-is (it is
+        # ordinary multipart HTTP); everything else goes as HLS, because WebRTC
+        # media never arrives.
+        return {"stream_id": stream_id, "mode": "mjpeg" if is_mjpeg else "hls"}
+
+    def _hls_url(self, stream_id, filename):
+        """Build the localhost sidecar HLS URL, with read creds in the userinfo.
+
+        Same shape as _whep_url -- httpx turns the userinfo into a Basic header
+        for the sidecar's read/playback user.
+        """
+        cred = f"{_SIDECAR_USER}:{self._auth_pass}@" if self._auth_pass else ""
+        return f"http://{cred}{_HLS_HOST}:{_HLS_PORT}/{stream_id}/{filename}"
+
+    async def _hls_stream_response(self, url):
+        """Pass an HLS playlist or segment back to the viewer.
+
+        Streamed rather than buffered because a low-latency playlist request is
+        one MediaMTX deliberately holds open until the next part exists, and a
+        part can arrive as chunked transfer while it is still being written.
+        The read timeout is generous for that reason; the connect timeout is
+        not, because the sidecar is on loopback.
+        """
+        client = httpx.AsyncClient(timeout=httpx.Timeout(5.0, read=30.0))
+        try:
+            upstream = await client.send(client.build_request("GET", url), stream=True)
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise HTTPException(502, f"Could not reach the video stream: {exc}")
+        if upstream.status_code != 200:
+            status = upstream.status_code
+            await upstream.aclose()
+            await client.aclose()
+            # 404 while the source spins up is normal and not worth a 502: the
+            # player retries, and MediaMTX starts an on-demand source on the
+            # first request.
+            raise HTTPException(
+                503 if status == 404 else 502,
+                "The video stream is not ready yet."
+                if status == 404
+                else f"Video stream returned HTTP {status}.",
+            )
+
+        async def _pump():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            _pump(),
+            media_type=upstream.headers.get("content-type", "application/octet-stream"),
+            # Playlists change every part; segments are named uniquely and are
+            # gone shortly after. Nothing here is worth a cache.
+            headers={"Cache-Control": "no-store"},
+        )
 
     def _whep_url(self, stream_id, secret=None):
         """Build the localhost sidecar WHEP URL, with read creds in the userinfo.
@@ -1377,7 +1544,13 @@ class VideoPanelPlugin:
             f"rtspAddress: {_RTSP_HOST}:{_RTSP_PORT}\n"
             "rtspTransports: [tcp]\n"
             "rtmp: false\n"
-            "hls: false\n"
+            # On, but idle: MediaMTX only muxes HLS once a reader arrives, and
+            # the only reader is the tunnel proxy route below. Nothing extra is
+            # ingested for it -- it hangs off the same source WebRTC already uses.
+            "hls: true\n"
+            f"hlsAddress: {_HLS_HOST}:{_HLS_PORT}\n"
+            "hlsVariant: lowLatency\n"
+            "hlsAlwaysRemux: false\n"
             "srt: false\n"
             "metrics: false\n"
             "pprof: false\n"

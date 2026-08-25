@@ -180,9 +180,16 @@ def test_render_config_is_valid_and_locked_down():
     assert cfg["rtsp"] is True
     assert cfg["rtspAddress"] == "127.0.0.1:8556"
     assert cfg["rtspTransports"] == ["tcp"]
-    # Other protocols we don't use stay disabled.
+    # HLS is on and idle: it exists for viewers who arrived over the cloud
+    # tunnel, where WebRTC's UDP media never lands. MediaMTX only muxes it once
+    # a reader asks, so nothing extra is ingested for it.
+    assert cfg["hls"] is True
+    assert cfg["hlsAddress"] == "127.0.0.1:8890"
+    assert cfg["hlsVariant"] == "lowLatency"
+    assert cfg["hlsAlwaysRemux"] is False
+    # Other protocols we don't use stay disabled. srt stays off because we are
+    # the caller, not the listener -- it opens no inbound port.
     assert cfg["rtmp"] is False
-    assert cfg["hls"] is False
     assert cfg["srt"] is False
 
     users = cfg["authInternalUsers"]
@@ -1107,3 +1114,162 @@ async def test_a_watched_source_that_never_connects_says_so_once(monkeypatch):
     # Nobody watching is not a fault, and recovery re-arms the warning.
     plugin._warn_unwatchable([{"name": "auto-vmix", "available": True, "readers": [{}]}])
     assert "auto-vmix" not in plugin._warned_unreachable
+
+
+# ──── Delivery: how THIS viewer plays THIS stream ────
+#
+# WebRTC's media is UDP straight to a LAN address, so it serves a panel in the
+# room and never serves somebody on the far side of the cloud tunnel. HLS does.
+# Which one a viewer gets is therefore per viewer, and the plugin asks the
+# platform rather than reading the tunnel header itself.
+
+
+def _delivery_client(monkeypatch, viewer_access=None, streams=None, discovered=None):
+    """A client whose PluginAPI answers `viewer_access` however a test says.
+
+    `viewer_access=None` stands for an OLDER platform that has no such method,
+    which is a case worth covering on its own: the plugin must keep working and
+    must gate nothing.
+    """
+    plugin = VideoPanelPlugin()
+    api = _FakeApi({"streams": streams or []})
+    if viewer_access is not None:
+        api.viewer_access = lambda request, capability: viewer_access
+    plugin.api = api
+    plugin._ffmpeg_bin = None
+    plugin._streams = list(streams or [])
+    plugin._discovered = dict(discovered or {})
+
+    async def fake_get(path):
+        return {"items": []}
+
+    monkeypatch.setattr(plugin, "_api_get", fake_get)
+    app = FastAPI()
+    app.include_router(plugin._build_router())
+    return TestClient(app), plugin, api
+
+
+_ONE_STREAM = [{"stream_id": "cam1", "name": "Lectern", "url": "rtsp://10.0.0.5/s"}]
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_local_viewer_gets_webrtc(monkeypatch):
+    client, _, _ = _delivery_client(monkeypatch, "local", streams=_ONE_STREAM)
+    body = client.get("/delivery/cam1").json()
+    assert body == {"stream_id": "cam1", "mode": "webrtc"}
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_tunnelled_viewer_gets_hls(monkeypatch):
+    client, _, _ = _delivery_client(monkeypatch, "remote", streams=_ONE_STREAM)
+    body = client.get("/delivery/cam1").json()
+    assert body == {"stream_id": "cam1", "mode": "hls"}
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_tunnelled_viewer_without_the_add_on_is_told_so(monkeypatch):
+    """Not a spinner and not a bare failure. The tile has to say what is true
+    and what still works, because a viewer who sees nothing concludes the
+    system is broken rather than unsold."""
+    client, _, _ = _delivery_client(monkeypatch, "remote_blocked", streams=_ONE_STREAM)
+    body = client.get("/delivery/cam1").json()
+    assert body["mode"] == "blocked"
+    assert "not included in this plan" in body["detail"]
+    assert "still plays on panels in the space" in body["detail"]
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_an_older_platform_gates_nothing(monkeypatch):
+    """No viewer_access on the API at all. Everybody is treated as local, which
+    is exactly how this plugin behaved before the tunnel path existed. Failing
+    the other way would take out panels on the LAN."""
+    client, _, _ = _delivery_client(monkeypatch, None, streams=_ONE_STREAM)
+    body = client.get("/delivery/cam1").json()
+    assert body == {"stream_id": "cam1", "mode": "webrtc"}
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_an_mjpeg_source_stays_mjpeg_either_side_of_the_tunnel(monkeypatch):
+    """MJPEG is ordinary multipart HTTP, so it crosses the tunnel as-is. There
+    is no reason to remux it into HLS -- only a reason to gate it, below."""
+    discovered = {
+        "auto-enc1": {"label": "Encoder 1", "url": "http://10.0.0.9/?action=stream",
+                      "format": "mjpeg"},
+    }
+    client, _, _ = _delivery_client(monkeypatch, "local", discovered=discovered)
+    assert client.get("/delivery/auto-enc1").json()["mode"] == "mjpeg"
+    client, _, _ = _delivery_client(monkeypatch, "remote", discovered=discovered)
+    assert client.get("/delivery/auto-enc1").json()["mode"] == "mjpeg"
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_delivery_404s_for_a_stream_that_does_not_exist(monkeypatch):
+    client, _, _ = _delivery_client(monkeypatch, "local", streams=_ONE_STREAM)
+    assert client.get("/delivery/nope").status_code == 404
+
+
+# ──── The gate sits where the bytes are, not only at the delivery call ────
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_blocked_viewer_cannot_fetch_hls_directly(monkeypatch):
+    """Re-checked per fetch: a plan can be revoked mid-session, and the segment
+    requests are the part that actually spends the bandwidth."""
+    client, _, _ = _delivery_client(monkeypatch, "remote_blocked", streams=_ONE_STREAM)
+    res = client.get("/hls/cam1/index.m3u8")
+    assert res.status_code == 402
+    assert "not included in this plan" in res.json()["detail"]
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_blocked_viewer_cannot_fetch_mjpeg_either(monkeypatch):
+    """MJPEG carries no interframe compression, so it is the dearest of the
+    three paths per minute. A switch that let the dearest one through would not
+    be a switch."""
+    discovered = {
+        "auto-enc1": {"label": "Encoder 1", "url": "http://10.0.0.9/?action=stream",
+                      "format": "mjpeg"},
+    }
+    client, _, _ = _delivery_client(monkeypatch, "remote_blocked", discovered=discovered)
+    assert client.get("/mjpeg/auto-enc1").status_code == 402
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_local_viewer_is_never_refused_mjpeg(monkeypatch):
+    """The LAN path must be unreachable from the entitlement, not merely
+    allowed by it. Here the API answers "local" and the fetch proceeds to the
+    upstream -- the 502 is the unreachable fake encoder, not a refusal."""
+    discovered = {
+        "auto-enc1": {"label": "Encoder 1", "url": "http://127.0.0.1:1/?action=stream",
+                      "format": "mjpeg"},
+    }
+    client, _, _ = _delivery_client(monkeypatch, "local", discovered=discovered)
+    assert client.get("/mjpeg/auto-enc1").status_code == 502
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_hls_file_names_cannot_climb_out_of_the_stream_path(monkeypatch):
+    client, _, _ = _delivery_client(monkeypatch, "remote", streams=_ONE_STREAM)
+    for bad in ("index.m3u8/../..", "..", "index.txt", "index"):
+        assert client.get("/hls/cam1/" + bad).status_code in (404, 422)
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_the_hls_url_carries_the_sidecar_read_credentials(monkeypatch):
+    _, plugin, _ = _delivery_client(monkeypatch, "remote", streams=_ONE_STREAM)
+    plugin._auth_pass = "a1b2c3d4e5f6"
+    url = plugin._hls_url("cam1", "index.m3u8")
+    assert url == "http://openavc:a1b2c3d4e5f6@127.0.0.1:8890/cam1/index.m3u8"
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_standalone_panel_can_reach_the_new_routes():
+    """A wall panel on a claimed instance holds a panel-scoped token, which
+    opens only what the plugin declared. Both new routes have to be on that
+    list or remote video 401s on exactly the surface it is for."""
+    from integrations.video_panel.video_panel_plugin import _PANEL_PATHS
+
+    assert "GET /delivery/*" in _PANEL_PATHS
+    assert "GET /hls/*" in _PANEL_PATHS
+    # Media routes only. Nothing that writes a stream is reachable this way.
+    assert not any("streams" in entry for entry in _PANEL_PATHS)
