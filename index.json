@@ -1,103 +1,161 @@
 {
-    "schema_version": "1.0.0",
-    "updated": "2026-07-07",
-    "plugins": [
-        {
-            "id": "streamdeck",
-            "name": "Elgato Stream Deck",
-            "file": "control_surfaces/streamdeck",
-            "format": "directory",
-            "category": "control_surface",
-            "manufacturer": "Elgato",
-            "version": "1.35.0",
-            "author": "OpenAVC",
-            "license": "MIT",
-            "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-            "min_openavc_version": "0.24.0",
-            "capabilities": ["state_read", "state_write", "variable_write", "event_emit", "event_subscribe", "macro_execute", "device_command", "usb_access", "network_listen", "http_endpoints"],
-            "has_native_dependencies": true,
-            "verified": true,
-            "description": "Use Elgato Stream Deck hardware as a physical control surface."
-        },
-        {
-            "id": "mqtt",
-            "name": "MQTT Bridge",
-            "file": "integrations/mqtt",
-            "format": "directory",
-            "category": "integration",
-            "version": "1.4.0",
-            "author": "OpenAVC",
-            "license": "MIT",
-            "platforms": ["all"],
-            "min_openavc_version": "0.9.0",
-            "capabilities": ["state_read", "state_write", "variable_write", "event_emit", "event_subscribe", "device_command", "macro_execute"],
-            "has_native_dependencies": false,
-            "verified": false,
-            "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration."
-        },
-        {
-            "id": "dante",
-            "name": "Dante DDM",
-            "file": "integrations/dante",
-            "format": "directory",
-            "category": "integration",
-            "version": "1.2.0",
-            "author": "OpenAVC",
-            "license": "MIT",
-            "platforms": ["all"],
-            "min_openavc_version": "0.3.0",
-            "capabilities": ["state_read", "state_write", "event_emit", "event_subscribe"],
-            "has_native_dependencies": false,
-            "verified": false,
-            "description": "Audio routing via Dante Domain Manager or Dante Director Professional."
-        },
-        {
-            "id": "video_panel",
-            "name": "Video Panel",
-            "file": "integrations/video_panel",
-            "format": "directory",
-            "category": "integration",
-            "version": "0.10.2",
-            "author": "OpenAVC",
-            "license": "MIT",
-            "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-            "min_openavc_version": "0.25.0",
-            "capabilities": ["state_read", "state_write", "event_emit", "network_listen", "http_endpoints"],
-            "has_native_dependencies": true,
-            "verified": false,
-            "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel."
-        },
-        {
-            "id": "present",
-            "name": "Present",
-            "file": "integrations/present",
-            "format": "directory",
-            "category": "integration",
-            "version": "0.6.1",
-            "author": "OpenAVC",
-            "license": "MIT",
-            "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-            "min_openavc_version": "0.25.0",
-            "capabilities": ["state_read", "state_write", "event_emit", "network_listen", "http_endpoints", "guest_endpoints"],
-            "has_native_dependencies": true,
-            "verified": false,
-            "description": "Wireless presentation: share a laptop screen from the browser to the space's displays."
-        },
-        {
-            "id": "audio_player",
-            "name": "Audio Player",
-            "file": "utility/audio_player",
-            "format": "directory",
-            "category": "utility",
-            "version": "0.4.0",
-            "author": "OpenAVC",
-            "license": "MIT",
-            "platforms": ["all"],
-            "min_openavc_version": "0.10.3",
-            "capabilities": ["state_read", "state_write"],
-            "has_native_dependencies": false,
-            "verified": false,
-            "description": "Play sound effects through panels. Upload audio in Project → Assets, then trigger from macros or scripts."
-        }
-    ]
+  "schema_version": "1.0.0",
+  "updated": "2026-07-07",
+  "plugins": [
+    {
+      "id": "streamdeck",
+      "name": "Elgato Stream Deck",
+      "file": "control_surfaces/streamdeck",
+      "format": "directory",
+      "category": "control_surface",
+      "manufacturer": "Elgato",
+      "version": "1.35.0",
+      "author": "OpenAVC",
+      "license": "MIT",
+      "platforms": [
+        "win_x64",
+        "linux_x64",
+        "linux_arm64"
+      ],
+      "min_openavc_version": "0.24.0",
+      "capabilities": [
+        "state_read",
+        "state_write",
+        "variable_write",
+        "event_emit",
+        "event_subscribe",
+        "macro_execute",
+        "device_command",
+        "usb_access",
+        "network_listen",
+        "http_endpoints"
+      ],
+      "has_native_dependencies": true,
+      "verified": true,
+      "description": "Use Elgato Stream Deck hardware as a physical control surface."
+    },
+    {
+      "id": "mqtt",
+      "name": "MQTT Bridge",
+      "file": "integrations/mqtt",
+      "format": "directory",
+      "category": "integration",
+      "version": "1.4.0",
+      "author": "OpenAVC",
+      "license": "MIT",
+      "platforms": [
+        "all"
+      ],
+      "min_openavc_version": "0.9.0",
+      "capabilities": [
+        "state_read",
+        "state_write",
+        "variable_write",
+        "event_emit",
+        "event_subscribe",
+        "device_command",
+        "macro_execute"
+      ],
+      "has_native_dependencies": false,
+      "verified": false,
+      "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration."
+    },
+    {
+      "id": "dante",
+      "name": "Dante DDM",
+      "file": "integrations/dante",
+      "format": "directory",
+      "category": "integration",
+      "version": "1.2.0",
+      "author": "OpenAVC",
+      "license": "MIT",
+      "platforms": [
+        "all"
+      ],
+      "min_openavc_version": "0.3.0",
+      "capabilities": [
+        "state_read",
+        "state_write",
+        "event_emit",
+        "event_subscribe"
+      ],
+      "has_native_dependencies": false,
+      "verified": false,
+      "description": "Audio routing via Dante Domain Manager or Dante Director Professional."
+    },
+    {
+      "id": "video_panel",
+      "name": "Video Panel",
+      "file": "integrations/video_panel",
+      "format": "directory",
+      "category": "integration",
+      "version": "0.11.0",
+      "author": "OpenAVC",
+      "license": "MIT",
+      "platforms": [
+        "win_x64",
+        "linux_x64",
+        "linux_arm64"
+      ],
+      "min_openavc_version": "0.25.0",
+      "capabilities": [
+        "state_read",
+        "state_write",
+        "event_emit",
+        "network_listen",
+        "http_endpoints"
+      ],
+      "has_native_dependencies": true,
+      "verified": false,
+      "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel."
+    },
+    {
+      "id": "present",
+      "name": "Present",
+      "file": "integrations/present",
+      "format": "directory",
+      "category": "integration",
+      "version": "0.6.1",
+      "author": "OpenAVC",
+      "license": "MIT",
+      "platforms": [
+        "win_x64",
+        "linux_x64",
+        "linux_arm64"
+      ],
+      "min_openavc_version": "0.25.0",
+      "capabilities": [
+        "state_read",
+        "state_write",
+        "event_emit",
+        "network_listen",
+        "http_endpoints",
+        "guest_endpoints"
+      ],
+      "has_native_dependencies": true,
+      "verified": false,
+      "description": "Wireless presentation: share a laptop screen from the browser to the space's displays."
+    },
+    {
+      "id": "audio_player",
+      "name": "Audio Player",
+      "file": "utility/audio_player",
+      "format": "directory",
+      "category": "utility",
+      "version": "0.4.0",
+      "author": "OpenAVC",
+      "license": "MIT",
+      "platforms": [
+        "all"
+      ],
+      "min_openavc_version": "0.10.3",
+      "capabilities": [
+        "state_read",
+        "state_write"
+      ],
+      "has_native_dependencies": false,
+      "verified": false,
+      "description": "Play sound effects through panels. Upload audio in Project \u2192 Assets, then trigger from macros or scripts."
+    }
+  ]
 }

@@ -83,18 +83,50 @@ channel names for independent displays, so one room can drive multiple screens.
 
 ## Automatic stream discovery
 
-Some AV-over-IP encoders publish a built-in low-bandwidth preview stream. When a
-driver reports one, the encoder appears in the **Stream** list automatically. You
-don't add it by hand. Connect the controller (for example a TurtleAV Chazy
-controller) and each of its encoders shows up in the dropdown under its name,
-ready to drop onto a panel.
+Some devices publish a preview stream of their own. When a driver reports one,
+the device appears in the **Stream** list automatically. You don't add it by
+hand. Connect the equipment (for example a TurtleAV Chazy controller, or a PC
+running vMix) and each source shows up in the dropdown under its name, ready to
+drop onto a panel.
 
-Two kinds of preview are handled:
+Three kinds of preview are handled:
 
 - **MJPEG over HTTP** (such as the Chazy 4K secondary stream). Shown directly as a
   live image, with no transcoding.
 - **RTSP**. Routed through the same WebRTC pipeline as a configured camera, and
   transcoded to H.264 if the codec isn't browser-playable.
+- **SRT**. The same pipeline, and the usual way to get a software or hardware
+  switcher onto a panel. OpenAVC dials out to the device, so no extra port has
+  to be opened on the OpenAVC server for this.
+
+Whether a stream is transcoded isn't guessed at. MediaMTX reports what each
+source actually carries as soon as somebody watches it, and the plugin uses
+that: a feed already in H.264 is passed straight through, and anything else is
+transcoded. A source that starts out being handled the wrong way corrects
+itself within a few seconds of first being viewed.
+
+### Showing a vMix output on a panel
+
+vMix doesn't publish anything until it's asked to, so there's one setting to
+make once, on the vMix PC:
+
+1. In vMix, go to **Settings > Outputs** and click the cog beside the output
+   you want (Output 2, say).
+2. **Set the port first.** The field is locked once the output is running, and
+   every output offers 10000 by default, so give the second one a different
+   number (10001) or they'll clash.
+3. Tick **Enable SRT** and set **Type** to **Listener**.
+4. In OpenAVC, put the same port in the vMix device's **Output _n_ SRT Port**
+   setting. vMix reports that SRT is on but never says which port, so this is
+   the one number OpenAVC can't read for itself.
+
+The output then appears in the Stream picker named after what it's showing —
+"vMix Output 2 - Program", "vMix Output 3 - Preview". Use the vMix driver's
+**Set Output Source** command from a macro or a panel button to change what an
+output carries. Bear in mind that one output is one picture: changing it
+changes it for everyone watching that output, so give each output a job rather
+than switching one back and forth. Program and preview side by side just means
+two SRT outputs on two ports.
 
 Discovered sources are read-only. They appear only in the panel's Stream picker,
 not on the **Video Streams** management page, and they come and go as encoders go

@@ -91,6 +91,31 @@ _DISCOVER_PREFIX = "auto-"
 # enumerating dozens of encoders at once) into a single rebuild.
 _DISCOVER_DEBOUNCE_SECONDS = 0.3
 
+# The preview formats this plugin can actually render. A driver that declares
+# something outside this set is SKIPPED rather than guessed at: a source we
+# cannot draw is better absent from the picker than present and permanently
+# broken. (Before SRT landed an unknown format fell back to mjpeg, which meant
+# an <img> pointed at an srt:// URL -- a dead tile with no explanation.)
+_RENDERABLE_FORMATS = ("mjpeg", "rtsp", "srt")
+# Of those, the ones MediaMTX ingests and re-serves as WebRTC. MJPEG is the odd
+# one out: the plugin proxies it itself and the sidecar never sees it.
+_SIDECAR_FORMATS = ("rtsp", "srt")
+# How a URL scheme maps to a format, for a driver that publishes a preview_url
+# and leaves preview_format off -- the convention says the format is optional.
+_SCHEME_FORMATS = {
+    "rtsp": "rtsp", "rtsps": "rtsp",
+    "srt": "srt",
+    "http": "mjpeg", "https": "mjpeg",
+}
+# What MediaMTX names a video track a browser can decode natively. Anything
+# else has to go through ffmpeg. MediaMTX reports this for every source type it
+# ingests, SRT included -- measured against a live vMix SRT output, which comes
+# back as tracks ['MPEG-4 Audio', 'H264'].
+_BROWSER_VIDEO_CODECS = ("H264",)
+# Video codecs MediaMTX may name. Used to tell "this path carries video we
+# cannot draw" from "this path has not reported a video track yet".
+_VIDEO_CODECS = ("H264", "H265", "VP8", "VP9", "AV1", "M-JPEG", "MPEG-4 Video")
+
 
 class StreamIn(BaseModel):
     """Add/edit payload for a video stream. The IDE Video Streams form posts this."""
@@ -118,7 +143,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.10.2",
+        "version": "0.11.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -257,10 +282,20 @@ class VideoPanelPlugin:
         self._streams = []  # configured stream dicts (the source of truth)
         self._encoder_cache = {}  # hardware_accel value -> resolved ffmpeg encoder
         # Auto-discovered preview sources, keyed by derived stream id:
-        #   {stream_id: {"label": str, "url": str, "format": "mjpeg"|"rtsp"}}
+        #   {stream_id: {"label": str, "url": str, "format": "mjpeg"|"rtsp"|"srt"}}
         self._discovered = {}
-        # Discovered RTSP previews we've registered a MediaMTX path for, sid->url.
-        self._discovered_rtsp = {}
+        # Discovered previews we've registered a MediaMTX path for, sid->url.
+        self._discovered_sidecar = {}
+        # What the sidecar has told us a discovered source actually carries,
+        # sid -> "h264" | "other". Empty until a viewer has held a path open
+        # long enough for MediaMTX to report its tracks; see _learn_codecs.
+        self._learned_codec = {}
+        # Streams we've already complained about being unwatchable, so a source
+        # that stays down doesn't write the same line every five seconds.
+        self._warned_unreachable = set()
+        # Formats we've already refused, so an unrenderable preview key does
+        # not log on every rebuild.
+        self._warned_format = set()
         self._rebuild_task = None  # debounce handle for discovery rebuilds
         self._detected_ip = ("", 0.0)  # (auto-detected LAN address, at monotonic)
         self._rendered_host = None  # LAN address baked into the sidecar config
@@ -398,8 +433,9 @@ class VideoPanelPlugin:
             return
         for stream in self._streams:
             await self._sync_path_add(stream)
-        self._discovered_rtsp = {}
-        await self._sync_discovered_rtsp()
+        self._discovered_sidecar = {}
+        self._learned_codec = {}
+        await self._sync_discovered_sidecar()
 
     # ──── Streams ────
 
@@ -631,7 +667,8 @@ class VideoPanelPlugin:
             return
         await self.api.state_set("running", True)
         live = {}
-        for item in data.get("items", []):
+        items = data.get("items", []) or []
+        for item in items:
             name = item.get("name")
             if name:
                 # `ready` is deprecated in MediaMTX 1.18.x in favour of
@@ -641,6 +678,89 @@ class VideoPanelPlugin:
             stream_id = s["stream_id"]
             await self.api.state_set(
                 f"streams.{stream_id}", "streaming" if live.get(stream_id) else "idle"
+            )
+        await self._learn_codecs(items)
+        self._warn_unwatchable(items)
+
+    async def _learn_codecs(self, items):
+        """Correct a discovered source's codec guess from what the sidecar sees.
+
+        MediaMTX names the tracks of every path it has ingested, whatever the
+        protocol -- an SRT source comes back as ['MPEG-4 Audio', 'H264'], same
+        shape as an RTSP one. That is strictly better evidence than probing the
+        source ourselves: it needs no second protocol implementation, it costs
+        nothing (the poll already runs), and it works for anything MediaMTX can
+        ingest rather than only what the bundled ffmpeg was compiled for.
+
+        A path only reports tracks while somebody is watching it, because these
+        are on-demand sources. So the first viewer of a stream we guessed wrong
+        about sees a few seconds of nothing, the guess is replaced, the path is
+        re-registered, and the iframe's own reconnect brings it up correct. It
+        does not repeat: the answer is kept for as long as the source stands.
+        """
+        for item in items:
+            sid = item.get("name")
+            if not sid or sid not in self._discovered_sidecar:
+                continue
+            codec = self._video_codec(item.get("tracks"))
+            if codec is None:
+                continue  # nothing watching yet, or no video track reported
+            learned = "h264" if codec in _BROWSER_VIDEO_CODECS else "other"
+            if self._learned_codec.get(sid) == learned:
+                continue
+            previous = self._learned_codec.get(sid)
+            self._learned_codec[sid] = learned
+            if previous is None and learned == "h264":
+                continue  # confirms what we already assumed; nothing to redo
+            self.api.log(
+                f"'{sid}' carries {codec}; "
+                + ("transcoding it to H.264" if learned == "other"
+                   else "serving it straight through"),
+                "info",
+            )
+            url = self._discovered_sidecar.get(sid)
+            if url:
+                await self._sync_path_delete(sid)
+                await self._sync_path_add(self._discovered_entry(sid, url))
+
+    @staticmethod
+    def _video_codec(tracks):
+        """The video codec among a path's tracks, or None if it has none yet."""
+        if not isinstance(tracks, list):
+            return None
+        for track in tracks:
+            if isinstance(track, str) and track in _VIDEO_CODECS:
+                return track
+        return None
+
+    def _warn_unwatchable(self, items):
+        """Say when somebody is watching a source that will not connect.
+
+        Readers attached and the path never becoming available is exactly the
+        "spinning with no explanation" case: MediaMTX says why on its stderr,
+        but that is drained at debug level, so nothing reaches a log anybody
+        reads. Named host and port, once per outage rather than every poll.
+        """
+        for item in items:
+            sid = item.get("name")
+            if not sid or sid not in self._discovered_sidecar:
+                continue
+            available = bool(item.get("available", item.get("ready", False)))
+            readers = len(item.get("readers") or [])
+            if available or not readers:
+                self._warned_unreachable.discard(sid)
+                continue
+            if sid in self._warned_unreachable:
+                continue
+            self._warned_unreachable.add(sid)
+            url = self._discovered_sidecar.get(sid, "")
+            self.api.log(
+                f"'{sid}' has a viewer but its source is not answering: "
+                f"{url}. The OpenAVC server has to be able to reach that "
+                f"address itself -- the panel never connects to it directly. "
+                f"Check the device is streaming and that nothing between the "
+                f"two is blocking it.",
+                "warning",
             )
 
     # ──── Auto-discovered preview sources ────
@@ -691,16 +811,44 @@ class VideoPanelPlugin:
             if not url:
                 continue
             prefix = url_key[: -len(".preview_url")]  # device.<id>[.<type>.<pad>]
-            fmt = await self.api.state_get(f"{prefix}.preview_format")
-            fmt = fmt if fmt in ("mjpeg", "rtsp") else "mjpeg"
+            declared = await self.api.state_get(f"{prefix}.preview_format")
+            fmt = self._preview_format(declared, url)
+            if fmt is None:
+                if prefix not in self._warned_format:
+                    self._warned_format.add(prefix)
+                    self.api.log(
+                        f"{prefix} offers a preview this plugin cannot draw "
+                        f"(format {declared!r}, URL {url!r}); it is not being "
+                        f"listed as a stream. Supported: "
+                        f"{', '.join(_RENDERABLE_FORMATS)}.",
+                        "warning",
+                    )
+                continue
+            self._warned_format.discard(prefix)
             discovered[self._discovered_stream_id(prefix)] = {
                 "label": await self._discovery_label(prefix),
                 "url": url,
                 "format": fmt,
             }
         self._discovered = discovered
-        await self._sync_discovered_rtsp()
+        await self._sync_discovered_sidecar()
         await self._publish_stream_list()
+
+    @staticmethod
+    def _preview_format(declared, url):
+        """How to render a discovered preview, or None if we cannot.
+
+        The convention makes ``preview_format`` optional, so a URL on its own
+        has to resolve — and a declared format we do not recognise is more
+        likely a newer driver than a typo, in which case the scheme is the
+        better evidence anyway. Returns None when nothing can draw it, which
+        keeps a source we would only draw wrong out of the picker entirely.
+        """
+        fmt = (declared or "").strip().lower() if isinstance(declared, str) else ""
+        if fmt in _RENDERABLE_FORMATS:
+            return fmt
+        scheme = (url or "").split("://", 1)[0].strip().lower()
+        return _SCHEME_FORMATS.get(scheme)
 
     async def _discovery_label(self, prefix):
         """Friendly name for a discovered source: user label, else device name."""
@@ -716,25 +864,65 @@ class VideoPanelPlugin:
         slug = re.sub(r"[^A-Za-z0-9_-]+", "-", prefix[len("device."):]).strip("-")
         return f"{_DISCOVER_PREFIX}{slug or 'source'}"
 
-    async def _sync_discovered_rtsp(self):
-        """Register/unregister MediaMTX paths for discovered RTSP previews.
+    async def _sync_discovered_sidecar(self):
+        """Register/unregister MediaMTX paths for discovered RTSP + SRT previews.
 
         MJPEG previews are served by the plugin's own streaming proxy and need
-        no sidecar path. RTSP previews ride the existing MediaMTX->WHEP pipeline,
-        so each gets an on-demand path (transcoded if the codec isn't browser-
-        playable, matching configured-stream behavior).
+        no sidecar path. Everything else rides the existing MediaMTX->WHEP
+        pipeline, so each gets an on-demand path.
+
+        **MediaMTX's own SRT listener stays off.** We are the caller, dialling
+        out to the device, so SRT ingest opens no inbound port and needs no
+        firewall rule -- unlike the WebRTC UDP port this plugin already has to
+        explain. Only letting devices PUSH to us would need a listener, and
+        that is a separate decision with a separate cost.
         """
-        want = {sid: d["url"] for sid, d in self._discovered.items() if d["format"] == "rtsp"}
-        for sid in set(self._discovered_rtsp) - set(want):
+        want = {
+            sid: d["url"]
+            for sid, d in self._discovered.items()
+            if d["format"] in _SIDECAR_FORMATS
+        }
+        for sid in set(self._discovered_sidecar) - set(want):
             await self._sync_path_delete(sid)
+            self._learned_codec.pop(sid, None)
+            self._warned_unreachable.discard(sid)
         for sid, url in want.items():
-            if self._discovered_rtsp.get(sid) == url:
+            if self._discovered_sidecar.get(sid) == url:
                 continue  # already registered with this URL
-            await self._sync_path_add({
-                "stream_id": sid, "rtsp_url": url, "username": "", "password": "",
-                "codec_hint": "auto", "transcode": "auto", "hardware_accel": "auto",
-            })
-        self._discovered_rtsp = want
+            self._learned_codec.pop(sid, None)  # a new URL is a new source
+            await self._sync_path_add(self._discovered_entry(sid, url))
+        self._discovered_sidecar = want
+
+    def _discovered_entry(self, sid, url):
+        """A discovered source in the shape _sync_path_add reads.
+
+        The `rtsp_url` key is historical -- it is just "the source URL", and
+        MediaMTX takes an srt:// one in the same field.
+
+        `codec_hint` is where the two formats deliberately differ, and the
+        reason is worth stating because the asymmetry looks like an oversight:
+
+        - **RTSP keeps `auto`**, which transcodes until proven otherwise. That
+          is the shipped behaviour for every camera and encoder already in the
+          field, and relaxing it on sources this session cannot test is the
+          kind of change that breaks somebody's working preview for a CPU win.
+        - **SRT starts at `h264`**, i.e. passthrough. SRT is the broadcast
+          world's contribution transport and the switchers and hardware
+          encoders that speak it send H.264 far more often than not; vMix
+          measurably does. Re-encoding a stream that is already H.264 spends
+          real CPU on every panel that shows it, for nothing.
+
+        Neither is a guess left to stand: _learn_codecs replaces it with what
+        MediaMTX reports as soon as anybody actually watches, so an SRT source
+        that turns out to be H.265 corrects itself within one poll.
+        """
+        hint = self._learned_codec.get(sid)
+        if hint is None:
+            hint = "h264" if self._discovered.get(sid, {}).get("format") == "srt" else "auto"
+        return {
+            "stream_id": sid, "rtsp_url": url, "username": "", "password": "",
+            "codec_hint": hint, "transcode": "auto", "hardware_accel": "auto",
+        }
 
     def _is_known_stream(self, stream_id):
         """A stream the panel may play: configured or auto-discovered."""

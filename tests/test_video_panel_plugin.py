@@ -324,6 +324,7 @@ class _FakeApi:
         self.subscriptions = []  # (pattern, callback) from state_subscribe
         self.proxy_calls = []
         self.proxy_location = None  # canned WHEP Location for POST responses
+        self.logs = []  # (message, level) from log()
 
     @property
     def config(self):
@@ -350,7 +351,10 @@ class _FakeApi:
         return asyncio.ensure_future(coro)
 
     def log(self, message, level="info"):
-        pass
+        # Recorded rather than discarded: several behaviours here exist only to
+        # SAY something useful (an unrenderable preview, a source nobody can
+        # reach), so the message is the deliverable and worth asserting on.
+        self.logs.append((message, level))
 
     async def proxy_to(self, url, request, *, timeout=30.0, allow_internal=False):
         """Stand in for PluginAPI.proxy_to: record the upstream URL, return a
@@ -867,7 +871,7 @@ async def test_status_poll_restarts_sidecar_when_the_address_moves(tmp_path, mon
     plugin._discovered = {
         "auto-cam": {"label": "Cam", "url": "rtsp://169.254.5.5/sub", "format": "rtsp"},
     }
-    plugin._discovered_rtsp = {"auto-cam": "rtsp://169.254.5.5/sub"}
+    plugin._discovered_sidecar = {"auto-cam": "rtsp://169.254.5.5/sub"}
 
     # Stable address: a normal status poll, no bounce.
     await plugin._poll_statuses()
@@ -893,3 +897,181 @@ async def test_status_poll_restarts_sidecar_when_the_address_moves(tmp_path, mon
     # Stable at the new address: back to normal polling, no more bounces.
     await plugin._poll_statuses()
     assert plugin._supervisor.restarts == 1
+
+
+# ──── SRT ingest, and learning what a source actually carries ────
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_preview_format_resolves_declared_then_scheme():
+    f = VideoPanelPlugin._preview_format
+    # A format we can draw is taken as declared.
+    assert f("srt", "srt://vmix:10000") == "srt"
+    assert f("rtsp", "rtsp://cam/sub") == "rtsp"
+    assert f("mjpeg", "http://enc/?action=stream") == "mjpeg"
+    # The convention makes preview_format optional, so a URL alone resolves.
+    assert f(None, "srt://vmix:10000") == "srt"
+    assert f("", "rtsp://cam/sub") == "rtsp"
+    assert f(None, "https://enc/?action=stream") == "mjpeg"
+    # A format we do not know falls back to the scheme, which is better
+    # evidence than the word: this is a newer driver more often than a typo.
+    assert f("webrtc", "srt://vmix:10000") == "srt"
+    # Nothing can draw it -> None, and the caller skips it entirely.
+    assert f("ndi", "ndi://box/Cam 1") is None
+    assert f(None, "ndi://box/Cam 1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_an_undrawable_preview_is_skipped_not_guessed(monkeypatch):
+    """It used to fall back to mjpeg, which put an <img> on an srt:// URL.
+
+    A source we would only ever draw wrong is worse in the picker than absent:
+    the tile is dead and nothing says why.
+    """
+    client, plugin, added, _deleted = _crud_client(monkeypatch)
+    plugin.api.state.update({
+        "device.box.preview_url": "ndi://box/Cam 1",
+        "device.box.preview_format": "ndi",
+    })
+    await plugin._rebuild_discovered()
+    assert plugin._discovered == {}
+    assert not any("auto-box" in path for path, _body in added)
+    assert any("cannot draw" in m for m, _lvl in plugin.api.logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_an_srt_preview_becomes_an_on_demand_sidecar_path(monkeypatch):
+    """The vMix case: a driver publishes srt:// and it just appears."""
+    client, plugin, added, deleted = _crud_client(monkeypatch)
+    plugin._ffmpeg_bin = None
+    api = plugin.api
+    api.state.update({
+        "device.vmix.output.2.preview_url": "srt://192.168.4.23:10000",
+        "device.vmix.output.2.preview_format": "srt",
+        "device.vmix.output.2.name": "vMix Output 2 - Program",
+    })
+    await plugin._rebuild_discovered()
+
+    assert (
+        "/v3/config/paths/add/auto-vmix-output-2",
+        {"source": "srt://192.168.4.23:10000", "sourceOnDemand": True},
+    ) in added
+    listing = json.loads(api.state["stream_ids"])
+    entry = next(e for e in listing if e["value"] == "auto-vmix-output-2")
+    assert entry["label"] == "vMix Output 2 - Program"
+    assert entry["mode"] == "webrtc"
+
+    # Output stops SRT -> the path goes with it.
+    api.state["device.vmix.output.2.preview_url"] = ""
+    await plugin._rebuild_discovered()
+    assert "/v3/config/paths/delete/auto-vmix-output-2" in deleted
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_srt_starts_passthrough_and_rtsp_keeps_its_shipped_default(monkeypatch):
+    """The one place the two formats differ, and it is deliberate.
+
+    Re-encoding a stream that is already H.264 spends real CPU on every panel
+    that shows it. SRT gear overwhelmingly sends H.264, so it starts straight
+    through. RTSP keeps the transcode-until-proven default every camera in the
+    field already has, because relaxing that on sources we cannot test is how
+    somebody's working preview breaks.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    plugin._discovered = {
+        "auto-srt": {"label": "vMix", "url": "srt://h:10000", "format": "srt"},
+        "auto-cam": {"label": "Cam", "url": "rtsp://h/sub", "format": "rtsp"},
+    }
+    assert plugin._discovered_entry("auto-srt", "srt://h:10000")["codec_hint"] == "h264"
+    assert plugin._discovered_entry("auto-cam", "rtsp://h/sub")["codec_hint"] == "auto"
+    # And neither guess survives contact with what the sidecar reports.
+    plugin._learned_codec["auto-srt"] = "other"
+    assert plugin._discovered_entry("auto-srt", "srt://h:10000")["codec_hint"] == "other"
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_the_video_track_is_picked_out_of_what_mediamtx_reports():
+    f = VideoPanelPlugin._video_codec
+    # Measured shape from a live vMix SRT output.
+    assert f(["MPEG-4 Audio", "H264"]) == "H264"
+    assert f(["H265"]) == "H265"
+    # Audio only, or nothing watching yet: no answer, so nothing is decided.
+    assert f(["MPEG-4 Audio"]) is None
+    assert f([]) is None
+    assert f(None) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_source_that_is_not_h264_corrects_itself(monkeypatch):
+    """The guess is replaced by what the sidecar saw, and the path re-registered."""
+    client, plugin, added, deleted = _crud_client(monkeypatch)
+    plugin._ffmpeg_bin = "/usr/bin/ffmpeg"
+    plugin._discovered = {
+        "auto-enc": {"label": "Enc", "url": "srt://h:10000", "format": "srt"},
+    }
+    plugin._discovered_sidecar = {"auto-enc": "srt://h:10000"}
+
+    async def encoder(_ha):
+        return "libopenh264"
+
+    monkeypatch.setattr(plugin, "_resolve_encoder", encoder)
+
+    added.clear()
+    deleted.clear()
+    await plugin._learn_codecs([
+        {"name": "auto-enc", "tracks": ["MPEG-4 Audio", "H265"], "readers": [{}]},
+    ])
+    assert plugin._learned_codec["auto-enc"] == "other"
+    # Re-registered as the two-path transcode pair.
+    assert "/v3/config/paths/delete/auto-enc" in deleted
+    assert any(p == "/v3/config/paths/add/auto-enc__src" for p, _b in added)
+    assert any("H265" in m for m, _lvl in plugin.api.logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_confirmed_h264_source_is_left_alone(monkeypatch):
+    """Confirming the assumption must not churn a working path."""
+    client, plugin, added, deleted = _crud_client(monkeypatch)
+    plugin._discovered = {
+        "auto-vmix": {"label": "vMix", "url": "srt://h:10000", "format": "srt"},
+    }
+    plugin._discovered_sidecar = {"auto-vmix": "srt://h:10000"}
+    added.clear()
+    deleted.clear()
+    await plugin._learn_codecs([
+        {"name": "auto-vmix", "tracks": ["MPEG-4 Audio", "H264"], "readers": [{}]},
+    ])
+    assert plugin._learned_codec["auto-vmix"] == "h264"
+    assert added == [] and deleted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_watched_source_that_never_connects_says_so_once(monkeypatch):
+    """MediaMTX explains itself on stderr, which is drained at debug level.
+
+    Readers attached and the path never available is exactly the spinning-with-
+    no-explanation case, so it gets a line somebody will actually read.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    plugin._discovered_sidecar = {"auto-vmix": "srt://192.168.4.23:10000"}
+    items = [{"name": "auto-vmix", "available": False, "readers": [{}], "tracks": []}]
+
+    plugin.api.logs.clear()
+    plugin._warn_unwatchable(items)
+    warnings = [m for m, lvl in plugin.api.logs if lvl == "warning"]
+    assert len(warnings) == 1
+    assert "192.168.4.23:10000" in warnings[0]
+
+    # It does not repeat every five seconds.
+    plugin._warn_unwatchable(items)
+    assert len([m for m, lvl in plugin.api.logs if lvl == "warning"]) == 1
+
+    # Nobody watching is not a fault, and recovery re-arms the warning.
+    plugin._warn_unwatchable([{"name": "auto-vmix", "available": True, "readers": [{}]}])
+    assert "auto-vmix" not in plugin._warned_unreachable
