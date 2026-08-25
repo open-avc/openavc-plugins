@@ -976,9 +976,9 @@ async def test_srt_starts_passthrough_and_rtsp_keeps_its_shipped_default(monkeyp
 
     Re-encoding a stream that is already H.264 spends real CPU on every panel
     that shows it. SRT gear overwhelmingly sends H.264, so it starts straight
-    through. RTSP keeps the transcode-until-proven default every camera in the
-    field already has, because relaxing that on sources we cannot test is how
-    somebody's working preview breaks.
+    through. RTSP keeps the transcode-until-proven default every RTSP source
+    in the field already has, because relaxing that on ones this work could not
+    test is how somebody's working preview breaks.
     """
     client, plugin, *_ = _crud_client(monkeypatch)
     plugin._discovered = {
@@ -1053,18 +1053,19 @@ async def test_a_confirmed_h264_source_is_left_alone(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
-async def test_learning_can_never_relax_a_camera_out_of_transcoding(monkeypatch):
+async def test_learning_can_never_relax_a_source_out_of_transcoding(monkeypatch):
     """The invariant: learning turns transcoding ON, never off.
 
     MediaMTX names the codec FAMILY, not the profile. "H265" proves a browser
     cannot play it; "H264" does NOT prove a browser can — High 4:2:2 and the
     exotic levels are H264 too, and transcoding is what has been quietly making
-    those work. So an RTSP camera, which ships transcoding until proven
-    otherwise, must stay that way no matter what the sidecar reports.
+    those work. So an RTSP source -- an AV-over-IP encoder, an IP camera,
+    whatever a driver has pointed us at -- ships transcoding until proven
+    otherwise and must stay that way whatever the sidecar reports.
 
     Without this the change would have been a silent regression on every
-    existing camera, and a delayed one: the switch landed on the next rebuild
-    rather than at the moment of learning.
+    existing RTSP source, and a delayed one: the switch landed on the next
+    rebuild rather than at the moment of learning.
     """
     client, plugin, added, deleted = _crud_client(monkeypatch)
     url = "rtsp://169.254.5.5/sub"
@@ -1075,7 +1076,7 @@ async def test_learning_can_never_relax_a_camera_out_of_transcoding(monkeypatch)
     await plugin._learn_codecs([{"name": "auto-cam", "tracks": ["H264"], "readers": [{}]}])
 
     assert "auto-cam" not in plugin._learned_codec
-    # The posture the camera shipped with survives a later rebuild.
+    # The posture the source shipped with survives a later rebuild.
     entry = plugin._discovered_entry("auto-cam", url)
     assert entry["codec_hint"] == "auto"
     assert VideoPanelPlugin._should_transcode(entry) is True

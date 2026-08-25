@@ -907,8 +907,9 @@ class VideoPanelPlugin:
         reason is worth stating because the asymmetry looks like an oversight:
 
         - **RTSP keeps `auto`**, which transcodes until proven otherwise. That
-          is the shipped behaviour for every camera and encoder already in the
-          field, and relaxing it on sources this session cannot test is the
+          is the shipped behaviour for every RTSP source already in the field
+          -- AV-over-IP encoders, IP cameras, whatever a driver has pointed us
+          at -- and relaxing it on ones this session cannot test is the
           kind of change that breaks somebody's working preview for a CPU win.
         - **SRT starts at `h264`**, i.e. passthrough. SRT is the broadcast
           world's contribution transport and the switchers and hardware
@@ -920,7 +921,7 @@ class VideoPanelPlugin:
         anybody actually watches, so a source that turns out to be H.265
         corrects itself within one poll. That correction only ever runs one way
         -- see _learn_codecs -- so this cannot become a back door that relaxes
-        an RTSP camera out of the transcoding it ships with.
+        an RTSP source out of the transcoding it ships with.
         """
         hint = self._learned_codec.get(sid)
         if hint is None:
