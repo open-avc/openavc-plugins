@@ -1046,8 +1046,39 @@ async def test_a_confirmed_h264_source_is_left_alone(monkeypatch):
     await plugin._learn_codecs([
         {"name": "auto-vmix", "tracks": ["MPEG-4 Audio", "H264"], "readers": [{}]},
     ])
-    assert plugin._learned_codec["auto-vmix"] == "h264"
+    # Nothing is recorded for an H264 source, deliberately: see the next test.
+    assert "auto-vmix" not in plugin._learned_codec
     assert added == [] and deleted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_learning_can_never_relax_a_camera_out_of_transcoding(monkeypatch):
+    """The invariant: learning turns transcoding ON, never off.
+
+    MediaMTX names the codec FAMILY, not the profile. "H265" proves a browser
+    cannot play it; "H264" does NOT prove a browser can — High 4:2:2 and the
+    exotic levels are H264 too, and transcoding is what has been quietly making
+    those work. So an RTSP camera, which ships transcoding until proven
+    otherwise, must stay that way no matter what the sidecar reports.
+
+    Without this the change would have been a silent regression on every
+    existing camera, and a delayed one: the switch landed on the next rebuild
+    rather than at the moment of learning.
+    """
+    client, plugin, added, deleted = _crud_client(monkeypatch)
+    url = "rtsp://169.254.5.5/sub"
+    plugin._discovered = {"auto-cam": {"label": "Cam", "url": url, "format": "rtsp"}}
+    plugin._discovered_sidecar = {"auto-cam": url}
+    assert plugin._discovered_entry("auto-cam", url)["codec_hint"] == "auto"
+
+    await plugin._learn_codecs([{"name": "auto-cam", "tracks": ["H264"], "readers": [{}]}])
+
+    assert "auto-cam" not in plugin._learned_codec
+    # The posture the camera shipped with survives a later rebuild.
+    entry = plugin._discovered_entry("auto-cam", url)
+    assert entry["codec_hint"] == "auto"
+    assert VideoPanelPlugin._should_transcode(entry) is True
 
 
 @pytest.mark.asyncio

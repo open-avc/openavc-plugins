@@ -143,7 +143,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.11.0",
+        "version": "0.11.1",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -697,25 +697,29 @@ class VideoPanelPlugin:
         about sees a few seconds of nothing, the guess is replaced, the path is
         re-registered, and the iframe's own reconnect brings it up correct. It
         does not repeat: the answer is kept for as long as the source stands.
+
+        **This may only ever TIGHTEN -- turn transcoding on, never off.** The
+        asymmetry is not caution, it is what the evidence actually supports:
+        MediaMTX names the codec FAMILY, not the profile. "H265" is proof a
+        browser cannot play it. "H264" is NOT proof a browser can -- High 4:2:2
+        and the more exotic levels are H264 too, and transcoding is what has
+        been quietly making those work. So a source already being transcoded
+        stays that way, and the only thing learned here is that something needs
+        transcoding after all.
         """
         for item in items:
             sid = item.get("name")
             if not sid or sid not in self._discovered_sidecar:
                 continue
             codec = self._video_codec(item.get("tracks"))
-            if codec is None:
-                continue  # nothing watching yet, or no video track reported
-            learned = "h264" if codec in _BROWSER_VIDEO_CODECS else "other"
-            if self._learned_codec.get(sid) == learned:
+            if codec is None or codec in _BROWSER_VIDEO_CODECS:
                 continue
-            previous = self._learned_codec.get(sid)
-            self._learned_codec[sid] = learned
-            if previous is None and learned == "h264":
-                continue  # confirms what we already assumed; nothing to redo
+            if self._learned_codec.get(sid) == "other":
+                continue  # already known and already transcoding
+            self._learned_codec[sid] = "other"
             self.api.log(
-                f"'{sid}' carries {codec}; "
-                + ("transcoding it to H.264" if learned == "other"
-                   else "serving it straight through"),
+                f"'{sid}' carries {codec}, which browsers cannot play; "
+                f"transcoding it to H.264",
                 "info",
             )
             url = self._discovered_sidecar.get(sid)
@@ -912,9 +916,11 @@ class VideoPanelPlugin:
           measurably does. Re-encoding a stream that is already H.264 spends
           real CPU on every panel that shows it, for nothing.
 
-        Neither is a guess left to stand: _learn_codecs replaces it with what
-        MediaMTX reports as soon as anybody actually watches, so an SRT source
-        that turns out to be H.265 corrects itself within one poll.
+        The SRT guess is not left to stand: _learn_codecs replaces it as soon as
+        anybody actually watches, so a source that turns out to be H.265
+        corrects itself within one poll. That correction only ever runs one way
+        -- see _learn_codecs -- so this cannot become a back door that relaxes
+        an RTSP camera out of the transcoding it ships with.
         """
         hint = self._learned_codec.get(sid)
         if hint is None:
