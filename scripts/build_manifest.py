@@ -14,6 +14,15 @@ Walking the working tree instead would sweep in untracked local junk
 (``__pycache__``, editor droppings) and produce a manifest that no real install
 could ever satisfy.
 
+The BYTES come from git too, not from the working tree, and that distinction is
+load-bearing. An install downloads the committed blob; on a Windows checkout
+with ``core.autocrlf=true`` the working copy of every text file has CRLF where
+the blob has LF, so hashing the file on disk records a hash no download can ever
+match. Nothing warns: the manifest builds, ``--check`` passes against itself,
+and every plugin in the catalog silently becomes uninstallable. Hashing what git
+stores makes the output identical on every platform, which is the only property
+worth having here.
+
 Kept separate from index.json on purpose: that file is hand-maintained, and
 rewriting it here would reformat every hand-authored line into whatever
 ``json.dumps`` felt like.
@@ -51,8 +60,26 @@ def _tracked_files(repo_root: Path, subdir: str) -> list[Path]:
     return [Path(p) for p in out.decode("utf-8").split("\0") if p]
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _committed_sha256(repo_root: Path, rel: Path) -> str:
+    """SHA-256 of the committed bytes for ``rel`` — what a download receives.
+
+    Reads the index rather than the working tree, so line-ending conversion on
+    the checkout cannot leak into the hash. The index is also the right answer
+    for a generator run just before committing: it hashes what is about to be
+    pushed.
+    """
+    try:
+        blob = subprocess.run(
+            ["git", "-C", str(repo_root), "show", f":{rel.as_posix()}"],
+            capture_output=True,
+            check=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        sys.exit(
+            f"error: {rel.as_posix()} is tracked but has no staged content. "
+            "Stage your changes (git add) before building the manifest."
+        )
+    return hashlib.sha256(blob).hexdigest()
 
 
 def build(repo_root: Path) -> dict:
@@ -82,7 +109,7 @@ def build(repo_root: Path) -> dict:
             if not full.is_file():
                 problems.append(f"plugin {plugin_id!r}: {p.as_posix()} is tracked but missing")
                 continue
-            files[p.as_posix()] = _sha256(full)
+            files[p.as_posix()] = _committed_sha256(repo_root, p)
         plugins[plugin_id] = {"files": files}
 
     if problems:

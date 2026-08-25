@@ -1,0 +1,4 @@
+# The vendored hls.js bundle is shipped byte-for-byte and its hash is
+# published in manifest.json. Line-ending conversion would change those
+# bytes on a Windows checkout and make the plugin refuse to install.
+*.min.js -text
