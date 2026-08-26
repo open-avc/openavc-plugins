@@ -643,6 +643,19 @@ def test_whep_rejects_malformed_session_id():
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_the_plugin_asks_for_a_page_in_the_ide_nav():
+    """Managing streams was a section part-way down the Program page.
+
+    Under Assets, above Backups, on a page called Program: somewhere nobody
+    looking for video would think to scroll to. The nav entry comes from this
+    declaration, so a system without the plugin gains nothing.
+    """
+    views = VideoPanelPlugin.EXTENSIONS["views"]
+    assert [v["id"] for v in views] == ["streams"]
+    assert views[0]["label"] == "Video Streams"
+    assert views[0]["renderer"] == "video_streams"
+
+
 def test_video_stream_panel_element_extension_shape():
     elements = VideoPanelPlugin.EXTENSIONS["panel_elements"]
     assert len(elements) == 1
@@ -694,6 +707,155 @@ async def test_rebuild_discovers_mjpeg_sources(monkeypatch):
     listing = json.loads(api.state["stream_ids"])
     entry = next(e for e in listing if e["value"] == "auto-chazy-encoder-001")
     assert entry["label"] == "Podium PC" and entry["mode"] == "mjpeg"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_source_with_no_stream_is_listed_with_what_is_missing(monkeypatch):
+    """The dead end: a preview exists and one setting stands in the way.
+
+    Before this the source published no URL and simply was not in the list,
+    which is the same empty picker as a room with no video in it at all.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.vmix.name": "Stage vMix",
+        "device.vmix.connected": True,
+        "device.vmix.output.2.name": "vMix Output 2 - Preview",
+        "device.vmix.output.2.preview_url": "",
+        "device.vmix.output.2.preview_status": "needs_setup",
+        "device.vmix.output.2.preview_setup_field": "srt_port_2",
+        "device.vmix.output.2.preview_status_detail": "Enter the SRT Port.",
+    })
+    await plugin._rebuild_discovered()
+
+    # Not playable: the play routes must never see it.
+    assert plugin._discovered == {}
+    assert plugin._is_known_stream("auto-vmix-output-2") is False
+
+    listing = json.loads(api.state["stream_ids"])
+    row = next(e for e in listing if e.get("id") == "auto-vmix-output-2")
+    assert "value" not in row, "an unplayable row must not be pickable"
+    assert row["status"] == "needs_setup"
+    assert row["detail"] == "Enter the SRT Port."
+    assert row["group"] == "Stage vMix"
+    assert row["setup"] == {"device": "vmix", "field": "srt_port_2"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_an_unplayable_row_is_invisible_to_the_shared_option_parser(monkeypatch):
+    """No version gate is needed, and this is why.
+
+    A picker that predates this reads the list through a parser that drops any
+    entry with no `value`. So an older platform shows exactly what it showed
+    before -- nothing -- rather than offering a page a tile that can never
+    draw. Mirrors normalizeOptionList in the IDE.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.vmix.output.1.preview_status": "unavailable",
+        "device.vmix.output.1.preview_status_detail": "SRT is not running.",
+        "device.vmix.output.2.preview_url": "srt://10.0.0.5:10000",
+        "device.vmix.output.2.preview_format": "srt",
+    })
+    await plugin._rebuild_discovered()
+
+    listing = json.loads(api.state["stream_ids"])
+    old_parser_sees = [e["value"] for e in listing if "value" in e]
+    assert old_parser_sees == ["auto-vmix-output-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_an_offline_device_is_marked_and_stays_pickable(monkeypatch):
+    """A page gets built before the room is powered up.
+
+    preview_url is never cleared on a disconnect, so an unplugged encoder used
+    to sit in the picker looking exactly like a working one and fail at play
+    time. It is marked now -- and still pickable, because hiding it is how a
+    camera silently vanishes from a page somebody is in the middle of building.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.chazy.name": "Encoders",
+        "device.chazy.connected": False,
+        "device.chazy.encoder.001.preview_url": "http://169.254.10.1:8080/?action=stream",
+        "device.chazy.encoder.001.preview_format": "mjpeg",
+        "device.chazy.encoder.001.label": "Podium PC",
+    })
+    await plugin._rebuild_discovered()
+
+    listing = json.loads(api.state["stream_ids"])
+    row = next(e for e in listing if e.get("value") == "auto-chazy-encoder-001")
+    assert row["status"] == "offline"
+    assert "not connected" in row["detail"]
+    assert row["group"] == "Encoders"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_missing_setting_outranks_an_unreachable_device(monkeypatch):
+    """The port can be typed with the device switched off, so say that instead.
+
+    "Connect the device" is not the next step when the next step is a number
+    the device was never going to report anyway.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.vmix.connected": False,
+        "device.vmix.output.2.preview_status": "needs_setup",
+        "device.vmix.output.2.preview_setup_field": "srt_port_2",
+        "device.vmix.output.2.preview_status_detail": "Enter the SRT Port.",
+        # ...while a source with nothing to fill in defers to the device.
+        "device.vmix.output.1.preview_status": "unavailable",
+        "device.vmix.output.1.preview_status_detail": "SRT is not running.",
+    })
+    await plugin._rebuild_discovered()
+
+    listing = json.loads(api.state["stream_ids"])
+    rows = {e["id"]: e for e in listing if "id" in e}
+    assert rows["auto-vmix-output-2"]["status"] == "needs_setup"
+    assert rows["auto-vmix-output-2"]["detail"] == "Enter the SRT Port."
+    assert rows["auto-vmix-output-1"]["status"] == "offline"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_ready_source_claims_no_status(monkeypatch):
+    """A working source is the quiet one. A badge on it is noise."""
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.vmix.connected": True,
+        "device.vmix.output.2.preview_url": "srt://10.0.0.5:10000",
+        "device.vmix.output.2.preview_format": "srt",
+        "device.vmix.output.2.preview_status": "",
+    })
+    await plugin._rebuild_discovered()
+
+    listing = json.loads(api.state["stream_ids"])
+    row = next(e for e in listing if e.get("value") == "auto-vmix-output-2")
+    assert "status" not in row and "detail" not in row
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_the_status_keys_are_watched_as_well(monkeypatch):
+    """Filling the port has to move the row without a restart."""
+    client, plugin, *_ = _crud_client(monkeypatch)
+    await plugin._setup_discovery()
+    watched = {pattern for pattern, _cb in plugin.api.subscriptions}
+    assert {
+        "device.*.preview_status",
+        "device.*.preview_status_detail",
+        "device.*.preview_setup_field",
+        "device.*.connected",
+    } <= watched
 
 
 @pytest.mark.asyncio

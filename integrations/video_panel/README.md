@@ -116,9 +116,12 @@ make once, on the vMix PC:
    every output offers 10000 by default, so give the second one a different
    number (10001) or they'll clash.
 3. Tick **Enable SRT** and set **Type** to **Listener**.
-4. In OpenAVC, put the same port in the vMix device's **Output _n_ SRT Port**
-   setting. vMix reports that SRT is on but never says which port, so this is
-   the one number OpenAVC can't read for itself.
+4. In OpenAVC, the output now appears in the Stream picker saying it needs its
+   SRT port, with a box to type it into. Enter the number from step 2 and press
+   Save. vMix reports that SRT is on but never says which port, so this is the
+   one number OpenAVC can't read for itself. (It is also the vMix device's
+   **Output _n_ SRT Port** setting, under Advanced on the device page, if you
+   already know the number and would rather type it there.)
 
 The output then appears in the Stream picker named after what it's showing —
 "vMix Output 2 - Program", "vMix Output 3 - Preview". Use the vMix driver's
@@ -128,9 +131,19 @@ changes it for everyone watching that output, so give each output a job rather
 than switching one back and forth. Program and preview side by side just means
 two SRT outputs on two ports.
 
-Discovered sources are read-only. They appear only in the panel's Stream picker,
-not on the **Video Streams** management page, and they come and go as encoders go
-online and offline.
+Discovered sources are read-only: there is nothing to add or edit. They are
+listed in the panel's Stream picker and on the **Video Streams** page under
+"Found on your devices", and they come and go as equipment goes online and
+offline.
+
+A source that cannot be shown is listed rather than hidden, so an empty picker
+means there is genuinely nothing there:
+
+| What you see | What it means |
+|--------------|---------------|
+| **Offline** | The device is not connected. Still pickable: a page is usually built before the room is powered up. |
+| **Needs a setting** | There is a stream here and one setting is missing. The box to fill it in is on the row. |
+| **No stream** | The device says this output has nothing to show. For vMix, SRT is not running on it. |
 
 **Reachability:** preview streams usually live on the AV/video network, which is
 often separate from the control network. The OpenAVC **server** fetches the
