@@ -101,6 +101,73 @@ _PANEL_PATHS = (
 # with no dots-in-a-row so nothing can climb out of the stream's own path.
 _HLS_FILE_RE = re.compile(r"[A-Za-z0-9_-]+\.(m3u8|mp4|ts)")
 
+# A URI inside a playlist attribute list, e.g. EXT-X-MEDIA's URI="audio.m3u8".
+_HLS_ATTR_URI_RE = re.compile(r'(URI=")([^"]+)(")')
+
+
+def _split_plugin_token(query):
+    """Separate our own auth parameter from everything the sidecar should see.
+
+    The token rides the query because an <img>, a <video src> and hls.js's own
+    segment fetches cannot set a header. It is ours, not MediaMTX's, and
+    forwarding it upstream would be handing our credential to a subprocess that
+    has no use for it.
+    """
+    from urllib.parse import parse_qsl, urlencode
+
+    token = ""
+    keep = []
+    for key, value in parse_qsl(query or "", keep_blank_values=True):
+        if key == "_plugin_token":
+            token = value
+        else:
+            keep.append((key, value))
+    return urlencode(keep), token
+
+
+def _with_plugin_token(uri, token):
+    """Append our token to one URI out of a playlist, preserving its own query.
+
+    A relative URI REPLACES the query of the document it came from, so a token
+    put on the playlist request does not reach the media playlists and segments
+    the player derives from it. On an instance with a password that is a 401 on
+    everything after the first file -- which is every instance in the field.
+    """
+    if not token or uri.startswith("#"):
+        return uri
+    sep = "&" if "?" in uri else "?"
+    return f"{uri}{sep}_plugin_token={quote(token)}"
+
+
+def _rewrite_playlist(text, token):
+    """Carry the token onto every URI a player will follow out of this playlist.
+
+    Both shapes: a bare line (media playlists, segments) and the URI="..."
+    attribute EXT-X-MEDIA uses for the audio rendition. Comment lines that are
+    not attribute lists are left exactly as they are -- a playlist is parsed
+    strictly and a stray edit breaks the whole stream, not one line of it.
+    """
+    if not token:
+        return text
+    out = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped:
+            out.append(line)
+        elif stripped.startswith("#"):
+            out.append(
+                _HLS_ATTR_URI_RE.sub(
+                    lambda m: m.group(1) + _with_plugin_token(m.group(2), token) + m.group(3),
+                    line,
+                )
+            )
+        else:
+            # Keep the line's own terminator: a playlist is CRLF in places
+            # and LF in others, and normalising it is not ours to do.
+            out.append(_with_plugin_token(stripped, token) + line[len(line.rstrip()):])
+    return "".join(out)
+
+
 # The three answers PluginAPI.viewer_access gives. Compared as strings: this
 # plugin imports stdlib and fastapi only, never the platform.
 VIEWER_LOCAL = "local"
@@ -364,6 +431,22 @@ class VideoPanelPlugin:
         self._ffmpeg_bin = None
         self._auth_pass = ""
         self._config_path = None
+        # ONE client for the whole HLS hop, kept for the plugin's lifetime,
+        # because MediaMTX's HLS server is stateful in two ways a per-request
+        # client cannot satisfy. It answers the first request with a redirect
+        # carrying a `cookieCheck` cookie (its proof the caller keeps cookies,
+        # so credentials cannot be lifted cross-site), and it then ties a
+        # playlist to the segments that follow it with an `hlsSession` cookie.
+        # A fresh client per request failed the first hurdle outright -- every
+        # playlist came back 302 and the viewer got a 502 -- and would have
+        # started a new session on every segment even after clearing it.
+        #
+        # Those cookies stay on THIS side. MediaMTX marks them Secure and
+        # SameSite=None, which a browser reaching a room over plain HTTP would
+        # discard, so relaying them to the viewer could never have worked. The
+        # cost is that the sidecar counts the plugin as one HLS reader however
+        # many people are watching; nothing reads that number.
+        self._hls_client = None
         self._streams = []  # configured stream dicts (the source of truth)
         self._encoder_cache = {}  # hardware_accel value -> resolved ffmpeg encoder
         # Auto-discovered preview sources, keyed by derived stream id:
@@ -470,6 +553,9 @@ class VideoPanelPlugin:
         if self._supervisor is not None:
             await self._supervisor.stop()
             self._supervisor = None
+        if self._hls_client is not None:
+            client, self._hls_client = self._hls_client, None
+            await client.aclose()
 
     async def health_check(self):
         if self._supervisor is not None and self._supervisor.running:
@@ -1363,7 +1449,15 @@ class VideoPanelPlugin:
             # that actually spends the bandwidth.
             if self._viewer_access(request) == VIEWER_REMOTE_BLOCKED:
                 raise HTTPException(402, _REMOTE_BLOCKED_DETAIL)
-            return await self._hls_stream_response(self._hls_url(stream_id, filename))
+            # The query is not decoration. MediaMTX puts the HLS session in it,
+            # and under lowLatency the part requests carry _HLS_msn/_HLS_part --
+            # which IS the low latency. Dropping it left every derived request
+            # asking for something else than the player meant.
+            upstream_query, token = _split_plugin_token(request.url.query)
+            return await self._hls_stream_response(
+                self._hls_url(stream_id, filename, upstream_query),
+                token=token,
+            )
 
         # ── MJPEG (multipart-over-HTTP) reverse proxy ──
         # Auto-discovered MJPEG previews (e.g. a Chazy encoder's ?action=stream
@@ -1466,17 +1560,37 @@ class VideoPanelPlugin:
         # media never arrives.
         return {"stream_id": stream_id, "mode": "mjpeg" if is_mjpeg else "hls"}
 
-    def _hls_url(self, stream_id, filename):
+    def _hls_url(self, stream_id, filename, query=""):
         """Build the localhost sidecar HLS URL, with read creds in the userinfo.
 
         Same shape as _whep_url -- httpx turns the userinfo into a Basic header
         for the sidecar's read/playback user.
         """
         cred = f"{_SIDECAR_USER}:{self._auth_pass}@" if self._auth_pass else ""
-        return f"http://{cred}{_HLS_HOST}:{_HLS_PORT}/{stream_id}/{filename}"
+        url = f"http://{cred}{_HLS_HOST}:{_HLS_PORT}/{stream_id}/{filename}"
+        return f"{url}?{query}" if query else url
 
-    async def _hls_stream_response(self, url):
+    def _hls_session_client(self):
+        """The shared client for the sidecar HLS hop. See __init__ for why.
+
+        Redirects are followed because MediaMTX's cookie check IS a redirect;
+        capped low because the only legitimate one is that single same-host hop
+        and anything further is a sidecar we no longer recognise.
+        """
+        if self._hls_client is None:
+            self._hls_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0, read=30.0),
+                follow_redirects=True,
+                max_redirects=3,
+            )
+        return self._hls_client
+
+    async def _hls_stream_response(self, url, token=""):
         """Pass an HLS playlist or segment back to the viewer.
+
+        A playlist is read whole and rewritten so the token reaches everything
+        the player follows out of it; a segment is passed through untouched.
+        Playlists are small and the player is waiting on them either way.
 
         Streamed rather than buffered because a low-latency playlist request is
         one MediaMTX deliberately holds open until the next part exists, and a
@@ -1484,16 +1598,14 @@ class VideoPanelPlugin:
         The read timeout is generous for that reason; the connect timeout is
         not, because the sidecar is on loopback.
         """
-        client = httpx.AsyncClient(timeout=httpx.Timeout(5.0, read=30.0))
+        client = self._hls_session_client()
         try:
             upstream = await client.send(client.build_request("GET", url), stream=True)
         except httpx.HTTPError as exc:
-            await client.aclose()
             raise HTTPException(502, f"Could not reach the video stream: {exc}")
         if upstream.status_code != 200:
             status = upstream.status_code
             await upstream.aclose()
-            await client.aclose()
             # 404 while the source spins up is normal and not worth a 502: the
             # player retries, and MediaMTX starts an on-demand source on the
             # first request.
@@ -1504,17 +1616,29 @@ class VideoPanelPlugin:
                 else f"Video stream returned HTTP {status}.",
             )
 
+        content_type = upstream.headers.get("content-type", "application/octet-stream")
+        if token and "mpegurl" in content_type.lower():
+            try:
+                body = await upstream.aread()
+            finally:
+                await upstream.aclose()
+            return Response(
+                content=_rewrite_playlist(body.decode("utf-8", "replace"), token),
+                media_type=content_type,
+                headers={"Cache-Control": "no-store"},
+            )
+
         async def _pump():
             try:
                 async for chunk in upstream.aiter_raw():
                     yield chunk
             finally:
+                # Only the response. The client is shared and outlives it.
                 await upstream.aclose()
-                await client.aclose()
 
         return StreamingResponse(
             _pump(),
-            media_type=upstream.headers.get("content-type", "application/octet-stream"),
+            media_type=content_type,
             # Playlists change every part; segments are named uniquely and are
             # gone shortly after. Nothing here is worth a cache.
             headers={"Cache-Control": "no-store"},

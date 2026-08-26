@@ -242,6 +242,11 @@ A remote picture is a second or two behind a local one. That is the nature of
 HLS and is fine for a confidence monitor; it is not intended for anything where
 you are reacting to what you see.
 
+Remote viewing asks the server for a small file several times a second, which
+is much busier than an ordinary page. If a space has a rate limit set low for
+its size, remote tiles are the first thing to hit it, and they show a
+connection error rather than a picture.
+
 ## Troubleshooting
 
 - **Plugin shows Error on start:** The MediaMTX helper could not start. Check the

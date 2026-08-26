@@ -356,6 +356,20 @@
   // WebView need Media Source Extensions driven by a library. hls.js is loaded
   // from our own panel folder rather than a CDN, because the rooms this runs in
   // routinely have no route to the internet.
+  //
+  // WHICH of those a browser is cannot be asked with canPlayType. Chrome, Edge
+  // and Firefox all answer 'maybe' for the HLS MIME types and then cannot play
+  // one -- so trusting it sent every desktop browser down the native path,
+  // where it fetched playlists and segments, decoded nothing, and left a
+  // spinner up forever. Media Source Extensions are the honest test: where they
+  // exist, hls.js works, and where they do not the browser is an iPhone or iPad,
+  // which plays HLS natively and better. Checked before the library is fetched
+  // so a phone never downloads 385 KB to be told it cannot use it.
+  function mseAvailable() {
+    return typeof window.MediaSource !== 'undefined'
+      && typeof window.MediaSource.isTypeSupported === 'function';
+  }
+
   function loadHlsLib() {
     if (window.Hls) return Promise.resolve(window.Hls);
     if (hlsLibPromise) return hlsLibPromise;
@@ -387,11 +401,16 @@
     imgEl.hidden = true;
     const wanted = streamId;
     try {
-      // Safari (and the iOS WebView) play HLS natively and do it better than
-      // MSE does — lower power, hardware pipeline. Use it where it exists.
-      if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-        videoEl.src = hlsUrl();
-        videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
+      // No Media Source Extensions: an iPhone or iPad, where the native player
+      // is both the only option and the better one — lower power, hardware
+      // pipeline.
+      if (!mseAvailable()) {
+        if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+          videoEl.src = hlsUrl();
+          videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
+        } else {
+          showOverlay({ spinner: false, text: 'This browser cannot play remote video.', retry: false });
+        }
         return;
       }
       const Hls = await loadHlsLib();

@@ -1526,3 +1526,74 @@ def test_a_standalone_panel_can_reach_the_new_routes():
     assert "GET /hls/*" in _PANEL_PATHS
     # Media routes only. Nothing that writes a stream is reachable this way.
     assert not any("streams" in entry for entry in _PANEL_PATHS)
+
+
+# ── HLS through the tunnel: what a player derives from a playlist ──
+#
+# None of this reaches a panel in the room -- that one plays over WebRTC and
+# never asks for a playlist. It is the remote viewer's whole path, and it was
+# broken in three independent places at once, so each gets its own case.
+
+
+def test_the_token_reaches_every_url_a_player_follows():
+    """A relative URI REPLACES the query of the document it came from.
+
+    So a token put on the playlist request reaches nothing after it, and on an
+    instance with a password every media playlist and every segment is a 401 --
+    which is every instance in the field.
+    """
+    from integrations.video_panel.video_panel_plugin import _rewrite_playlist
+
+    playlist = (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:9\n"
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",URI="audio2_stream.m3u8?session=abc"\n'
+        "#EXT-X-STREAM-INF:BANDWIDTH=2375980\n"
+        "video1_stream.m3u8?session=abc\n"
+    )
+    out = _rewrite_playlist(playlist, "tok123")
+
+    assert 'URI="audio2_stream.m3u8?session=abc&_plugin_token=tok123"' in out
+    assert "video1_stream.m3u8?session=abc&_plugin_token=tok123" in out
+    # The directives themselves are untouched: a playlist is parsed strictly.
+    assert "#EXT-X-VERSION:9" in out
+    assert "#EXT-X-STREAM-INF:BANDWIDTH=2375980" in out
+
+
+def test_a_uri_with_no_query_of_its_own_gets_a_question_mark():
+    from integrations.video_panel.video_panel_plugin import _rewrite_playlist
+
+    out = _rewrite_playlist("#EXTM3U\nseg0.mp4\n", "tok")
+    assert "seg0.mp4?_plugin_token=tok" in out
+
+
+def test_an_open_instance_leaves_the_playlist_exactly_as_it_came():
+    """No password means no token, and a playlist we do not need to touch is
+    one we must not touch."""
+    from integrations.video_panel.video_panel_plugin import _rewrite_playlist
+
+    playlist = "#EXTM3U\nvideo1_stream.m3u8?session=abc\n"
+    assert _rewrite_playlist(playlist, "") == playlist
+
+
+def test_our_token_is_not_forwarded_to_the_sidecar():
+    """It is our credential and MediaMTX has no use for it. Everything else in
+    the query is the sidecar's and has to survive."""
+    from integrations.video_panel.video_panel_plugin import _split_plugin_token
+
+    query, token = _split_plugin_token("session=abc&_plugin_token=secret&_HLS_msn=7")
+    assert token == "secret"
+    assert "secret" not in query
+    assert "session=abc" in query
+    assert "_HLS_msn=7" in query
+
+
+def test_the_upstream_query_is_carried_through():
+    """MediaMTX puts the HLS session in the query, and under lowLatency the
+    part requests carry _HLS_msn / _HLS_part -- which IS the low latency."""
+    plugin = VideoPanelPlugin()
+    plugin._auth_pass = ""
+    url = plugin._hls_url("cam1", "video1_stream.m3u8", "session=abc&_HLS_part=3")
+    assert url.endswith("/cam1/video1_stream.m3u8?session=abc&_HLS_part=3")
+    # And an empty query leaves no dangling separator.
+    assert plugin._hls_url("cam1", "index.m3u8", "").endswith("/cam1/index.m3u8")

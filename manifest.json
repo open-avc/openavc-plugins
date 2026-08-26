@@ -58,16 +58,16 @@
     "video_panel": {
       "files": {
         "integrations/video_panel/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
-        "integrations/video_panel/README.md": "e6071320908d83ed694422e6ee23205a375a9fa78e03ffdd2ba882b5b006d654",
+        "integrations/video_panel/README.md": "5875154a159f157e55937b0f571e5dc55f35e39fe54d640f5a9ec5ca62036154",
         "integrations/video_panel/panel/hls.light.min.js": "839aa4ef944a01ed62b07f0f5deeb323732e8fc0e93f1d725c01e73dc2d615b1",
         "integrations/video_panel/panel/hls.light.min.js.LICENSE": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
-        "integrations/video_panel/panel/video_stream.js": "fffd18c0f2f373fac145b1e9ceeecf3fe4e07387758c955dc11d576396a91359",
+        "integrations/video_panel/panel/video_stream.js": "8f28aa3a105b288db37e4bd1e895b84e515548f17dc296c3a7464a20f6223d43",
         "integrations/video_panel/plugin.json": "558c739bcc0d4a6b33970d71642b2a3f87c3fee9953602d9ef85a7fec6315c74",
         "integrations/video_panel/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4",
         "integrations/video_panel/transcode.py": "ff5a268e47dd0ef899746d8043ad3a9cf95ff0b4ffcb98b1075136537c8ba80e",
-        "integrations/video_panel/video_panel_plugin.py": "e3186a277265309f3dbfde241c24a344058fa2440c5b3c2fc8e8111b8c7cfd43"
+        "integrations/video_panel/video_panel_plugin.py": "0e8ccf9a99000c06679786c7760c9441c07c77b2e63d3022ce28ddb74c00e908"
       }
     }
   }
