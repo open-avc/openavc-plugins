@@ -97,6 +97,23 @@ _PANEL_PATHS = (
     "GET /hls/*",
 )
 
+# The routes that carry a stream rather than an answer, so the platform puts
+# them on its media budget instead of the one sized for a person clicking.
+# A low-latency HLS tile re-asks its playlist for every part and fetches
+# every part -- about 390 requests a minute, against a standard 60 -- so
+# without this the first remote viewer 429s within seconds and gets a
+# connection error where the picture should be.
+#
+# NOT the same list as _PANEL_PATHS even though it looks like it. That one
+# says who may reach a route; this says how much of it is normal. /delivery
+# is on that list and not this one: it is asked once per playback and is an
+# ordinary call.
+_MEDIA_PATHS = (
+    "/whep/*",
+    "GET /mjpeg/*",
+    "GET /hls/*",
+)
+
 # HLS playlist and segment names MediaMTX generates. Kept to one flat segment
 # with no dots-in-a-row so nothing can climb out of the stream's own path.
 _HLS_FILE_RE = re.compile(r"[A-Za-z0-9_-]+\.(m3u8|mp4|ts)")
@@ -528,9 +545,22 @@ class VideoPanelPlugin:
                     f"within {int(_READY_TIMEOUT)}s"
                 )
             await self.api.state_set("running", True)
-            self.api.register_router(
-                self._build_router(), panel_paths=list(_PANEL_PATHS)
-            )
+            # media_paths arrived in platform 0.31.0. Asked for by signature
+            # rather than by version, and rather than by catching the TypeError
+            # an older platform would raise -- the router is built before this
+            # and a TypeError out of THAT would look identical.
+            #
+            # Feature-detected instead of gated because the plugin has to stay
+            # installable: an older platform simply rate-limits remote video,
+            # which is the state it was already in, and a panel in the room
+            # never touches these routes at all.
+            import inspect
+
+            router = self._build_router()
+            kwargs = {"panel_paths": list(_PANEL_PATHS)}
+            if "media_paths" in inspect.signature(self.api.register_router).parameters:
+                kwargs["media_paths"] = list(_MEDIA_PATHS)
+            self.api.register_router(router, **kwargs)
             await self._load_streams()
             await self._publish_streams()
             await self._setup_discovery()

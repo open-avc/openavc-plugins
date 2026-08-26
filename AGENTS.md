@@ -448,6 +448,17 @@ api.register_router(router)
 # min_openavc_version >= 0.24.0.
 #     api.register_router(router, panel_paths=["/whep/*", "GET /mjpeg/*"])
 
+# Optional media_paths keyword (added in platform 0.31.0): mark ext routes
+# that carry a continuous media stream so they land on the rate limiter's
+# media budget (3000/min) instead of its standard one (60/min). One
+# low-latency HLS tile spends about 390 requests a minute, so an undeclared
+# media route 429s within seconds of the first viewer and the panel shows a
+# connection error instead of a picture. Same pattern shape as panel_paths;
+# the two are separate lists because they answer different questions -- who
+# may reach it, versus how much of it is normal. The media budget is large
+# but finite and changes nothing about who may reach the route.
+#     api.register_router(router, panel_paths=[...], media_paths=["GET /hls/*"])
+
 # Proxy an incoming request to another URL (requires: http_endpoints)
 # Forwards method, body, query, and headers; refuses internal/loopback hosts
 # unless allow_internal=True (explicit opt-in for a plugin's own localhost
