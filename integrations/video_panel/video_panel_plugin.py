@@ -194,7 +194,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.15.0",
+        "version": "0.16.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -758,7 +758,7 @@ class VideoPanelPlugin:
                 # A page is built long before the room is powered up, and a
                 # camera that is off today is still the camera the page is for.
                 entry["status"] = d["status"]
-                entry["detail"] = _OFFLINE_DETAIL
+                entry["detail"] = d.get("detail") or _OFFLINE_DETAIL
             listing.append(entry)
         for sid, u in self._unusable.items():
             if sid in configured_ids:
@@ -926,6 +926,11 @@ class VideoPanelPlugin:
             # cleared on a disconnect, so without this an unplugged encoder
             # sits in the picker looking exactly like a working one.
             "device.*.connected",
+            # And the same question one level down. A frame stays connected
+            # while one of its encoders goes dark, so the device key never
+            # moves and this is the only thing that says anything happened.
+            "device.*.online",
+            "device.*.offline_detail",  # the child half of it; see _unreachable_detail
         ):
             await self.api.state_subscribe(pattern, self._on_discovery_change)
         await self._rebuild_discovered()
@@ -963,6 +968,7 @@ class VideoPanelPlugin:
             scopes.add(key[: -len(".preview_status")])
 
         connected = await self._connected_devices()
+        children = await self._online_children()
         discovered, unusable = {}, {}
         for prefix in sorted(scopes):
             raw = urls.get(f"{prefix}.preview_url")
@@ -971,6 +977,7 @@ class VideoPanelPlugin:
             status = raw.strip() if isinstance(raw, str) else ""
             device_id = self._device_of(prefix)
             sid = self._discovered_stream_id(prefix)
+            reachable = await self._scope_reachable(prefix, connected, children)
 
             if url and status in ("", "ready"):
                 declared = await self.api.state_get(f"{prefix}.preview_format")
@@ -995,16 +1002,18 @@ class VideoPanelPlugin:
                     "group": await self._device_label(device_id),
                     # Offline is decided here, not by the driver: it is the one
                     # thing about a source that the platform already knows and
-                    # no driver reports.
-                    "status": "" if connected.get(device_id, True) else "offline",
+                    # no driver reports. "Here" means the sub-unit as well as
+                    # the box -- one encoder on a sixteen-encoder frame going
+                    # dark is the common case, and the frame stays connected
+                    # right through it.
+                    "status": "" if reachable else "offline",
+                    "detail": "" if reachable else await self._unreachable_detail(prefix),
                 }
                 continue
 
             if not status:
                 continue  # no stream and nothing to say: not a source at all
-            offline_ranks_below = (
-                connected.get(device_id, True) or status == "needs_setup"
-            )
+            offline_ranks_below = reachable or status == "needs_setup"
             unusable[sid] = {
                 "label": await self._discovery_label(prefix),
                 "device": device_id,
@@ -1016,7 +1025,7 @@ class VideoPanelPlugin:
                 "detail": (
                     await self._text(f"{prefix}.preview_status_detail")
                     if offline_ranks_below
-                    else _OFFLINE_DETAIL
+                    else await self._unreachable_detail(prefix)
                 ),
                 "setup_field": await self._text(f"{prefix}.preview_setup_field"),
             }
@@ -1034,10 +1043,62 @@ class VideoPanelPlugin:
         ).items():
             parts = key.split(".")
             # Only the DEVICE's own key. A child entity has an `online` of its
-            # own and this is not it.
+            # own, read separately below -- the two answer different questions
+            # and a frame full of encoders answers the device one for all of
+            # them at once.
             if len(parts) == 3:
                 found[parts[1]] = bool(value)
         return found
+
+    async def _online_children(self):
+        """child scope -> whether that sub-unit is answering.
+
+        A frame with sixteen encoders is ONE connected device. Reading only the
+        device's `connected` made every encoder on it look fine, including the
+        one somebody had just unplugged: its row stayed in the picker with
+        nothing to say, and a tile pointed at it reconnected forever to a
+        source that had gone. The child's own `online` is the only key that
+        knows, and it is the same key the device page draws its red dot from.
+        """
+        found = {}
+        for key, value in (await self.api.state_get_pattern("device.*.online")).items():
+            # device.<id>.<type>.<local id>.online -- five parts. Nothing else
+            # is a child, and the device's own reachability is `connected`.
+            if key.count(".") == 4:
+                found[key[: -len(".online")]] = bool(value)
+        return found
+
+    async def _scope_reachable(self, prefix, connected, children):
+        """Whether the thing at this scope can be reached at all right now.
+
+        A child is unreachable when it says so OR when the device carrying it
+        is down -- an encoder on a frame we have lost contact with is not
+        online just because the last poll before the link dropped said it was.
+        """
+        device_id = self._device_of(prefix)
+        if not connected.get(device_id, True):
+            return False
+        return children.get(prefix, True)
+
+    async def _unreachable_detail(self, prefix):
+        """The sentence for a source that cannot be reached.
+
+        A CHILD's own `offline_detail` is used when it has one: that vocabulary
+        is written for whoever is standing in front of the gear ("Not
+        answering. Check that it has power and a network connection."), and it
+        names the sub-unit rather than the frame it is plugged into.
+
+        A DEVICE's `offline_detail` is deliberately NOT used, even though it is
+        sitting right there. It is written for the person configuring the
+        system -- "Install it and make sure it's on the system PATH", "Wrong
+        transport or protocol for this device?" -- and a wall panel is the last
+        place that belongs. Same key name, different reader.
+        """
+        if prefix.count(".") == 3:  # device.<id>.<type>.<local id>
+            detail = await self._text(f"{prefix}.offline_detail")
+            if detail:
+                return detail
+        return _OFFLINE_DETAIL
 
     @staticmethod
     def _device_of(prefix):

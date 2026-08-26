@@ -798,6 +798,97 @@ async def test_an_offline_device_is_marked_and_stays_pickable(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_one_encoder_going_dark_on_a_live_frame_is_marked(monkeypatch):
+    """The frame is ONE connected device carrying many encoders.
+
+    Unplug one and the device's `connected` never moves -- so reading only
+    that key showed the dead encoder exactly like its healthy neighbour, and a
+    tile pointed at it reconnected to nothing forever. The sub-unit's own
+    `online` is the only key that knows.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.chazy.name": "Encoders",
+        "device.chazy.connected": True,
+        "device.chazy.encoder.001.preview_url": "http://169.254.10.1:8080/?action=stream",
+        "device.chazy.encoder.001.preview_format": "mjpeg",
+        "device.chazy.encoder.001.label": "Podium PC",
+        "device.chazy.encoder.001.online": False,
+        "device.chazy.encoder.001.offline_detail":
+            "Not answering. Check that it has power and a network connection.",
+        "device.chazy.encoder.002.preview_url": "http://169.254.10.2:8080/?action=stream",
+        "device.chazy.encoder.002.preview_format": "mjpeg",
+        "device.chazy.encoder.002.label": "Rear Camera",
+        "device.chazy.encoder.002.online": True,
+    })
+    await plugin._rebuild_discovered()
+
+    listing = json.loads(api.state["stream_ids"])
+    dark = next(e for e in listing if e.get("value") == "auto-chazy-encoder-001")
+    assert dark["status"] == "offline"
+    # The child's own sentence, not the generic one about the device.
+    assert dark["detail"].startswith("Not answering")
+    # Still pickable: the encoder is coming back, and the page is for it.
+    assert dark["value"] == "auto-chazy-encoder-001"
+
+    healthy = next(e for e in listing if e.get("value") == "auto-chazy-encoder-002")
+    assert "status" not in healthy, "its neighbour must not be marked with it"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_child_of_a_lost_frame_is_offline_whatever_it_last_said(monkeypatch):
+    """`online: True` is only ever as fresh as the last poll before the link
+    dropped. When the frame is gone, so is everything on it."""
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.chazy.connected": False,
+        "device.chazy.encoder.001.preview_url": "http://169.254.10.1:8080/?action=stream",
+        "device.chazy.encoder.001.preview_format": "mjpeg",
+        "device.chazy.encoder.001.online": True,
+    })
+    await plugin._rebuild_discovered()
+
+    row = next(
+        e for e in json.loads(api.state["stream_ids"])
+        if e.get("value") == "auto-chazy-encoder-001"
+    )
+    assert row["status"] == "offline"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_devices_own_offline_detail_never_reaches_a_panel(monkeypatch):
+    """Same key name at the device level, written for a different reader.
+
+    "Install it and make sure it's on the system PATH" is for whoever is
+    configuring the system. A wall panel gets the plain sentence instead.
+    """
+    client, plugin, *_ = _crud_client(monkeypatch)
+    api = plugin.api
+    api.state.update({
+        "device.cam.connected": False,
+        "device.cam.offline_detail":
+            "Required client not found. Install it and make sure it's on the "
+            "system PATH.",
+        "device.cam.preview_url": "rtsp://169.254.10.9/stream",
+        "device.cam.preview_format": "rtsp",
+    })
+    await plugin._rebuild_discovered()
+
+    row = next(
+        e for e in json.loads(api.state["stream_ids"])
+        if e.get("value") == "auto-cam"
+    )
+    assert row["status"] == "offline"
+    assert "system PATH" not in row["detail"]
+    assert "not connected" in row["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 async def test_a_missing_setting_outranks_an_unreachable_device(monkeypatch):
     """The port can be typed with the device switched off, so say that instead.
 

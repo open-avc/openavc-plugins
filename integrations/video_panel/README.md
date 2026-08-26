@@ -252,6 +252,10 @@ you are reacting to what you see.
   `plugin.video_panel.streams.<stream_id>` in the State view.
 - **Video works locally but not from another device:** Make sure UDP port 8189 is
   open between the panel and the server.
+- **One encoder is marked offline while the rest of the frame is fine:** That
+  encoder is not answering. The frame it is plugged into is still connected, so
+  the reason shown comes from the encoder itself. It is still selectable, and
+  the tile picks it up again when it comes back.
 - **A discovered encoder shows an error instead of video:** The OpenAVC server
   can't reach the encoder's preview stream. Confirm the server has a route to the
   AV/video network (often a second network connection), since that's usually
