@@ -659,12 +659,17 @@ EXTENSIONS = {
             "id": "mqtt_monitor",
             "label": "MQTT Monitor",       # Sidebar label
             "icon": "activity",             # Lucide icon name
-            "renderer": "state_table",      # surface | state_table | log
+            "renderer": "state_table",      # surface | state_table | log | video_streams
             "state_pattern": "plugin.mqtt.*",  # For state_table renderer
         },
     ],
 }
 ```
+
+`video_streams` is a screen the IDE ships rather than one the plugin draws
+(the streams REST client is already part of the IDE). Declaring it is what puts
+Video Streams in the sidebar; a system without the plugin gains no entry. It
+takes no other fields, and only `video_panel` has a reason to ask for it.
 
 ### 7.3 Device Panels
 
@@ -808,7 +813,7 @@ Each param entry supports the following fields:
 | `default` | No | Initial value when a new step is added. |
 | `min`, `max`, `step` | No | Numeric input constraints. |
 | `options` | For `select` | Array of `{value, label}` for static dropdowns. |
-| `options_source` | For `select` | State key that holds a JSON list, populated dynamically by the plugin. The list may be plain strings (`["a","b"]`) or `{value, label}` objects. Either `options` or `options_source` is required for `select`. |
+| `options_source` | For `select` | State key that holds a JSON list, populated dynamically by the plugin. The list may be plain strings (`["a","b"]`) or `{value, label}` objects. Either `options` or `options_source` is required for `select`. A row may also say more than "here is a choice" — see below. |
 
 Field types `text`, `integer`, `float`, and `select` also support **dynamic values**: a user can switch the field into "$var.foo" mode and the macro engine will resolve it from state at runtime before invoking the handler.
 
@@ -1676,6 +1681,42 @@ class OccupancySensorPlugin:
 | Handler is `def`, not `async def` | All macro action handlers must be coroutines. |
 | `handler` field references a missing method | The method must exist on the plugin class with the exact name. |
 | `select` param has no `options` or `options_source` | One or the other is required for `select` type. |
+
+### Option rows that explain themselves
+
+A row in an `options_source` list may carry more than `value` and `label`. All
+of it is optional, and a consumer that predates any of it ignores it:
+
+| Key | Meaning |
+|-----|---------|
+| `group` | A heading to list this row under, e.g. the device it came from. |
+| `status` | Marks the row. `offline` / `needs_setup` / `unavailable`, or your own word (shown as published). Absent means nothing to say. |
+| `detail` | One sentence about that status, in your own words. |
+| `setup` | `{"device": "<device id>", "field": "<config field>"}` — a device config field that would make this row usable. The picker offers that exact field inline, looked up in the driver's own `config_schema` for its label and help, and writes the value back to the device. |
+| `id` | Identity for a row that has no `value` (below). |
+
+**Leave `value` off when the row cannot be chosen.** That is the whole mechanism
+for saying "this source exists and here is why you cannot use it yet" without
+letting somebody build a page around something that can never work. The shared
+option parser drops any entry with no `value`, so a picker that predates this
+shows exactly what it showed before, which is why none of it needs a version
+gate.
+
+```python
+await self.api.state_set("stream_ids", json.dumps([
+    {"value": "cam-1", "label": "Lectern", "group": "Encoders"},
+    {"value": "cam-2", "label": "Rear", "group": "Encoders",
+     "status": "offline", "detail": "This device is not connected right now."},
+    {"id": "out-3", "label": "vMix Output 3", "group": "vMix",
+     "status": "needs_setup",
+     "detail": "SRT is running on Output 3, but vMix does not report which port.",
+     "setup": {"device": "video_1", "field": "srt_port_3"}},
+]))
+```
+
+A source that cannot be drawn is worth listing with its reason. Hiding it makes
+it indistinguishable from a room that has none, which is the one thing a picker
+must never do.
 | Manually resolving `$var.foo` inside the handler | The macro engine resolves dynamic params before calling your handler. Just use `params[key]`. |
 
 ### Script API
