@@ -136,7 +136,7 @@ Declare only the capabilities your plugin actually uses. Each unlocks specific A
 | `event_subscribe` | `event_subscribe()` |
 | `macro_execute` | `macro_execute()` |
 | `device_command` | `device_command()` |
-| `network_listen` | Plugin may open network ports; also gates `mdns_browse(service_types, duration=5.0)` (LAN service discovery via the platform's mDNS listener; feature-detect with `getattr` — added in platform 0.16.0) |
+| `network_listen` | Plugin may open network ports; also gates `mdns_browse(service_types, duration=5.0)` (LAN service discovery via the platform's mDNS listener; feature-detect with `getattr` — added in platform 0.16.0) and `PLUGIN_INFO["network_ports"]` (below) |
 | `usb_access` | Plugin may access USB devices |
 | `http_endpoints` | `register_router()` — mount HTTP routes under `/api/plugins/<id>/ext/*`; also gates `proxy_to()` (outbound requests) and `viewer_access()` (where a caller is, and what may be sent to them — added in platform 0.31.0; feature-detect with `getattr`) |
 | `guest_endpoints` | `register_guest_router()` — mount **unauthenticated** HTTP routes under `/api/plugins/<id>/guest/*`; also gates `mint_guest_token()`/`verify_guest_token()` and the PLUGIN_INFO `guest_alias` short route (added in platform 0.23.0; see HTTP Endpoints below) |
@@ -1693,6 +1693,40 @@ class OccupancySensorPlugin:
 | `handler` field references a missing method | The method must exist on the plugin class with the exact name. |
 | `select` param has no `options` or `options_source` | One or the other is required for `select` type. |
 | Manually resolving `$var.foo` inside the handler | The macro engine resolves dynamic params before calling your handler. Just use `params[key]`. |
+
+### Ports a plugin needs open (platform 0.31.0)
+
+If your plugin bundles a sidecar that listens on a port, **declare it** — nothing
+will open it for you. The installers cannot: Windows scopes its firewall rule to
+`openavc-server.exe` by program and a sidecar is a different executable, and the
+Linux helper opened TCP only. You will not notice in development, because
+loopback never consults a firewall. It shows up the first time a real panel on a
+real network connects, and on Windows it shows up silently.
+
+```python
+PLUGIN_INFO = {
+    ...
+    "capabilities": ["network_listen"],   # required for this
+    "network_ports": [
+        {"port": 8189, "protocol": "udp",
+         "reason": "WebRTC video from the sidecar to panels on the network"},
+    ],
+}
+```
+
+| Field | |
+|-------|-|
+| `port` | 1-65535. Ports belonging to the host (22, 3389, 445, ...) are refused, so a typo cannot open SSH. |
+| `protocol` | `tcp` (default) or `udp`. Nothing else. |
+| `reason` | **Required.** What an administrator reads when they find the port open and want to know if it can be closed. |
+
+A malformed entry fails the manifest check rather than being quietly dropped —
+a plugin that asked for a port, did not get it, and then failed on a network
+nobody can see is the outcome this avoids. The rule is removed when the plugin
+stops. On Linux the port opens at the next service restart (the firewall helper
+runs before the server, so it acts on what the last run wrote); on Windows the
+server applies it immediately when it has the privilege and logs the exact
+`netsh` command when it does not.
 
 ### Option rows that explain themselves
 

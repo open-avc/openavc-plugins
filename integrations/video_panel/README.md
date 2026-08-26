@@ -255,8 +255,13 @@ connection error rather than a picture.
 - **Stream not showing video:** Verify the source URL plays in a tool like VLC, and
   that the username and password are correct. Check
   `plugin.video_panel.streams.<stream_id>` in the State view.
-- **Video works locally but not from another device:** Make sure UDP port 8189 is
-  open between the panel and the server.
+- **Video works locally but not from another device:** UDP port 8189 must be open
+  between the panel and the server. From OpenAVC 0.31.0 the plugin asks for this
+  itself and the server opens it where it has the rights to. On Windows, a server
+  installed as a service does; one run by hand from a terminal does not, and logs
+  the exact command to run as an administrator. On Linux the rule is applied at the
+  next service restart. On an older OpenAVC, or where the server has no rights to
+  the firewall, open it by hand.
 - **One encoder is marked offline while the rest of the frame is fine:** That
   encoder is not answering. The frame it is plugged into is still connected, so
   the reason shown comes from the encoder itself. It is still selectable, and

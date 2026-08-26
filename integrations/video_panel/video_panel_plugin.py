@@ -278,7 +278,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.16.0",
+        "version": "0.17.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -287,6 +287,18 @@ class VideoPanelPlugin:
         # 0.24.0: register_router(panel_paths=...) — older platforms fail
         # start() on the unknown keyword.
         "min_openavc_version": "0.25.0",
+        # The sidecar binds this for WebRTC media, and it is the ONLY path a
+        # panel in the room has. Neither installer covered it: Windows scopes
+        # its firewall rule to openavc-server.exe and this port belongs to
+        # mediamtx.exe, and the Linux helper opened TCP only. Declared here so
+        # the platform opens it, and closes it again when this plugin is gone.
+        "network_ports": [
+            {
+                "port": 8189,
+                "protocol": "udp",
+                "reason": "WebRTC video from the sidecar to panels on the network",
+            },
+        ],
         "capabilities": [
             "state_read",
             "state_write",
