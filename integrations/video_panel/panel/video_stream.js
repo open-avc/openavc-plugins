@@ -37,6 +37,11 @@
   const STATE_PREFIX = 'plugin.video_panel.';
   const RECONNECT_BASE_MS = 1000;
   const RECONNECT_CAP_MS = 10000;
+  // Said only when a source is unplayable and nobody supplied a sentence. Every
+  // driver that uses the status convention supplies one, so this is the floor
+  // rather than the norm.
+  const NO_STREAM_TEXT = 'This source has no stream right now.';
+  const SOURCE_GONE_TEXT = 'This source is no longer available.';
   const PLAYOUT_DELAY_HINT = 0.1; // seconds; small jitter buffer for LAN latency
 
   // The iframe is served at <base>/api/plugins/video_panel/panel/video_stream.html.
@@ -63,6 +68,16 @@
   let channel = '';
   let selectionKey = ''; // plugin.video_panel.selection.<channel>, '' when unbound
   let streamListRaw = null;
+  // Why our source cannot be played, as the stream list last said it -- or null
+  // when it can. A source that has lost its stream is not a connection failure
+  // and must not be retried like one: the driver has already said what is
+  // missing and what to do about it, and a spinner throws that away.
+  let blockReason = null;
+  // Whether our id has ever appeared in a published list. Until it has, a list
+  // that does not mention it is "we haven't been told yet", not "it is gone" --
+  // the plugin publishes the configured streams a moment before the discovered
+  // ones, so a panel connecting in that gap must not draw a verdict from it.
+  let seenRow = false;
 
   let pc = null;
   let resourceUrl = null; // the WHEP session resource (PATCH/DELETE target)
@@ -108,12 +123,18 @@
     }
     if (newId !== streamId) {
       streamId = newId;
+      seenRow = false;
       stop();
     }
     streamMode = resolveMeta();
 
     if (!streamId) {
       showOverlay({ spinner: false, text: 'No stream selected' });
+      return;
+    }
+    if (blockReason) {
+      active = false;
+      showOverlay({ spinner: false, text: blockReason, retry: true });
       return;
     }
     active = true;
@@ -149,42 +170,91 @@
     }
   }
 
+  // Our source's row in the cached list: the entry object, `null` when the list
+  // arrived and does not mention us, `undefined` when there is no usable list.
+  //
+  // Matched on `id` as well as `value`, because a source that cannot be played
+  // is published WITHOUT a `value` -- that is how the plugin keeps it out of
+  // pickers while still saying it exists. Matching on `value` alone is exactly
+  // why a tile whose source went away had nothing to read.
+  function listRow() {
+    if (!streamListRaw) return undefined;
+    let list;
+    try {
+      list = JSON.parse(streamListRaw);
+    } catch {
+      return undefined;
+    }
+    if (!Array.isArray(list)) return undefined;
+    return list.find((e) => e && (e.value === streamId || e.id === streamId)) || null;
+  }
+
   // Resolve the current stream's label from the cached list and put it on
-  // screen. Returns the kind the list advertises, which is used only to notice
-  // that something changed — the delivery route decides how we actually play.
+  // screen, and set blockReason from what the list says about it. Returns the
+  // kind the list advertises, which is used only to notice that something
+  // changed — the delivery route decides how we actually play.
   function resolveMeta() {
     let kind = listedKind;
     streamLabel = streamId;
-    if (streamListRaw) {
-      try {
-        const list = JSON.parse(streamListRaw);
-        const found = Array.isArray(list) && list.find((e) => e && e.value === streamId);
-        if (found) {
-          streamLabel = found.label || streamId;
-          if (found.mode) kind = found.mode;
-        }
-      } catch {
-        // keep streamLabel = streamId
-      }
+    const row = listRow();
+    if (row) {
+      seenRow = true;
+      streamLabel = row.label || streamId;
+      if (row.mode) kind = row.mode;
+      const status = typeof row.status === 'string' ? row.status.trim() : '';
+      // No `value` means there is no stream behind the row. A status means the
+      // source is offline, half-configured, or switched off. Either way it
+      // cannot be drawn, and the row carries the sentence that says why.
+      const playable = row.value !== undefined && row.value !== null
+        && (status === '' || status === 'ready');
+      blockReason = playable
+        ? null
+        : ((typeof row.detail === 'string' && row.detail.trim()) || NO_STREAM_TEXT);
+    } else if (row === null && seenRow) {
+      blockReason = SOURCE_GONE_TEXT;
+    } else {
+      blockReason = null;
     }
     labelEl.textContent = streamLabel || '';
     labelEl.hidden = !(config.show_label && streamLabel);
     return kind;
   }
 
+  // Stop playing and say why. Not a failure state: no backoff, no retry timer,
+  // and `active` goes false so nothing schedules one. The list is republished
+  // on every change, so when the missing piece is supplied the tile comes back
+  // on its own without anyone touching the panel.
+  function blockPlayback() {
+    teardown();
+    active = false;
+    showOverlay({ spinner: false, text: blockReason, retry: true });
+  }
+
   function updateLabelFromList(raw) {
     streamListRaw = raw;
+    const wasBlocked = blockReason;
     const nextKind = resolveMeta();
+    const kindChanged = nextKind !== listedKind;
+    listedKind = nextKind;
+
+    if (blockReason) {
+      if (blockReason !== wasBlocked || active) blockPlayback();
+      return;
+    }
+    if (wasBlocked && streamId) {
+      // Whatever was missing has been supplied. Come back by ourselves.
+      active = true;
+      reconnectAttempts = 0;
+      start();
+      return;
+    }
     // The source changed kind under a stable id (a driver republished it with a
     // different preview format). We'd be playing the wrong way, so restart and
     // let the server say how.
-    if (nextKind !== listedKind) {
-      listedKind = nextKind;
-      if (active && streamId) {
-        teardown();
-        reconnectAttempts = 0;
-        start();
-      }
+    if (kindChanged && active && streamId) {
+      teardown();
+      reconnectAttempts = 0;
+      start();
     }
   }
 
@@ -196,11 +266,17 @@
     if (newId === streamId) return;
     teardown();
     streamId = newId;
+    seenRow = false;
     listedKind = resolveMeta();
     streamMode = '';
     if (!streamId) {
       active = false;
       showOverlay({ spinner: false, text: 'No stream selected' });
+      return;
+    }
+    if (blockReason) {
+      active = false;
+      showOverlay({ spinner: false, text: blockReason, retry: true });
       return;
     }
     active = true;
@@ -560,6 +636,13 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    // Re-read the list first. A source that is still missing its stream should
+    // say so again rather than spin, so the button never becomes a lie.
+    resolveMeta();
+    if (blockReason) {
+      showOverlay({ spinner: false, text: blockReason, retry: true });
+      return;
+    }
     active = true;
     pausedByVisibility = false;
     reconnectAttempts = 0;
@@ -611,7 +694,9 @@
       }
     } else if (pausedByVisibility && streamId) {
       pausedByVisibility = false;
-      if (config.reconnect_on_idle !== false) {
+      if (blockReason) {
+        showOverlay({ spinner: false, text: blockReason, retry: true });
+      } else if (config.reconnect_on_idle !== false) {
         active = true;
         reconnectAttempts = 0;
         start();

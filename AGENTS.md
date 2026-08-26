@@ -1681,6 +1681,7 @@ class OccupancySensorPlugin:
 | Handler is `def`, not `async def` | All macro action handlers must be coroutines. |
 | `handler` field references a missing method | The method must exist on the plugin class with the exact name. |
 | `select` param has no `options` or `options_source` | One or the other is required for `select` type. |
+| Manually resolving `$var.foo` inside the handler | The macro engine resolves dynamic params before calling your handler. Just use `params[key]`. |
 
 ### Option rows that explain themselves
 
@@ -1717,7 +1718,15 @@ await self.api.state_set("stream_ids", json.dumps([
 A source that cannot be drawn is worth listing with its reason. Hiding it makes
 it indistinguishable from a room that has none, which is the one thing a picker
 must never do.
-| Manually resolving `$var.foo` inside the handler | The macro engine resolves dynamic params before calling your handler. Just use `params[key]`. |
+
+**A panel element built on the same list has to read those rows too.** The
+picker is not the only reader: a tile already pointed at a source watches the
+list for its own row, and a row that has lost its `value` means the thing it is
+drawing has gone away. Match on `id` as well as `value` or the row is invisible
+to it, and it will sit reconnecting to something that is not there while the
+sentence explaining why is one field away. Stop, say the `detail`, and start
+again by itself when the row comes back -- the list is republished on every
+change, so nobody has to touch the panel.
 
 ### Script API
 

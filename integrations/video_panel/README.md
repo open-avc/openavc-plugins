@@ -52,6 +52,11 @@ properties and pick the stream from the **Stream** list. Other options:
 The element shows a spinner while connecting and a Retry button if the stream
 goes offline. Playback is muted and starts on its own.
 
+If the source itself stops carrying video -- someone turns off the SRT output in
+vMix, an encoder is unplugged, a port is not set yet -- the tile stops and says
+what happened, in the same words the stream list uses. It starts again by itself
+as soon as the source comes back; nobody has to touch the panel.
+
 Video tiles work on any panel, including wall tablets and kiosks on an
 instance that has a password set (OpenAVC 0.24.0 or newer). Managing the
 stream list still requires signing in to the Programmer.
@@ -251,6 +256,10 @@ you are reacting to what you see.
   can't reach the encoder's preview stream. Confirm the server has a route to the
   AV/video network (often a second network connection), since that's usually
   separate from the control network the controller is on.
+- **A tile says the source has no stream:** That sentence comes from the device
+  itself and says what to do. For a vMix output it usually means SRT was turned
+  off, or the SRT Port has not been entered yet. Fix it at the source and the
+  tile comes back on its own.
 - **High CPU use:** An H.265 source is being re-encoded. Switch the source to
   H.264 if possible, or reduce its resolution / frame rate.
 - **"Remote video is not included in this plan":** The space does not have the
