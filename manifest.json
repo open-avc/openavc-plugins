@@ -58,16 +58,16 @@
     "video_panel": {
       "files": {
         "integrations/video_panel/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
-        "integrations/video_panel/README.md": "66242a74140744b42ddba3eebcf32850f1ee7dce6efcb23738862a64160a6689",
+        "integrations/video_panel/README.md": "3dba3a56fc709a0cc6ec0467a28a9711d63c59358036df8ebedaff1399397fa2",
         "integrations/video_panel/panel/hls.light.min.js": "839aa4ef944a01ed62b07f0f5deeb323732e8fc0e93f1d725c01e73dc2d615b1",
         "integrations/video_panel/panel/hls.light.min.js.LICENSE": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
         "integrations/video_panel/panel/video_stream.js": "5ab93037b2610d08608e5ce63ccf08147de02949dde4a7e349b52603671622b1",
-        "integrations/video_panel/plugin.json": "69d94dc747e0cea524585f2d6e52539ddecc16e5d8eec8aa1d8df2d6b0cd20b0",
+        "integrations/video_panel/plugin.json": "656b3cd7b5a344094e01102751abf14310b49d97ceed3bc3fbd4ad826b60fcdd",
         "integrations/video_panel/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4",
         "integrations/video_panel/transcode.py": "ff5a268e47dd0ef899746d8043ad3a9cf95ff0b4ffcb98b1075136537c8ba80e",
-        "integrations/video_panel/video_panel_plugin.py": "aa8104382e4e4ccd9db1bcb5983ab446aa3e8a2ec064c6dc0e367e9677bf4203"
+        "integrations/video_panel/video_panel_plugin.py": "23b2189c7eb8d443eff387c8fcb23259e3923803f8bdc19cef3541e7573aa331"
       }
     }
   }

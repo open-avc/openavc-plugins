@@ -82,6 +82,30 @@ def _committed_sha256(repo_root: Path, rel: Path) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+def _unstaged(repo_root: Path, subdir: str) -> list[str]:
+    """Plugin files whose working tree differs from what would be hashed.
+
+    The hash comes from the index, which is right -- it is the bytes a download
+    receives. What it is not is obvious: a file edited and not staged hashes to
+    its PREVIOUS content, silently, and the manifest that comes out is wrong in
+    exactly the way that makes a plugin uninstallable. Nothing complains,
+    because the file IS in the index; it is just the old one.
+
+    That is not hypothetical. It landed a red CI on 2026-08-25: the manifest was
+    rebuilt before the commit, and the six hashes it wrote were the previous
+    version's.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--name-only", "--", subdir],
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []  # the enumeration above already fails loudly without git
+    return [line for line in out.decode("utf-8").splitlines() if line]
+
+
 def build(repo_root: Path) -> dict:
     index_path = repo_root / "index.json"
     if not index_path.exists():
@@ -95,6 +119,14 @@ def build(repo_root: Path) -> dict:
         rel = entry.get("file")
         if not plugin_id or not rel:
             problems.append(f"index.json entry missing id or file: {entry!r}")
+            continue
+        dirty = _unstaged(repo_root, rel)
+        if dirty:
+            problems.append(
+                f"plugin {plugin_id!r}: edited but not staged, so the manifest "
+                f"would record the PREVIOUS bytes and no download could match "
+                f"them: {', '.join(sorted(dirty))}. Run: git add " + rel
+            )
             continue
         tracked = _tracked_files(repo_root, rel)
         if not tracked:
