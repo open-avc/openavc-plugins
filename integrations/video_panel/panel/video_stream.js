@@ -303,10 +303,12 @@
       const res = await fetch(deliveryUrl(), { headers: authHeaders() });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       delivery = await res.json();
-    } catch {
-      // We could not even ask. That is a connection problem like any other, so
-      // it takes the normal backoff rather than a special message.
-      if (active && streamId === wanted) scheduleReconnect();
+    } catch (err) {
+      // We could not even ask. That is a connection problem like any other and
+      // takes the normal backoff -- but it names the call, because a delivery
+      // fault and a stream fault wear the same spinner, and telling them apart
+      // otherwise needs a debugger attached at the moment it happens.
+      if (active && streamId === wanted) scheduleReconnect('delivery ' + err.message);
       return;
     }
     // The source was switched, or we were stopped, while that was in flight.
@@ -430,13 +432,13 @@
       hlsPlayer = player;
       player.on(Hls.Events.ERROR, (_evt, data) => {
         if (hlsPlayer !== player || !data || !data.fatal) return;
-        if (active) scheduleReconnect();
+        if (active) scheduleReconnect('HLS ' + (data.details || data.type || 'fatal error'));
       });
       player.loadSource(hlsUrl());
       player.attachMedia(videoEl);
       videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
-    } catch {
-      if (active && streamId === wanted) scheduleReconnect();
+    } catch (err) {
+      if (active && streamId === wanted) scheduleReconnect('HLS ' + err.message);
     } finally {
       starting = false;
     }
@@ -494,7 +496,7 @@
         reconnectAttempts = 0;
         hideOverlay();
       } else if (s === 'failed' || s === 'closed' || s === 'disconnected') {
-        if (active) scheduleReconnect();
+        if (active) scheduleReconnect('connection ' + s);
       }
     };
 
@@ -526,7 +528,7 @@
         queuedCandidates = [];
       }
     } catch (err) {
-      if (pc === peer && active) scheduleReconnect();
+      if (pc === peer && active) scheduleReconnect(err.message);
     } finally {
       starting = false;
     }
@@ -549,7 +551,26 @@
     }
   }
 
-  function scheduleReconnect() {
+  // The tile's own account of why there is no picture. Every failure above
+  // funnels through scheduleReconnect, so this is the one place that knows --
+  // and the tile is usually the only witness, because by the time anyone comes
+  // to look the panel has been reloaded and the console went with it. Posting
+  // it puts the reason in plugin state, where it outlives the reload.
+  let reportedReason = '';
+
+  function reportFailure(reason) {
+    // Only the first of a burst: the backoff re-fires the same fault every few
+    // seconds and a state key does not need to hear it twice.
+    if (reason === reportedReason) return;
+    reportedReason = reason;
+    fetch(EXT_BASE + '/report', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ stream_id: streamId, reason: reason }),
+    }).catch(() => { /* best effort: reporting a fault must never cause one */ });
+  }
+
+  function scheduleReconnect(reason) {
     teardown();
     if (!active || reconnectTimer) return;
     const exp = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempts);
@@ -557,7 +578,12 @@
     // hammer the server in lockstep.
     const delay = exp / 2 + Math.random() * (exp / 2);
     reconnectAttempts += 1;
-    showOverlay({ spinner: true, text: 'Reconnecting…', retry: true });
+    if (reason) reportFailure(reason);
+    showOverlay({
+      spinner: true,
+      text: reason ? 'Reconnecting… (' + reason + ')' : 'Reconnecting…',
+      retry: true,
+    });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       start();
@@ -647,6 +673,9 @@
 
   function hideOverlay() {
     overlayEl.hidden = true;
+    // A picture is the only proof the last fault ended, so the next one is
+    // worth posting again even if it reads identically.
+    reportedReason = '';
   }
 
   retryEl.addEventListener('click', () => {
@@ -679,7 +708,7 @@
   });
   imgEl.addEventListener('error', () => {
     if (streamMode === 'mjpeg' && active && imgEl.getAttribute('src')) {
-      scheduleReconnect();
+      scheduleReconnect('no frame from source');
     }
   });
 
@@ -698,7 +727,7 @@
     // Only the native-HLS path reports here; hls.js swallows media errors and
     // reports them on its own ERROR event, handled at the player.
     if (streamMode === 'hls' && active && videoEl.getAttribute('src')) {
-      scheduleReconnect();
+      scheduleReconnect('HLS media error' + (videoEl.error ? ' ' + videoEl.error.code : ''));
     }
   });
 

@@ -213,6 +213,9 @@ software.
 | `plugin.video_panel.error` | string | Last fatal error message (empty when healthy) |
 | `plugin.video_panel.stream_ids` | string | JSON list of `{value, label, mode}` for configured and auto-discovered streams (`mode` is `webrtc` or `mjpeg`) |
 | `plugin.video_panel.streams.<stream_id>` | string | Per-stream state: `idle` or `streaming` |
+| `plugin.video_panel.playback_error` | string | Why a tile last failed to show a picture, as the tile itself reported it (empty when it has since played). Distinct from `error` above, which is the helper process. |
+| `plugin.video_panel.playback_error_stream` | string | The stream id that tile was showing |
+| `plugin.video_panel.playback_error_at` | string | When it was reported, local time |
 | `plugin.video_panel.selection.<channel>` | string | The stream id a channel currently shows. Set it (macro / script / API) to switch any Video Stream element bound to that channel. Empty falls back to the element's fixed Stream. |
 
 ## Events

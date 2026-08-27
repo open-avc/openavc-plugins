@@ -95,6 +95,10 @@ _PANEL_PATHS = (
     "GET /mjpeg/*",
     "GET /delivery/*",
     "GET /hls/*",
+    # The one write a panel may make. It reports why its own tile has no
+    # picture, which no other surface can see: the fault lives in a page that
+    # gets reloaded, and reloading is the first thing anybody tries.
+    "POST /report",
 )
 
 # The routes that carry a stream rather than an answer, so the platform puts
@@ -265,6 +269,13 @@ class StreamIn(BaseModel):
     hardware_accel: str = "auto"  # auto | none | qsv | nvenc | vaapi | v4l2m2m
 
 
+class ReportIn(BaseModel):
+    """A tile's account of why it has no picture, posted when playback fails."""
+
+    reason: str
+    stream_id: str = ""
+
+
 class ProbeIn(BaseModel):
     """Probe payload — tests an RTSP URL before it is saved as a stream."""
 
@@ -278,7 +289,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.17.0",
+        "version": "0.18.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -1472,6 +1483,24 @@ class VideoPanelPlugin:
             if not self._is_known_stream(stream_id):
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
             return self._delivery_for(stream_id, request)
+
+        # Why a tile has no picture, kept where it outlives the tile. Every
+        # failure path in the element ends at the same spinner, so without this
+        # the one fact that identifies the fault -- a 404 from delivery, a
+        # refused WHEP offer, ICE never completing -- exists only in a console
+        # nobody had open, and is gone the moment the panel reloads.
+        @router.post("/report")
+        async def report_failure(body: ReportIn):
+            reason = " ".join(body.reason.split())[:200]
+            stream_id = body.stream_id or ""
+            if stream_id:
+                self._validate_stream_id(stream_id)
+            await self.api.state_set("playback_error", reason)
+            await self.api.state_set("playback_error_stream", stream_id)
+            await self.api.state_set(
+                "playback_error_at", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            )
+            return {"ok": True}
 
         # ── HLS reverse proxy (tunnelled viewers only) ──
         # Playlists and segments are ordinary small GETs, which is the whole
