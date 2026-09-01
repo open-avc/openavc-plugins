@@ -1159,6 +1159,132 @@ async def test_status_poll_restarts_sidecar_when_the_address_moves(tmp_path, mon
     assert plugin._supervisor.restarts == 1
 
 
+# ──── Surviving a MediaMTX crash ────
+
+
+def _reattach_plugin(monkeypatch, tmp_path, streams):
+    """A started plugin with a stubbed MediaMTX API, ready to be crashed."""
+    client, plugin, added, deleted = _crud_client(monkeypatch, {"streams": streams})
+    plugin._auth_pass = "x"
+    plugin._detect_local_ip = lambda: "192.0.2.10"
+    plugin._config_path = tmp_path / "mediamtx.yml"
+    plugin._config_path.write_text(plugin._render_config(), encoding="utf-8")
+
+    async def ready():
+        return True
+
+    monkeypatch.setattr(plugin, "_wait_until_ready", ready)
+    return client, plugin, added, deleted
+
+
+_STREAM = {
+    "stream_id": "front_door", "name": "Front Door",
+    "rtsp_url": "rtsp://cam/1", "username": "", "password": "",
+    "codec_hint": "h264", "transcode": "never", "hardware_accel": "auto",
+}
+_ADD_FRONT_DOOR = ("/v3/config/paths/add/front_door",
+                   {"source": "rtsp://cam/1", "sourceOnDemand": True})
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_crashed_sidecar_comes_back_serving_the_streams(tmp_path, monkeypatch):
+    """MediaMTX crashes, the supervisor respawns it, and the replacement process
+    has an empty path table -- registrations live in the process, not the config
+    file. Nothing else notices: the process is alive so health_check says ok, the
+    status poll gets its 200 and puts `running` back to true, and every stream
+    reads "idle" exactly as it does when nobody is watching. So the tiles are all
+    dead and the plugin looks well. The respawn has to re-register."""
+    _client, plugin, added, _deleted = _reattach_plugin(monkeypatch, tmp_path, [_STREAM])
+    plugin._discovered = {
+        "auto-cam": {"label": "Cam", "url": "rtsp://169.254.5.5/sub", "format": "rtsp"},
+    }
+    plugin._discovered_sidecar = {"auto-cam": "rtsp://169.254.5.5/sub"}
+    added.clear()
+
+    # What the supervisor reports across an unexpected exit and its respawn.
+    await plugin._on_sidecar_status("restarting")
+    assert plugin.api.state["running"] is False
+    assert added == []  # nothing to register against a process that is not there
+    await plugin._on_sidecar_status("running")
+
+    assert _ADD_FRONT_DOOR in added, "the configured stream was not re-registered"
+    assert (
+        "/v3/config/paths/add/auto-cam",
+        {"source": "rtsp://169.254.5.5/sub", "sourceOnDemand": True},
+    ) in added, "the discovered preview was not re-registered"
+    assert plugin.api.state["running"] is True
+    assert plugin.api.state["sidecar"] == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_running_status_that_did_not_follow_a_crash_registers_nothing(
+    tmp_path, monkeypatch
+):
+    """The other direction. The supervisor also reports "running" on the very
+    first start and on a bounce we asked for, and both of those already register
+    every path themselves -- once from start(), once from the restart. Treating
+    every "running" as a re-attach would re-POST every path a second time, which
+    MediaMTX rejects, so it would fill the log with failures at every startup."""
+    _client, plugin, added, _deleted = _reattach_plugin(monkeypatch, tmp_path, [_STREAM])
+    added.clear()
+
+    await plugin._on_sidecar_status("running")
+    assert added == []
+    assert plugin.api.state["sidecar"] == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_circuit_broken_sidecar_is_not_re_attached(tmp_path, monkeypatch):
+    """"failed" is the crash-loop breaker: there is no replacement process to
+    register against, and the next "running" can only come from a deliberate
+    restart that registers on its own."""
+    _client, plugin, added, _deleted = _reattach_plugin(monkeypatch, tmp_path, [_STREAM])
+    added.clear()
+
+    await plugin._on_sidecar_status("restarting")
+    await plugin._on_sidecar_status("failed")
+    assert plugin.api.state["running"] is False
+    await plugin._on_sidecar_status("running")
+    assert added == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_the_supervisor_really_drives_the_re_attach(tmp_path, monkeypatch):
+    """The wiring, through a real SidecarSupervisor and a real child process:
+    a first run that exits non-zero and a second that stays up. Pinned end to
+    end because the whole defect was a callback nobody was listening to."""
+    monkeypatch.setattr(sidecar_mod, "_BACKOFF_SCHEDULE", (0.01,))
+    _client, plugin, added, _deleted = _reattach_plugin(monkeypatch, tmp_path, [_STREAM])
+
+    # Crashes once, then stays up: the flag file is what tells the two apart.
+    flag = tmp_path / "spawned-once"
+    child = [
+        sys.executable, "-c",
+        "import os, sys, time\n"
+        "flag = sys.argv[1]\n"
+        "if os.path.exists(flag):\n"
+        "    time.sleep(60)\n"
+        "open(flag, 'w').close()\n"
+        "sys.exit(7)\n",
+        str(flag),
+    ]
+    sup = SidecarSupervisor(child, name="crash-once", on_status=plugin._on_sidecar_status)
+    plugin._supervisor = sup
+    await sup.start()
+    try:
+        assert await _wait_for(lambda: _ADD_FRONT_DOOR in added, timeout=5.0), (
+            "the respawned sidecar was never re-registered"
+        )
+        assert sup.running
+        assert plugin.api.state["running"] is True
+    finally:
+        await sup.stop()
+
+
 # ──── SRT ingest, and learning what a source actually carries ────
 
 

@@ -289,7 +289,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.18.0",
+        "version": "0.19.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -516,6 +516,11 @@ class VideoPanelPlugin:
         # not log on every rebuild.
         self._warned_format = set()
         self._rebuild_task = None  # debounce handle for discovery rebuilds
+        # True between the supervisor announcing a crash-restart and the
+        # replacement process coming up. What comes back is a NEW MediaMTX with
+        # an empty path table, so that next "running" is a re-attach, not a
+        # no-op.
+        self._sidecar_crashed = False
         self._detected_ip = ("", 0.0)  # (auto-detected LAN address, at monotonic)
         self._rendered_host = None  # LAN address baked into the sidecar config
 
@@ -621,6 +626,18 @@ class VideoPanelPlugin:
         await self.api.state_set("sidecar", status)
         if status in ("restarting", "failed"):
             await self.api.state_set("running", False)
+            # "restarting" means the supervisor is about to spawn a replacement
+            # process. Path registrations live in the MediaMTX process, not in
+            # its config file, so that replacement comes up serving nothing --
+            # and nothing else would ever notice: the process is alive, so
+            # health_check reports ok, the status poll gets a 200 and puts
+            # `running` back to true, and every stream reads "idle" exactly as
+            # it does when nobody is watching. Every tile is dead and the whole
+            # plugin looks well. Remember the crash here; re-attach below.
+            self._sidecar_crashed = status == "restarting"
+        elif status == "running" and self._sidecar_crashed:
+            self._sidecar_crashed = False
+            await self._reattach_sidecar("an unexpected exit")
 
     async def _on_sidecar_circuit_break(self, reason):
         await self.api.state_set("running", False)
@@ -647,16 +664,25 @@ class VideoPanelPlugin:
         return True
 
     async def _restart_sidecar(self):
-        """Bounce MediaMTX on a freshly rendered config, then re-register
-        every stream path — path registrations live in the sidecar process,
-        not its config file, so a restart forgets them all."""
+        """Bounce MediaMTX on a freshly rendered config, then re-attach to it."""
         await self._supervisor.stop()
         self._config_path.write_text(self._render_config(), encoding="utf-8")
         await self._supervisor.start()
+        await self._reattach_sidecar("an address-change restart")
+
+    async def _reattach_sidecar(self, why):
+        """Wait for a just-started MediaMTX and register every path again.
+
+        Path registrations live in the sidecar process, not its config file, so
+        a replacement process starts with an empty path table and serves 404 to
+        every viewer. Two things bring one up -- our own deliberate bounce and
+        the supervisor's auto-restart after a crash -- and both land here, so
+        there is one re-attach rather than one per caller.
+        """
         if not await self._wait_until_ready():
             self.api.log(
                 f"MediaMTX did not respond on {_API_HOST}:{_API_PORT} within "
-                f"{int(_READY_TIMEOUT)}s of an address-change restart",
+                f"{int(_READY_TIMEOUT)}s of {why}",
                 "error",
             )
             await self.api.state_set("running", False)
@@ -666,6 +692,7 @@ class VideoPanelPlugin:
         self._discovered_sidecar = {}
         self._learned_codec = {}
         await self._sync_discovered_sidecar()
+        await self.api.state_set("running", True)
 
     # ──── Streams ────
 

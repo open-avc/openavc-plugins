@@ -78,6 +78,12 @@
   // the plugin publishes the configured streams a moment before the discovered
   // ones, so a panel connecting in that gap must not draw a verdict from it.
   let seenRow = false;
+  // The plugin's own state key for our stream was deleted. Deliberately NOT
+  // folded into blockReason at the point it happens: the same teardown deletes
+  // the stream list, and a resolveMeta with no list to read clears blockReason.
+  // The two nulls arrive in one batch in whichever order a Python set iterates,
+  // so the fact has to survive a pass that has nothing to read.
+  let stateGone = false;
 
   let pc = null;
   let resourceUrl = null; // the WHEP session resource (PATCH/DELETE target)
@@ -124,6 +130,7 @@
     if (newId !== streamId) {
       streamId = newId;
       seenRow = false;
+      stateGone = false;
       stop();
     }
     streamMode = resolveMeta();
@@ -157,9 +164,20 @@
       return;
     }
     if (streamId && key === STATE_PREFIX + 'streams.' + streamId && value === null) {
-      // The stream was deleted from the project while this panel is open.
-      stop();
-      showOverlay({ spinner: false, text: 'Stream removed' });
+      // Our stream's state key went away. That is a stream deleted from the
+      // project -- and it is EVERY plugin restart too, because stopping a
+      // plugin deletes every key it set, and a plugin update, a settings save
+      // or a crash-restart all stop it. The two are the same null here, and
+      // nothing in the message tells them apart, so this must be a block and
+      // not a verdict: no backoff, no spinner, Retry offered, and the tile
+      // comes back on its own the moment the list is republished. Reading it
+      // as a deletion is what left a whole panel of tiles saying "Stream
+      // removed" after an update, with nothing but a page reload to fix it.
+      // A stream that really was deleted is not republished, so the block
+      // stands and resolveMeta says so in its own words.
+      stateGone = true;
+      blockReason = NO_STREAM_TEXT;
+      blockPlayback();
     }
   }
 
@@ -215,6 +233,8 @@
     } else {
       blockReason = null;
     }
+    // Survives the branch above, which has no list to read and so cannot know.
+    if (stateGone && !blockReason) blockReason = NO_STREAM_TEXT;
     labelEl.textContent = streamLabel || '';
     labelEl.hidden = !(config.show_label && streamLabel);
     return kind;
@@ -233,6 +253,10 @@
   function updateLabelFromList(raw) {
     streamListRaw = raw;
     const wasBlocked = blockReason;
+    // Cleared HERE rather than in resolveMeta, which also runs off the cached
+    // list: only a list that has just been published can say the plugin is
+    // back, and it is the same plugin that will set our state key again.
+    if (stateGone && listRow()) stateGone = false;
     const nextKind = resolveMeta();
     const kindChanged = nextKind !== listedKind;
     listedKind = nextKind;
@@ -267,6 +291,7 @@
     teardown();
     streamId = newId;
     seenRow = false;
+    stateGone = false;
     listedKind = resolveMeta();
     streamMode = '';
     if (!streamId) {

@@ -273,10 +273,19 @@ connection error rather than a picture.
   can't reach the encoder's preview stream. Confirm the server has a route to the
   AV/video network (often a second network connection), since that's usually
   separate from the control network the controller is on.
-- **A tile says the source has no stream:** That sentence comes from the device
-  itself and says what to do. For a vMix output it usually means SRT was turned
-  off, or the SRT Port has not been entered yet. Fix it at the source and the
-  tile comes back on its own.
+- **A tile says the source has no stream:** That sentence usually comes from the
+  device itself and says what to do. For a vMix output it usually means SRT was
+  turned off, or the SRT Port has not been entered yet. Fix it at the source and
+  the tile comes back on its own. The same sentence shows for a few seconds
+  while the plugin itself is restarting, and clears when it is back.
+- **Tiles go blank when the plugin is updated or its settings are saved:**
+  Restarting the plugin stops the streams for a few seconds. Every tile shows a
+  message with a Retry button and starts again by itself once the plugin is
+  back. Nothing needs reloading, on the panel or on the tablet.
+- **The helper stops on its own:** If MediaMTX exits unexpectedly it is started
+  again and every stream is registered with it again, so the tiles recover
+  without anyone touching them. Repeated crashes in quick succession stop the
+  retries and set `plugin.video_panel.error`; the System Log says why.
 - **High CPU use:** An H.265 source is being re-encoded. Switch the source to
   H.264 if possible, or reduce its resolution / frame rate.
 - **"Remote video is not included in this plan":** The space does not have the
