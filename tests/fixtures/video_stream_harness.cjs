@@ -22,13 +22,32 @@ const KEY = 'plugin.video_panel.streams.front_door';
 const LIST_KEY = 'plugin.video_panel.stream_ids';
 const ROW = { value: 'front_door', label: 'Front Door', mode: 'webrtc' };
 
+// Every window this run opened, closed before we exit (see newTile).
+const windows = [];
+
 // One tile, freshly loaded, with the delivery call answered.
 function newTile() {
   const dom = new JSDOM(HTML, { url: PAGE_URL, runScripts: 'outside-only', pretendToBeVisual: true });
   const win = dom.window;
+  // A scenario that ends mid-reconnect leaves the element's backoff timer
+  // armed, and a live jsdom timer keeps node's event loop from draining -- the
+  // harness then produces its JSON and hangs forever instead of exiting.
+  windows.push(win);
   const calls = [];
+  // What the delivery call answers with. Mutable so a scenario can expire the
+  // token mid-session, which is the whole point of the ext-token tests: the
+  // panel keeps running and the credential stops working underneath it.
+  let deliveryStatus = 200;
   win.fetch = (url, opts) => {
-    calls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    const headers = (opts && opts.headers) || {};
+    calls.push({ url: String(url), method: (opts && opts.method) || 'GET', headers });
+    if (deliveryStatus !== 200) {
+      return Promise.resolve({
+        ok: false,
+        status: deliveryStatus,
+        json: () => Promise.reject(new Error('no body')),
+      });
+    }
     // MJPEG needs no RTCPeerConnection, which jsdom does not have; every
     // branch this harness cares about is upstream of how the picture arrives.
     return Promise.resolve({
@@ -37,12 +56,24 @@ function newTile() {
       json: () => Promise.resolve({ mode: 'mjpeg' }),
     });
   };
+  // What the element says back to the panel. jsdom gives an unframed window
+  // `parent === window`, so the element's window.parent.postMessage lands here.
+  const posted = [];
+  win.postMessage = (msg) => { posted.push(msg); };
   win.eval(SOURCE);
 
   const doc = win.document;
   const tile = {
     win,
     calls,
+    posted,
+    setDeliveryStatus: (code) => { deliveryStatus = code; },
+    asks: () => posted.filter((m) => m && m.type === 'openavc:request-init').length,
+    lastDeliveryToken: () => {
+      const delivery = calls.filter((c) => c.url.includes('/ext/delivery/'));
+      const last = delivery[delivery.length - 1];
+      return last ? last.headers['X-OpenAVC-Plugin-Token'] : undefined;
+    },
     // Everything the viewer can actually see.
     overlay: () => ({
       hidden: doc.getElementById('status').hidden,
@@ -72,6 +103,22 @@ async function playing(extraState) {
     type: 'openavc:init',
     config: { stream_id: 'front_door' },
     state: { [LIST_KEY]: list([ROW]), [KEY]: 'streaming', ...(extraState || {}) },
+  });
+  await tile.settle();
+  await tile.settle();
+  return tile;
+}
+
+// A tile on a claimed instance: the panel minted an ext token for it. Its TTL
+// is hours and a wall panel runs for days, so this is the normal case, not an
+// edge one.
+async function playingWithToken(extToken) {
+  const tile = newTile();
+  tile.send({
+    type: 'openavc:init',
+    config: { stream_id: 'front_door' },
+    ext_token: extToken,
+    state: { [LIST_KEY]: list([ROW]), [KEY]: 'streaming' },
   });
   await tile.settle();
   await tile.settle();
@@ -150,11 +197,82 @@ scenarios.a_source_that_is_still_offline_keeps_its_own_sentence = async () => {
   return { overlay: tile.overlay(), deliveries: tile.deliveries() };
 };
 
+scenarios.an_expired_token_is_replaced_without_a_reload = async () => {
+  const tile = await playingWithToken('first-token');
+  const before = { deliveries: tile.deliveries(), token: tile.lastDeliveryToken() };
+
+  // Hours pass. The token's TTL runs out and every /ext/ call starts refusing.
+  tile.setDeliveryStatus(401);
+  tile.win.document.getElementById('retry').click();
+  await tile.settle();
+  await tile.settle();
+  const asked = tile.asks();
+
+  // The panel answers request-init by re-running its own sendInit, which mints
+  // a fresh token and re-sends the whole init message.
+  tile.setDeliveryStatus(200);
+  tile.send({
+    type: 'openavc:init',
+    config: { stream_id: 'front_door' },
+    ext_token: 'second-token',
+    state: { [LIST_KEY]: list([ROW]), [KEY]: 'streaming' },
+  });
+  await tile.settle();
+  await tile.settle();
+
+  return {
+    before,
+    asked,
+    after: {
+      deliveries: tile.deliveries(),
+      token: tile.lastDeliveryToken(),
+      overlay: tile.overlay(),
+    },
+  };
+};
+
+scenarios.a_token_is_only_ever_asked_about_once = async () => {
+  const tile = await playingWithToken('first-token');
+  tile.setDeliveryStatus(401);
+  // Several failures against the same dead token: the backoff re-fires, and a
+  // request per failure would be a loop against the host.
+  for (let i = 0; i < 4; i += 1) {
+    tile.win.document.getElementById('retry').click();
+    await tile.settle();
+    await tile.settle();
+  }
+  return { asks: tile.asks() };
+};
+
+scenarios.an_open_instance_never_asks = async () => {
+  // No token was ever issued, so a 401 is not about one. Asking would put a
+  // refresh loop in front of whatever the real fault is.
+  const tile = await playing();
+  tile.setDeliveryStatus(401);
+  tile.win.document.getElementById('retry').click();
+  await tile.settle();
+  await tile.settle();
+  return { asks: tile.asks() };
+};
+
+scenarios.a_dead_mjpeg_connection_asks_once = async () => {
+  // An <img> reports no status code, so an expired token looks exactly like an
+  // unplugged encoder. Ask once per token; the answer settles which it was.
+  const tile = await playingWithToken('first-token');
+  const img = tile.win.document.getElementById('mjpeg');
+  for (let i = 0; i < 3; i += 1) {
+    img.dispatchEvent(new tile.win.Event('error'));
+    await tile.settle();
+  }
+  return { asks: tile.asks() };
+};
+
 (async () => {
   const out = {};
   for (const [name, run] of Object.entries(scenarios)) {
     out[name] = await run();
   }
+  for (const win of windows) win.close();
   process.stdout.write(JSON.stringify(out, null, 2));
 })().catch((err) => {
   process.stderr.write(String((err && err.stack) || err));

@@ -51,6 +51,13 @@
 
   let config = {};
   let token; // undefined on an open instance
+  // The token value we have already asked the host to replace. An ext token
+  // has a TTL and a wall panel outlives it by design, so every /ext/ call
+  // starts returning 401 partway through a shift and the tile reconnects
+  // forever against a credential that will never work again. Asking the host
+  // for a fresh one costs a postMessage; asking repeatedly for the SAME one is
+  // a loop, so each token is only ever asked about once.
+  let tokenRefreshAsked = '';
   let streamId = '';
   let streamLabel = '';
   // Set from the server's delivery answer at each start, never guessed here.
@@ -105,9 +112,31 @@
     else if (msg.type === 'openavc:state') onState(msg.key, msg.value);
   });
 
+  // Ask the panel to re-send openavc:init with a freshly minted ext token.
+  // The host built 'openavc:request-init' for exactly this and answers it by
+  // re-running its own sendInit, so onInit below picks the new token up and
+  // restarts playback -- no reload, and nobody has to be standing there.
+  //
+  // Returns whether anything was asked, so a caller can say so. Silent on an
+  // open instance: with no token a 401 is not about this, and asking would
+  // hide the real fault behind a refresh loop.
+  function requestFreshToken() {
+    if (!token || tokenRefreshAsked === token) return false;
+    tokenRefreshAsked = token;
+    window.parent.postMessage({ type: 'openavc:request-init' }, '*');
+    return true;
+  }
+
   function onInit(msg) {
     config = msg.config || {};
     token = msg.ext_token || undefined;
+    // A fresh init supersedes any retry already on the clock: it ends by
+    // calling start() itself, and a timer left running would start a second
+    // session on top of it.
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     applyTheme(msg.theme || {});
     const cover = config.fit === 'cover';
     videoEl.classList.toggle('fit-cover', cover);
@@ -326,6 +355,7 @@
     let delivery;
     try {
       const res = await fetch(deliveryUrl(), { headers: authHeaders() });
+      if (res.status === 401) requestFreshToken();
       if (!res.ok) throw new Error('HTTP ' + res.status);
       delivery = await res.json();
     } catch (err) {
@@ -457,6 +487,9 @@
       hlsPlayer = player;
       player.on(Hls.Events.ERROR, (_evt, data) => {
         if (hlsPlayer !== player || !data || !data.fatal) return;
+        // hls.js fetches playlists and segments itself, so its error event is
+        // the only place a 401 on those is visible out here.
+        if (data.response && data.response.code === 401) requestFreshToken();
         if (active) scheduleReconnect('HLS ' + (data.details || data.type || 'fatal error'));
       });
       player.loadSource(hlsUrl());
@@ -535,6 +568,7 @@
         body: offer.sdp,
         headers: authHeaders({ 'Content-Type': 'application/sdp' }),
       });
+      if (res.status === 401) requestFreshToken();
       if (res.status !== 201) throw new Error('WHEP POST returned ' + res.status);
       const location = res.headers.get('location');
       if (!location) throw new Error('WHEP response missing Location header');
@@ -733,6 +767,11 @@
   });
   imgEl.addEventListener('error', () => {
     if (streamMode === 'mjpeg' && active && imgEl.getAttribute('src')) {
+      // An <img> reports no status, so an expired token and an unplugged
+      // encoder arrive here as the same event. Ask once per token and let the
+      // answer decide: a real 401 is fixed by the new one, and anything else
+      // gets the same token back and never asks again.
+      requestFreshToken();
       scheduleReconnect('no frame from source');
     }
   });

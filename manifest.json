@@ -63,11 +63,11 @@
         "integrations/video_panel/panel/hls.light.min.js.LICENSE": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
-        "integrations/video_panel/panel/video_stream.js": "39c4507b346e297c45c17c89b28e48203433976c0dd3e71aa47aca492f5f50e7",
-        "integrations/video_panel/plugin.json": "068722efad5ac9ae4c8da69bad1cfe52929c210f3f9ed5967cb8bb638e3739b4",
+        "integrations/video_panel/panel/video_stream.js": "4c823e0bf8d6f885d0c8a76b23c86b7a8a0c945267a8006110307909023dc8c8",
+        "integrations/video_panel/plugin.json": "4794560a1a4d8867fc509f0cc417648eff9de893c48397a958553bbfbbe1f073",
         "integrations/video_panel/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4",
         "integrations/video_panel/transcode.py": "ff5a268e47dd0ef899746d8043ad3a9cf95ff0b4ffcb98b1075136537c8ba80e",
-        "integrations/video_panel/video_panel_plugin.py": "fe4156fe3721234635e96db241121e6dadc075689e11ac032cac19cb2bcc466c"
+        "integrations/video_panel/video_panel_plugin.py": "3d3f46af6773e35a52177bbc0ecfe2465d07f430b897a4fdb41d9ff882b12b81"
       }
     }
   }

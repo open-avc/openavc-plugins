@@ -66,6 +66,12 @@ def tile():
         ["node", str(_HARNESS), str(_JS), str(_HTML)],
         capture_output=True,
         text=True,
+        # The harness reports what the viewer would read, and the overlay says
+        # "Connecting…". Without this, Python decodes node's UTF-8 with the
+        # platform's preferred encoding -- cp1252 on Windows -- and every
+        # assertion on a sentence containing punctuation fails for a reason
+        # that has nothing to do with the element.
+        encoding="utf-8",
         env={**os.environ, "NODE_PATH": str(_node_modules())},
         timeout=120,
     )
@@ -131,3 +137,48 @@ def test_a_republished_row_that_cannot_play_keeps_its_own_sentence(tile):
     result = tile["a_source_that_is_still_offline_keeps_its_own_sentence"]
     assert result["overlay"]["text"] == "Front Door is switched off."
     assert result["deliveries"] == 1  # blocked, so nothing was started
+
+
+# ── The ext token has a TTL; a wall panel does not ──────────────────────────
+#
+# On a claimed instance the panel mints a plugin-scoped token for the iframe and
+# it expires after hours. A tile in a meeting room outlives that by design, so
+# every /ext/ call starts refusing partway through the day and the tile
+# reconnects forever against a credential that will never work again -- video
+# gone until somebody reloads the panel, which on a wall plate means somebody
+# standing at it. The host has always been able to mint a new one on demand
+# ('openavc:request-init' in panel.js); nothing here ever asked.
+
+
+def test_an_expired_token_is_replaced_without_anyone_reloading(tile):
+    """The whole point: the tile notices the 401, asks for a new token, and the
+    next delivery call carries it. No reload, nobody standing at the panel."""
+    result = tile["an_expired_token_is_replaced_without_a_reload"]
+
+    assert result["before"]["token"] == "first-token"  # it was playing on the old one
+    assert result["asked"] == 1, "the 401 did not produce an openavc:request-init"
+    assert result["after"]["token"] == "second-token", (
+        "playback resumed on the dead token"
+    )
+    assert result["after"]["deliveries"] > result["before"]["deliveries"]
+    # And it is trying, not sitting on an error.
+    assert result["after"]["overlay"]["spinner"] is True
+
+
+def test_the_same_dead_token_is_only_asked_about_once(tile):
+    """The backoff re-fires the same 401 every few seconds. One request per
+    failure would be a loop against the host, minting a token each time."""
+    assert tile["a_token_is_only_ever_asked_about_once"]["asks"] == 1
+
+
+def test_an_instance_with_no_token_never_asks(tile):
+    """An open instance issues no token, so a 401 there is about something
+    else. Asking would hide the real fault behind a refresh that cannot help."""
+    assert tile["an_open_instance_never_asks"]["asks"] == 0
+
+
+def test_a_dead_mjpeg_connection_asks_once_and_then_stops(tile):
+    """An <img> reports no status, so an expired token and an unplugged encoder
+    arrive as the same event. Asking once per token settles which it was
+    without turning an unplugged camera into a refresh loop."""
+    assert tile["a_dead_mjpeg_connection_asks_once"]["asks"] == 1
