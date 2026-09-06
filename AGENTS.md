@@ -817,7 +817,7 @@ Each param entry supports the following fields:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `key` | Yes | The key under `step.params`. Must be unique within the action. |
-| `type` | Yes | One of: `text`, `integer`, `float`, `boolean`, `select`, `state_key`, `device_ref`, `macro_ref`. |
+| `type` | Yes | One of: `string`, `text`, `integer`, `float`, `boolean`, `select`, `color`, `state_key`, `macro_ref`, `device_ref`, `command_ref`, `group`, `mapping_list`. This list is `VALID_CONFIG_TYPES` in `validate.py` — `group` is a heading rather than a value, and `mapping_list` is the repeatable row list (see the example above; it needs an `item_schema`). |
 | `label` | No | Human-readable label in the macro builder form. |
 | `description` | No | Inline help text under the field. |
 | `required` | No | Marks the field with a red asterisk. |
