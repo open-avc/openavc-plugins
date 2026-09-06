@@ -89,7 +89,7 @@
       "file": "integrations/video_panel",
       "format": "directory",
       "category": "integration",
-      "version": "0.20.0",
+      "version": "0.21.0",
       "author": "OpenAVC",
       "license": "MIT",
       "platforms": [
@@ -97,7 +97,7 @@
         "linux_x64",
         "linux_arm64"
       ],
-      "min_openavc_version": "0.25.0",
+      "min_openavc_version": "0.31.0",
       "capabilities": [
         "state_read",
         "state_write",

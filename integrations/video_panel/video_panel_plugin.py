@@ -34,9 +34,9 @@ from pydantic import BaseModel
 # A lazy import inside a method would fail under the loader (the path entry is
 # removed after load), so this stays at module top level.
 try:
-    from sidecar import SidecarSupervisor
+    from sidecar import NO_WINDOW, SidecarSupervisor
 except ImportError:  # pragma: no cover - exercised only via package-path import
-    from .sidecar import SidecarSupervisor
+    from .sidecar import NO_WINDOW, SidecarSupervisor
 
 try:
     import transcode
@@ -81,6 +81,11 @@ _SIDECAR_USER = "openavc"
 # ffmpeg-backed operations can hang on an unreachable source; bound them hard.
 _PROBE_TIMEOUT = 15.0
 _SNAPSHOT_TIMEOUT = 15.0
+# Total time start() will spend picking hardware encoders, across every stream
+# it registers. The platform stops waiting for a plugin's start() well before
+# an unbounded walk of the candidates could finish, and being killed there is
+# worse than encoding in software: it leaves the whole plugin down.
+_ENCODER_BUDGET = 10.0
 
 # Stream ids become MediaMTX path names and panel-element binding values, so
 # keep them to a portable, URL-safe character set.
@@ -289,15 +294,19 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.20.0",
+        "version": "0.21.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        # 0.24.0: register_router(panel_paths=...) — older platforms fail
-        # start() on the unknown keyword.
-        "min_openavc_version": "0.25.0",
+        # 0.31.0: the platform reads `network_ports` (below) and opens the
+        # WebRTC media port in the host firewall. Before that release it does
+        # not, and a panel in the room gets no picture on a firewalled host --
+        # which is the bug that key exists to fix, so the plugin asks for a
+        # platform that honours it. (register_router(panel_paths=...) needs
+        # 0.24.0, and is covered by the same floor.)
+        "min_openavc_version": "0.31.0",
         # The sidecar binds this for WebRTC media, and it is the ONLY path a
         # panel in the room has. Neither installer covered it: Windows scopes
         # its firewall rule to openavc-server.exe and this port belongs to
@@ -523,6 +532,10 @@ class VideoPanelPlugin:
         self._sidecar_crashed = False
         self._detected_ip = ("", 0.0)  # (auto-detected LAN address, at monotonic)
         self._rendered_host = None  # LAN address baked into the sidecar config
+        # Monotonic instant after which encoder detection stops probing and
+        # settles for software, set only while start() is running. None means
+        # no hurry: an edit through the API can afford the full walk.
+        self._encoder_deadline = None
 
     # ──── Lifecycle ────
 
@@ -556,6 +569,17 @@ class VideoPanelPlugin:
         await self.api.state_set("error", "")
         await self.api.state_set("sidecar", "starting")
 
+        busy = await self._port_already_in_use()
+        if busy:
+            msg = (
+                f"Port {busy} on this machine is already in use, so the video "
+                "server cannot start. Another copy of it is most likely still "
+                "running. Stop it, then start the Video Panel plugin again."
+            )
+            await self.api.state_set("error", msg)
+            await self.api.state_set("sidecar", "failed")
+            raise RuntimeError(msg)
+
         self._supervisor = SidecarSupervisor(
             [str(self._mediamtx_bin), str(self._config_path)],
             name="mediamtx",
@@ -565,6 +589,7 @@ class VideoPanelPlugin:
             task_factory=self.api.create_task,
         )
 
+        self._encoder_deadline = time.monotonic() + _ENCODER_BUDGET
         try:
             await self._supervisor.start()
             if not await self._wait_until_ready():
@@ -599,18 +624,79 @@ class VideoPanelPlugin:
                 f"Video Panel started: MediaMTX {_MEDIAMTX_VERSION} on "
                 f"{_API_HOST}:{_API_PORT}, {len(self._streams)} stream(s)"
             )
-        except Exception:
-            # Don't leave an orphaned sidecar if start() fails partway.
-            await self._supervisor.stop()
-            self._supervisor = None
+        except BaseException:
+            # Don't leave an orphaned sidecar if start() fails partway --
+            # BaseException, not Exception, because the likeliest way out of
+            # here is a cancellation: the platform caps start() and everything
+            # above this line waits on something external. A CancelledError
+            # walked straight past an `except Exception` and left MediaMTX
+            # running on all five ports, with nothing supervising it and the
+            # next start crash-looping against it.
+            await self._stop_sidecar_now()
             raise
+        finally:
+            self._encoder_deadline = None
+
+    async def _stop_sidecar_now(self):
+        """Stop the sidecar even while this task is being cancelled.
+
+        A plain ``await stop()`` is not enough on the cancellation path: a
+        second cancellation would land inside it and abandon a half-terminated
+        child. The shield lets the stop finish on its own task, and a kill is
+        the last resort if even that is cut short.
+        """
+        sup, self._supervisor = self._supervisor, None
+        if sup is None:
+            return
+        try:
+            await asyncio.shield(sup.stop())
+        except asyncio.CancelledError:
+            # Cancelled again mid-teardown. The shielded stop carries on by
+            # itself; the kill is what guarantees the child is gone even if
+            # the loop stops caring about that task.
+            sup.kill_now()
+            raise
+        except Exception as e:
+            sup.kill_now()
+            self.api.log(f"MediaMTX did not stop cleanly ({e}); killed it", "warning")
+
+    async def _port_already_in_use(self):
+        """The first sidecar port something else is already listening on, if any.
+
+        MediaMTX's API, WebRTC and HLS ports are the ones a second copy would
+        answer on, and an answer there is indistinguishable from our own child
+        once it arrives: the ready check would adopt a stranger, register paths
+        into it, and report a healthy plugin while the process we actually
+        supervise crash-looped against the ports it could not bind.
+        """
+        listeners = (
+            (_API_HOST, _API_PORT),
+            (_WEBRTC_HOST, _WEBRTC_PORT),
+            (_HLS_HOST, _HLS_PORT),
+            (_RTSP_HOST, _RTSP_PORT),
+        )
+        for host, port in listeners:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout=1.0
+                )
+            except (OSError, asyncio.TimeoutError):
+                continue
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:  # pragma: no cover - platform-specific reset
+                pass
+            return port
+        return None
 
     async def stop(self):
         # State keys, subscriptions, and managed tasks are cleaned up by the
-        # platform; we only need to stop the external process.
-        if self._supervisor is not None:
-            await self._supervisor.stop()
-            self._supervisor = None
+        # platform; we only need to stop the external process. The platform
+        # bounds this hook too, so it goes out the same cancellation-proof way
+        # start()'s failure path does -- a child that ignores its terminate is
+        # exactly how a stop runs out of time.
+        await self._stop_sidecar_now()
         if self._hls_client is not None:
             client, self._hls_client = self._hls_client, None
             await client.aclose()
@@ -824,13 +910,43 @@ class VideoPanelPlugin:
         return (stream.get("codec_hint") or "auto").strip().lower() != "h264"
 
     async def _resolve_encoder(self, hardware_accel):
-        """Pick (and cache) the ffmpeg H.264 encoder for a hardware_accel value."""
+        """Pick (and cache) the ffmpeg H.264 encoder for a hardware_accel value.
+
+        Detection test-encodes each candidate, and a wedged GPU driver makes
+        that take the full timeout -- long enough, across several candidates
+        and several streams, to outlast the budget the platform allows start().
+        So during start the whole of it runs against one deadline; past it,
+        every remaining stream takes software, which plays everywhere and is
+        where an undetectable encoder would have landed anyway.
+        """
         ha = (hardware_accel or "auto").strip().lower()
-        if ha not in self._encoder_cache:
-            self._encoder_cache[ha] = await transcode.select_encoder(
-                str(self._ffmpeg_bin), ha, self.api.log
+        if ha in self._encoder_cache:
+            return self._encoder_cache[ha]
+        left = None
+        if self._encoder_deadline is not None:
+            left = self._encoder_deadline - time.monotonic()
+            if left <= 0:
+                self._encoder_cache[ha] = transcode.SOFTWARE_ENCODER
+                return transcode.SOFTWARE_ENCODER
+        try:
+            picked = await self._detect_encoder(ha, left)
+        except asyncio.TimeoutError:
+            picked = transcode.SOFTWARE_ENCODER
+            self.api.log(
+                "hardware encoder detection is taking too long on this machine; "
+                f"using software ({transcode.SOFTWARE_ENCODER})",
+                "warning",
             )
-        return self._encoder_cache[ha]
+        self._encoder_cache[ha] = picked
+        return picked
+
+    async def _detect_encoder(self, hardware_accel, budget):
+        selecting = transcode.select_encoder(
+            str(self._ffmpeg_bin), hardware_accel, self.api.log
+        )
+        if budget is None:
+            return await selecting
+        return await asyncio.wait_for(selecting, timeout=budget)
 
     async def _persist_streams(self):
         """Write the current stream list back to the project file via the platform."""
@@ -956,7 +1072,10 @@ class VideoPanelPlugin:
         if await self._maybe_apply_address_change():
             return  # sidecar just bounced; statuses refresh on the next tick
         data = await self._api_get("/v3/paths/list")
-        if data is None:
+        # Same rule as the ready check: an answer from a stranger on the API
+        # port must not report this plugin as running, or a circuit-broken
+        # sidecar reads as healthy for as long as the stranger is up.
+        if data is None or not self._sidecar_is_ours():
             await self.api.state_set("running", False)
             return
         await self.api.state_set("running", True)
@@ -1838,12 +1957,25 @@ class VideoPanelPlugin:
             return False
 
     async def _wait_until_ready(self):
+        """Wait for OUR sidecar to answer -- not merely for an answer.
+
+        The API port is a MediaMTX default, so an answer on it can come from a
+        stranger: a second copy someone installed, or one of ours orphaned by a
+        hard kill. Adopting it looks like success and is not -- paths would be
+        registered into a process nobody supervises, while the child we did
+        spawn exits on the port it cannot bind. So a reply only counts while
+        our own child is alive.
+        """
         deadline = time.monotonic() + _READY_TIMEOUT
         while time.monotonic() < deadline:
-            if await self._api_get("/v3/paths/list") is not None:
+            if self._sidecar_is_ours() and await self._api_get("/v3/paths/list") is not None:
                 return True
             await asyncio.sleep(0.3)
         return False
+
+    def _sidecar_is_ours(self):
+        """Whether the process we supervise is alive to be answering at all."""
+        return self._supervisor is not None and self._supervisor.running
 
     # ──── ffmpeg: probe + snapshot ────
 
@@ -1857,7 +1989,10 @@ class VideoPanelPlugin:
         args = [str(self._ffmpeg_bin), "-hide_banner", "-rtsp_transport", "tcp", "-i", url]
         try:
             proc = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+                *args,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                **NO_WINDOW,
             )
         except OSError as e:
             return {"success": False, "message": f"Could not run ffmpeg: {e}"}
@@ -1942,7 +2077,10 @@ class VideoPanelPlugin:
         ]
         try:
             proc = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                **NO_WINDOW,
             )
         except OSError:
             return None

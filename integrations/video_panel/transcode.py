@@ -27,6 +27,11 @@ import platform
 import re
 import sys
 
+try:
+    from sidecar import NO_WINDOW
+except ImportError:  # pragma: no cover - exercised only via package-path import
+    from .sidecar import NO_WINDOW
+
 # Always present in the LGPL build; works on every platform.
 SOFTWARE_ENCODER = "libopenh264"
 
@@ -179,6 +184,7 @@ async def _run(args, timeout):
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **NO_WINDOW,
         )
     except OSError:
         return None, b"", b""
@@ -188,6 +194,11 @@ async def _run(args, timeout):
         proc.kill()
         await proc.wait()
         return None, b"", b""
+    except asyncio.CancelledError:
+        # Whoever is cancelling us has given up on this probe; the child has
+        # not heard about it and would sit there holding a GPU device open.
+        proc.kill()
+        raise
     return proc.returncode, out, err
 
 

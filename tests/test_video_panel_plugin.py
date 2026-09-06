@@ -208,7 +208,8 @@ def test_plugin_info_manifest_shape():
     info = VideoPanelPlugin.PLUGIN_INFO
     assert info["id"] == "video_panel"
     assert info["category"] == "integration"
-    assert info["min_openavc_version"] == "0.25.0"
+    # The platform floor is pinned, with its reason, by
+    # test_the_platform_floor_covers_what_this_plugin_declares.
     assert info["platforms"] == ["win_x64", "linux_x64", "linux_arm64"]
     assert "http_endpoints" in info["capabilities"]
 
@@ -332,6 +333,9 @@ class _FakeApi:
         self.proxy_calls = []
         self.proxy_location = None  # canned WHEP Location for POST responses
         self.logs = []  # (message, level) from log()
+        self.data_dir = None  # set by tests that run the real start()
+        self.routers = []  # (router, kwargs) from register_router
+        self.periodic = []  # names from create_periodic_task
 
     @property
     def config(self):
@@ -356,6 +360,12 @@ class _FakeApi:
 
     def create_task(self, coro, name=None):
         return asyncio.ensure_future(coro)
+
+    def register_router(self, router, **kwargs):
+        self.routers.append((router, kwargs))
+
+    def create_periodic_task(self, fn, interval_seconds=None, name=None):
+        self.periodic.append(name)
 
     def log(self, message, level="info"):
         # Recorded rather than discarded: several behaviours here exist only to
@@ -1723,3 +1733,263 @@ def test_the_upstream_query_is_carried_through():
     assert url.endswith("/cam1/video1_stream.m3u8?session=abc&_HLS_part=3")
     # And an empty query leaves no dangling separator.
     assert plugin._hls_url("cam1", "index.m3u8", "").endswith("/cam1/index.m3u8")
+
+
+# ──── Sidecar lifecycle: nothing leaks, nothing is adopted ────
+#
+# Everything here is about the MediaMTX process itself rather than what it
+# serves: that it dies with the start that spawned it, that a stranger already
+# on its ports is never mistaken for it, and that picking an encoder cannot
+# hold start() open past the budget the platform allows a plugin.
+
+
+def _startable_plugin(monkeypatch, tmp_path, streams=(), real_preflight=False):
+    """A plugin whose start() runs end to end against a throwaway child process.
+
+    The MediaMTX binary is replaced by a Python sleeper (so the supervisor,
+    the spawn, and the teardown are all the real ones), the control API is
+    answered by fakes, and every spawned child is recorded so a test can prove
+    it is gone.
+    """
+    import integrations.video_panel.video_panel_plugin as vp_mod
+
+    plugin = VideoPanelPlugin()
+    api = _FakeApi({"streams": list(streams)})
+    api.data_dir = tmp_path
+    spawned, procs = [], []
+
+    class _SleeperSupervisor(SidecarSupervisor):
+        def __init__(self, cmd, **kw):
+            super().__init__(_LONG_RUNNER, **kw)
+            spawned.append(self)
+
+        async def _spawn(self):
+            await super()._spawn()
+            procs.append(self._proc)
+
+    monkeypatch.setattr(vp_mod, "SidecarSupervisor", _SleeperSupervisor)
+    monkeypatch.setattr(plugin, "_resolve_dep", lambda name: Path(sys.executable))
+    monkeypatch.setattr(plugin, "_ensure_executable", lambda path: None)
+
+    async def fake_get(path):
+        return {"items": []}
+
+    async def fake_post(path, body):
+        return True
+
+    async def fake_delete(path):
+        return True
+
+    monkeypatch.setattr(plugin, "_api_get", fake_get)
+    monkeypatch.setattr(plugin, "_api_post", fake_post)
+    monkeypatch.setattr(plugin, "_api_delete", fake_delete)
+    if not real_preflight:
+        async def free_ports():
+            return None
+
+        # raising=False so this harness also runs against a build that has no
+        # port pre-flight: the two start() tests below are about what happens
+        # to the process, and a setup error would prove nothing about that.
+        monkeypatch.setattr(plugin, "_port_already_in_use", free_ports, raising=False)
+    return plugin, api, spawned, procs
+
+
+_TRANSCODE_STREAM = {
+    "stream_id": "cam1",
+    "rtsp_url": "rtsp://camera.invalid/stream1",
+    "transcode": "always",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_cancelled_start_leaves_no_mediamtx_running(monkeypatch, tmp_path):
+    """The platform stops waiting for start() and cancels it. What must not
+    survive that is the sidecar: a live MediaMTX holding every one of its
+    ports, supervised by nothing, with the next start crash-looping against it.
+    """
+    import integrations.video_panel.video_panel_plugin as vp_mod
+    from integrations.video_panel import transcode as tc
+
+    plugin, api, spawned, procs = _startable_plugin(
+        monkeypatch, tmp_path, streams=[_TRANSCODE_STREAM]
+    )
+    plugin._ffmpeg_bin = Path(sys.executable)
+
+    async def wedged(*a, **kw):
+        await asyncio.sleep(60)
+
+    # A hung encoder probe is the realistic way to outlast the budget; the
+    # budget itself is put out of reach so this test is about the cancellation.
+    monkeypatch.setattr(tc, "select_encoder", wedged)
+    monkeypatch.setattr(vp_mod, "_ENCODER_BUDGET", 60.0, raising=False)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(plugin.start(api), timeout=1.0)
+
+    assert spawned and procs, "the sidecar never got as far as spawning"
+    assert await _wait_for(lambda: procs[0].returncode is not None, 5.0), (
+        "MediaMTX is still running after the start that spawned it was cancelled"
+    )
+    assert plugin._supervisor is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_wedged_encoder_probe_cannot_hold_start_open(monkeypatch, tmp_path):
+    """Detection walks hardware candidates and test-encodes each one; a wedged
+    GPU driver makes every one of them take its full timeout. That is allowed
+    to cost the hardware encoder. It is not allowed to cost the plugin."""
+    import integrations.video_panel.video_panel_plugin as vp_mod
+    from integrations.video_panel import transcode as tc
+
+    plugin, api, spawned, procs = _startable_plugin(
+        monkeypatch, tmp_path, streams=[_TRANSCODE_STREAM]
+    )
+    plugin._ffmpeg_bin = Path(sys.executable)
+
+    async def wedged(*a, **kw):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(tc, "select_encoder", wedged)
+    monkeypatch.setattr(vp_mod, "_ENCODER_BUDGET", 0.3, raising=False)
+
+    try:
+        await asyncio.wait_for(plugin.start(api), timeout=10.0)
+        assert plugin._encoder_cache == {"auto": tc.SOFTWARE_ENCODER}
+        assert any("software" in m for m, _lvl in api.logs)
+        # The budget belongs to start() alone -- an edit made later gets the
+        # full walk, because nothing is waiting on it.
+        assert plugin._encoder_deadline is None
+    finally:
+        await plugin.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_start_refuses_a_port_something_else_already_holds(monkeypatch, tmp_path):
+    """9997 is MediaMTX's own default, so the thing answering there can be a
+    second copy. Starting anyway means registering paths into a process we do
+    not supervise while ours dies on the port it cannot bind."""
+    import integrations.video_panel.video_panel_plugin as vp_mod
+
+    async def hangup(reader, writer):
+        writer.close()
+
+    server = await asyncio.start_server(hangup, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(vp_mod, "_API_PORT", port)
+    plugin, api, spawned, procs = _startable_plugin(
+        monkeypatch, tmp_path, real_preflight=True
+    )
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            await plugin.start(api)
+        assert str(port) in str(excinfo.value)
+        assert not spawned, "it spawned a MediaMTX that could never bind"
+        assert api.state["sidecar"] == "failed"
+        assert str(port) in api.state["error"]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_a_stranger_answering_is_not_our_sidecar(monkeypatch):
+    """An answer on the API port only counts while our own child is alive."""
+    import integrations.video_panel.video_panel_plugin as vp_mod
+
+    plugin = VideoPanelPlugin()
+    plugin.api = _FakeApi()
+    monkeypatch.setattr(vp_mod, "_READY_TIMEOUT", 0.5)
+
+    async def answers(path):
+        return {"items": []}
+
+    monkeypatch.setattr(plugin, "_api_get", answers)
+
+    plugin._supervisor = None
+    assert await plugin._wait_until_ready() is False
+
+    class _Alive:
+        running = True
+
+    # The must-not-move half: our own sidecar answering is still ready.
+    plugin._supervisor = _Alive()
+    assert await plugin._wait_until_ready() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+async def test_the_status_poll_does_not_call_a_stranger_running(monkeypatch):
+    """Same rule on the poll: after a circuit break, a stranger on the port
+    would otherwise put `running` back to true every five seconds."""
+    _client, plugin, _added, _deleted = _crud_client(monkeypatch)
+
+    plugin._supervisor = None
+    await plugin._poll_statuses()
+    assert plugin.api.state["running"] is False
+
+    class _Alive:
+        running = True
+
+    plugin._supervisor = _Alive()
+    # The poll's first move is the address-change check; pin the rendered host
+    # to what it will detect so this stays a test about the stranger rule.
+    plugin._rendered_host = plugin._detect_local_ip()
+    await plugin._poll_statuses()
+    assert plugin.api.state["running"] is True
+
+
+@pytest.mark.asyncio
+async def test_kill_now_needs_nothing_from_the_event_loop():
+    """The last resort on a cancelled teardown: one synchronous call, and the
+    ports are released whether or not anyone awaits the supervisor again."""
+    sup = SidecarSupervisor(_LONG_RUNNER, name="dummy")
+    await sup.start()
+    proc = sup._proc
+    sup.kill_now()
+    assert await _wait_for(lambda: proc.returncode is not None, 5.0)
+    sup.kill_now()  # a second call, and a dead child, are both no-ops
+    await sup.stop()
+
+
+# ──── Spawning and the platform floor ────
+
+
+def test_every_spawn_in_this_plugin_is_windowless():
+    """Four processes get started here -- MediaMTX, the encoder probe, the
+    source probe, the snapshot grab -- and on Windows each one without this
+    flag puts a console window on the desktop the room's display is showing."""
+    package = _PLUGINS_ROOT / "integrations" / "video_panel"
+    sites = 0
+    for path in sorted(package.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for call in source.split("create_subprocess_exec")[1:]:
+            sites += 1
+            head = call[: call.index(")")]
+            assert "NO_WINDOW" in head, f"{path.name}: a spawn without NO_WINDOW"
+    assert sites == 4, f"expected four spawn sites, found {sites}"
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_the_platform_floor_covers_what_this_plugin_declares():
+    """The plugin declares a firewall port; a platform that predates
+    `network_ports` ignores it, and the panel in the room gets no picture on a
+    firewalled host -- the exact bug that declaration was added to fix. So the
+    floor is the release that reads it, and the catalog says the same thing:
+    the platform decides installability from index.json, not from the class."""
+    info = VideoPanelPlugin.PLUGIN_INFO
+    assert info["network_ports"], "the floor below is only about this key"
+    assert info["min_openavc_version"] == "0.31.0"
+
+    manifest = json.loads(
+        (_PLUGINS_ROOT / "integrations" / "video_panel" / "plugin.json").read_text()
+    )
+    catalog = json.loads((_PLUGINS_ROOT / "index.json").read_text())
+    entries = catalog["plugins"] if isinstance(catalog, dict) else catalog
+    entry = next(e for e in entries if e["id"] == "video_panel")
+    for source, name in ((manifest, "plugin.json"), (entry, "index.json")):
+        assert source["min_openavc_version"] == info["min_openavc_version"], name
+        assert source["version"] == info["version"], name

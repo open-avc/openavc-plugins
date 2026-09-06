@@ -194,3 +194,48 @@ def test_select_encoder_auto_falls_back_to_software(monkeypatch):
     monkeypatch.setattr(tc, "platform_priority", lambda: ["h264_qsv", "h264_nvenc"])
     _stub_detection(monkeypatch, compiled={"h264_qsv", "h264_nvenc"}, working=set())
     assert asyncio.run(tc.select_encoder("ffmpeg", "auto")) == tc.SOFTWARE_ENCODER
+
+
+# ──── The probe's own child process ────
+
+
+def test_a_cancelled_probe_does_not_leave_ffmpeg_running():
+    """`_run` kills its child on a timeout, and the same has to hold when the
+    caller is cancelled instead: the probe is given up on, but ffmpeg has not
+    heard about it and would sit there holding a GPU device open."""
+
+    async def scenario():
+        spawned = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            proc = await real_exec(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        asyncio.create_subprocess_exec = spy
+        try:
+            task = asyncio.ensure_future(
+                tc._run([sys.executable, "-c", "import time; time.sleep(60)"], 60)
+            )
+            for _ in range(200):
+                if spawned:
+                    break
+                await asyncio.sleep(0.02)
+            assert spawned, "the probe never spawned anything"
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            asyncio.create_subprocess_exec = real_exec
+
+        proc = spawned[0]
+        for _ in range(250):
+            if proc.returncode is not None:
+                return True
+            await asyncio.sleep(0.02)
+        return False
+
+    assert asyncio.run(scenario()), "the probe's child outlived the cancelled probe"

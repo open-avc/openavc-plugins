@@ -10,6 +10,8 @@ server, so it is covered by the same login as the rest of the system.
 
 ## Requirements
 
+- **OpenAVC 0.31.0 or newer.** Earlier versions do not open the video port in the
+  host firewall for the plugin, so a panel in the room gets no picture.
 - One or more video sources that provide an RTSP stream (most often an IP camera).
 - For the widest browser support, use **H.264 (Constrained Baseline)**.
   H.265 / HEVC sources are re-encoded to H.264 automatically (this uses more CPU).
@@ -254,7 +256,9 @@ connection error rather than a picture.
 
 - **Plugin shows Error on start:** The MediaMTX helper could not start. Check the
   System Log. If the binary is missing, reinstall the plugin so its components
-  download again.
+  download again. If the message names a port that is already in use, another
+  copy of the helper is still running on this machine: stop it, then start the
+  plugin again.
 - **Stream not showing video:** Verify the source URL plays in a tool like VLC, and
   that the username and password are correct. Check
   `plugin.video_panel.streams.<stream_id>` in the State view.

@@ -44,6 +44,19 @@ async def _maybe_await(result) -> None:
         await result
 
 
+# ──── Windowless spawning ────
+
+# Every child this plugin starts is a console program, and on Windows each one
+# would flash (or park) a console window on whatever desktop the server can
+# see. Passing this to every spawn is what keeps a room's display clean.
+if sys.platform == "win32":  # pragma: no cover - Windows-only constant
+    import subprocess
+
+    NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW}
+else:
+    NO_WINDOW = {}
+
+
 # ──── Child lifetime binding (Windows job object) ────
 
 # The job handle is created once and deliberately never closed: the kernel
@@ -215,6 +228,25 @@ class SidecarSupervisor:
         self._proc = None
         self._emit_log(f"{self._name} stopped", "info")
 
+    def kill_now(self) -> None:
+        """Kill the child without awaiting anything.
+
+        The last resort for a caller being cancelled: ``stop()`` needs the loop
+        to come back to it at least twice, and a caller that is out of time has
+        no way to promise that. This one call is all it takes for the OS to
+        release the ports, and the process is reaped by whoever gets back to
+        ``wait()`` -- the monitor loop, a later ``stop()``, or the loop's own
+        child watcher.
+        """
+        self._stopping = True
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+
     # ──── Internals ────
 
     async def _spawn(self) -> None:
@@ -222,6 +254,7 @@ class SidecarSupervisor:
             *self._cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **NO_WINDOW,
         )
         bind_to_process_lifetime(self._proc.pid)
         self._spawn_time = time.monotonic()
