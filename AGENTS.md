@@ -568,6 +568,14 @@ class MyPlugin:
         # ... teardown code ...
 ```
 
+**`stop()` is also called after a `start()` that failed or timed out**, so
+write it to tolerate a half-built plugin: guard anything `start()` assigns
+(`if self._proc is not None:`) rather than assuming it exists. This is the only
+chance to release something `start()` opened before it was interrupted — a
+child process, a socket, a serial port — because nothing else holds a reference
+to it. The platform bounds the call and logs anything it raises, so a `stop()`
+that trips over a missing attribute costs a log line and nothing more.
+
 ### 6.2 Optional Methods
 
 ```python

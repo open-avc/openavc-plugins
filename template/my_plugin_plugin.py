@@ -77,6 +77,11 @@ class MyPlugin:
         """Called when the plugin is disabled or server shuts down.
         Close external connections and release hardware here.
         State keys, subscriptions, and tasks are cleaned up automatically.
+
+        Also called after a start() that failed or timed out, so guard
+        anything start() assigns instead of assuming it exists -- this is
+        the only chance to release something start() opened before it was
+        interrupted.
         """
         self.api.log("Plugin stopped!")
 
