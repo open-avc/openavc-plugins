@@ -203,7 +203,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.6.1",
+        "version": "0.7.0",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -246,26 +246,57 @@ class PresentPlugin:
                 },
             },
             {
+                # PIN AN IMMUTABLE, MONTH-END autobuild TAG. Not `latest`.
+                #
+                # These URLs 404'd for every platform at once: they pointed at
+                # the `latest` RELEASE, whose asset set ROTATES, so
+                # `ffmpeg-n7.1-latest-...` was pinned in name only and stopped
+                # existing the day BtbN retired n7.1 from it. Install fetched
+                # nothing and start failed with "FFmpeg binary not found",
+                # which reinstalling could not fix.
+                #
+                # `autobuild-*` tags are immutable, but they are not all kept:
+                # BtbN retains roughly the last fortnight of dailies and then
+                # only MONTH-END builds, going back years. So pin a month-end
+                # one (this is 2026-07-31) or it gets pruned in a fortnight and
+                # we are back here.
+                #
+                # KEEP THIS BUILD IDENTICAL TO THE VIDEO PANEL PLUGIN'S. Both
+                # extract to the same shared plugin_repo/.deps/ffmpeg, so two
+                # different pins means whichever installs last wins and the
+                # other plugin silently runs a build it never validated.
+                #
+                # When bumping, re-verify the binary rather than trusting the
+                # name. Checked on all three for this build: LGPL (--enable-
+                # version3, --disable-libx264/libx265, no --enable-gpl);
+                # libfreetype + libharfbuzz for the connect card's drawtext;
+                # libopenh264 for the software encoder; libsrt for stream
+                # displays; s302m, mpeg2video and aac for the pump and encoder
+                # legs. Hardware H.264: win64 has qsv/nvenc/amf/mf, linux64
+                # vaapi/qsv/nvenc/amf, arm64 v4l2m2m + nvenc and NO vaapi or
+                # qsv -- which is what platform_priority() already assumes.
+                # You cannot execute the other platforms' binaries, so read the
+                # embedded configure string and the AVCodec names.
                 "id": "ffmpeg",
                 "name": "FFmpeg (LGPL build)",
-                "version": "7.1",
+                "version": "8.1",
                 "license": "LGPL-2.1",
                 "required": True,
                 "platforms": {
                     "win_x64": {
                         "type": "zip",
-                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-7.1.zip",
-                        "extract": "ffmpeg-n7.1-latest-win64-lgpl-7.1/bin/ffmpeg.exe",
+                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-8.1.zip",
+                        "extract": "ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-8.1/bin/ffmpeg.exe",
                     },
                     "linux_x64": {
                         "type": "tar.xz",
-                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-lgpl-7.1.tar.xz",
-                        "extract": "ffmpeg-n7.1-latest-linux64-lgpl-7.1/bin/ffmpeg",
+                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-lgpl-8.1.tar.xz",
+                        "extract": "ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-lgpl-8.1/bin/ffmpeg",
                     },
                     "linux_arm64": {
                         "type": "tar.xz",
-                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linuxarm64-lgpl-7.1.tar.xz",
-                        "extract": "ffmpeg-n7.1-latest-linuxarm64-lgpl-7.1/bin/ffmpeg",
+                        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n8.1.2-34-g9b6c8969e0-linuxarm64-lgpl-8.1.tar.xz",
+                        "extract": "ffmpeg-n8.1.2-34-g9b6c8969e0-linuxarm64-lgpl-8.1/bin/ffmpeg",
                     },
                 },
             },

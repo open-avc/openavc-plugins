@@ -115,7 +115,7 @@
       "file": "integrations/present",
       "format": "directory",
       "category": "integration",
-      "version": "0.6.1",
+      "version": "0.7.0",
       "author": "OpenAVC",
       "license": "MIT",
       "platforms": [

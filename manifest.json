@@ -39,8 +39,8 @@
         "integrations/present/panel/display.css": "ae58056cd8e270024b479ccf006572f318405acfa6a3b3515b6263b0fd2c76c8",
         "integrations/present/panel/display.html": "74c971a0529923fa81f60a5629dcee72cc14d895faef2e4818216f2033e4074c",
         "integrations/present/panel/display.js": "c5348255ea2d3271bfd5a206f9991730312a819fa398585cdec799446acc3966",
-        "integrations/present/plugin.json": "221c10c5109b0a6d3ed5945fdea681f3438f9e4edfcb02ad4cd6614efe8ce0e9",
-        "integrations/present/present_plugin.py": "f730dd6bc38b560e8dcc6c23a67da230a777b37ccb38b7421e13c581f0c2cf9b",
+        "integrations/present/plugin.json": "9ad443869a7e9ff51be4faac805e29ab902348d2f69aa9ce6e026599c279b001",
+        "integrations/present/present_plugin.py": "3df81528d1e27235a95e1ae5b026934082587e3ca23b57afe950165dc7ae93e6",
         "integrations/present/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4"
       }
     },
