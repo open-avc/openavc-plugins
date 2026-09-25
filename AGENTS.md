@@ -436,8 +436,9 @@ async def status():
 api.register_router(router)
 
 # Optional panel_paths keyword (added in platform 0.24.0): mark specific ext
-# routes reachable from a STANDALONE room panel (wall tablet / kiosk —
-# unauthenticated by design) on a claimed instance. Without it, panel elements
+# routes reachable from a STANDALONE room panel (wall tablet / kiosk — it
+# holds no programmer credential; the platform admits it once it is approved)
+# on a claimed instance. Without it, panel elements
 # calling /ext/* only work where the panel is embedded in the authenticated
 # Programmer IDE. Each entry is a path glob relative to the /ext mount,
 # optionally prefixed with one HTTP method ("GET /streams"); * crosses path
