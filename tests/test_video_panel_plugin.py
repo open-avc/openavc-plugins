@@ -25,6 +25,10 @@ _PLUGINS_ROOT = Path(__file__).resolve().parents[1]
 if str(_PLUGINS_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGINS_ROOT))
 
+# This folder, for the shared Reach devices through test helper.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _reach_devices import OWN, PINNED, needs_network  # noqa: E402
+
 from integrations.video_panel import sidecar as sidecar_mod
 from integrations.video_panel.sidecar import SidecarSupervisor
 
@@ -336,6 +340,10 @@ class _FakeApi:
         self.data_dir = None  # set by tests that run the real start()
         self.routers = []  # (router, kwargs) from register_router
         self.periodic = []  # names from create_periodic_task
+        # What local_address answers (Settings > Network > Reach devices
+        # through), and every host it was asked about.
+        self.reach_devices_address = None
+        self.local_address_hosts = []
 
     @property
     def config(self):
@@ -360,6 +368,10 @@ class _FakeApi:
 
     def create_task(self, coro, name=None):
         return asyncio.ensure_future(coro)
+
+    def local_address(self, host):
+        self.local_address_hosts.append(host)
+        return self.reach_devices_address
 
     def register_router(self, router, **kwargs):
         self.routers.append((router, kwargs))
@@ -1636,6 +1648,73 @@ def test_a_local_viewer_is_never_refused_mjpeg(monkeypatch):
     assert client.get("/mjpeg/auto-enc1").status_code == 502
 
 
+class _MjpegEncoder:
+    """An MJPEG source on ``host`` that notes who connected."""
+
+    def __init__(self, host):
+        self.host = host
+        self.peers = []
+        self.port = 0
+
+    async def __aenter__(self):
+        async def handle(reader, writer):
+            self.peers.append(writer.get_extra_info("peername")[0])
+            try:
+                await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 2)
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+                    b"Content-Length: 9\r\nConnection: close\r\n\r\n--frame\r\n"
+                )
+                await writer.drain()
+            except Exception:
+                pass
+            finally:
+                writer.close()
+
+        self._server = await asyncio.start_server(handle, self.host, 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc):
+        self._server.close()
+        await self._server.wait_closed()
+
+    @property
+    def url(self):
+        return f"http://{self.host}:{self.port}/?action=stream"
+
+
+async def _pull_mjpeg(plugin, url):
+    response = await plugin._mjpeg_stream_response(url)
+    return b"".join([chunk async for chunk in response.body_iterator])
+
+
+@needs_network
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+@pytest.mark.asyncio
+async def test_the_mjpeg_preview_leaves_through_the_chosen_adapter():
+    plugin = VideoPanelPlugin()
+    plugin.api = _FakeApi()
+    plugin.api.reach_devices_address = PINNED
+    async with _MjpegEncoder(OWN) as encoder:
+        assert await _pull_mjpeg(plugin, encoder.url) == b"--frame\r\n"
+    assert plugin.api.local_address_hosts == [OWN]
+    assert encoder.peers == [PINNED]
+
+
+@needs_network
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+@pytest.mark.asyncio
+async def test_with_no_adapter_chosen_the_mjpeg_preview_is_not_bound():
+    plugin = VideoPanelPlugin()
+    plugin.api = _FakeApi()
+    async with _MjpegEncoder(OWN) as encoder:
+        assert await _pull_mjpeg(plugin, encoder.url) == b"--frame\r\n"
+    assert plugin.api.local_address_hosts == [OWN]
+    assert encoder.peers == [OWN]
+
+
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_hls_file_names_cannot_climb_out_of_the_stream_path(monkeypatch):
     client, _, _ = _delivery_client(monkeypatch, "remote", streams=_ONE_STREAM)
@@ -1977,12 +2056,15 @@ def test_every_spawn_in_this_plugin_is_windowless():
 def test_the_platform_floor_covers_what_this_plugin_declares():
     """The plugin declares a firewall port; a platform that predates
     `network_ports` ignores it, and the panel in the room gets no picture on a
-    firewalled host -- the exact bug that declaration was added to fix. So the
-    floor is the release that reads it, and the catalog says the same thing:
+    firewalled host -- the exact bug that declaration was added to fix. The
+    MJPEG preview calls api.local_address, which a platform before 0.37.0 does
+    not have. So the floor covers both, and the catalog says the same thing:
     the platform decides installability from index.json, not from the class."""
     info = VideoPanelPlugin.PLUGIN_INFO
-    assert info["network_ports"], "the floor below is only about this key"
-    assert info["min_openavc_version"] == "0.31.0"
+    floor = tuple(int(part) for part in info["min_openavc_version"].split("."))
+    assert info["network_ports"]
+    assert floor >= (0, 31, 0), "the release that reads network_ports"
+    assert floor >= (0, 37, 0), "the release that has api.local_address"
 
     manifest = json.loads(
         (_PLUGINS_ROOT / "integrations" / "video_panel" / "plugin.json").read_text()

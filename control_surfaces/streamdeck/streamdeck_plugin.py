@@ -482,10 +482,13 @@ class _NetDeckDevice:
 
     is_network = True
 
-    def __init__(self, host, port, role="deck"):
+    def __init__(self, host, port, role="deck", local_address=None):
         self._host = host
         self._port = int(port)
         self._role = role
+        # api.local_address: where Settings > Network > Reach devices through
+        # says a connection to this host leaves from. Asked at every connect.
+        self._local_address = local_address
         self._sock = None
         self._mode = None           # "cora" | "legacy"
         self._dead = True
@@ -516,8 +519,11 @@ class _NetDeckDevice:
     def connect(self, timeout=_NET_CONNECT_TIMEOUT):
         """Open the socket and wait for the device's first keepalive (which
         also reveals the framing mode). Raises on failure."""
+        ip = self._local_address(self._host) if self._local_address else None
         self._sock = socket.create_connection(
-            (self._host, self._port), timeout=timeout
+            (self._host, self._port),
+            timeout=timeout,
+            source_address=(ip, 0) if ip else None,
         )
         self._sock.settimeout(1.0)
         self._dead = False
@@ -845,9 +851,10 @@ class _DockLink:
     second connection that drives the docked deck. Reconnects with capped
     exponential backoff; the plugin watchdog drives it every tick."""
 
-    def __init__(self, host, port):
+    def __init__(self, host, port, local_address=None):
         self.host = host
         self.port = int(port)
+        self._local_address = local_address  # api.local_address, for both connections
         self.key = f"{host}:{port}"
         self.state_key = re.sub(r"[^A-Za-z0-9_-]", "_", self.key)
         self.primary = None          # _NetDeckDevice (the unit itself)
@@ -890,7 +897,9 @@ class _DockLink:
         port docks advertise via discovery), where this one socket IS the
         deck and its identity comes from the Device-2 payload in place.
         """
-        endpoint = _NetDeckDevice(self.host, self.port, role="primary")
+        endpoint = _NetDeckDevice(
+            self.host, self.port, role="primary", local_address=self._local_address
+        )
         endpoint.link = self
         endpoint.connect()
         try:
@@ -927,7 +936,9 @@ class _DockLink:
         info = self.primary.device2 if self.primary else None
         if not info:
             return
-        child = _NetDeckDevice(self.host, info["port"], role="child")
+        child = _NetDeckDevice(
+            self.host, info["port"], role="child", local_address=self._local_address
+        )
         child.link = self
         child.connect()
         child._vid, child._pid = info["vid"], info["pid"]
@@ -1157,7 +1168,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.35.0",
+        "version": "1.36.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1174,12 +1185,11 @@ class StreamDeckPlugin:
         "category": "control_surface",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        # The APIs this plugin calls (variable_set, register_router,
-        # subscriptions, periodic tasks) and both gated capabilities
-        # (variable_write, http_endpoints) go back to v0.15.1, but its routes
-        # return the response shapes the Programmer settled on in 0.24.0, so
-        # that is the floor.
-        "min_openavc_version": "0.24.0",
+        # 0.37.0: a network deck's connections and the Test button bind to
+        # api.local_address (Settings > Network > Reach devices through),
+        # which earlier platforms do not have. (The routes' response shapes
+        # need 0.24.0, covered by the same floor.)
+        "min_openavc_version": "0.37.0",
         "dependencies": ["streamdeck", "pillow>=10.0"],
         "native_dependencies": [
             {
@@ -2068,7 +2078,7 @@ class StreamDeckPlugin:
         for key, entry in declared.items():
             link = self._dock_links.get(key)
             if link is None:
-                link = _DockLink(entry["host"], entry["port"])
+                link = _DockLink(entry["host"], entry["port"], self.api.local_address)
                 if entry["serial"]:
                     link.observed_serial = entry["serial"]
                 if entry["mdns_sn"]:
@@ -2278,9 +2288,13 @@ class StreamDeckPlugin:
                 return {"success": False, "error": "invalid port"}
             if not host or not (0 < port < 65536):
                 return {"success": False, "error": "enter a host or IP address"}
+            ip = self.api.local_address(host)
             try:
                 _reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port), timeout=3.0
+                    asyncio.open_connection(
+                        host, port, local_addr=(ip, 0) if ip else None
+                    ),
+                    timeout=3.0,
                 )
             except Exception as e:
                 return {"success": False, "error": _classify_net_error(e)}

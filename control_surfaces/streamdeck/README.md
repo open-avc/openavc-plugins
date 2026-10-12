@@ -40,6 +40,7 @@ Notes for installed systems:
 
 - **Set a static IP on the deck** (configured on the deck's own keys at power-up) so its address never changes. On DHCP networks the plugin records the deck's serial number and follows it to a new address automatically.
 - The connection is plain TCP on port 5343 with no authentication, like most AV control protocols. Keep decks on the control VLAN.
+- On a computer connected to more than one network, the deck connections and the **Test** button use the adapter chosen in Settings > Network > **Reach devices through**, like every other device connection.
 - **Network decks never attach on their own.** Only decks you add are used, so a deck someone brings into the building stays theirs.
 - Automatic discovery doesn't cross VLANs, Docker bridge networks, or NAT — add by IP address there. The connection itself works from every deployment, including Docker and VMs, with no USB passthrough.
 - Dock firmware updates still require Elgato's own app (7.1 or newer) on a separate computer; day-to-day operation never needs it. Don't leave Elgato's software running against a production dock — two controllers fighting over one deck makes it misbehave.

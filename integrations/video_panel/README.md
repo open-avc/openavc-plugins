@@ -160,6 +160,14 @@ the common setup. The panel itself only ever talks to OpenAVC. If the server
 can't reach the encoder's video network, the element shows an error instead of a
 picture.
 
+On a server connected to more than one network, an MJPEG preview is fetched
+through the adapter chosen in Settings > Network > **Reach devices through**.
+RTSP and SRT streams, and the **Test** and **Preview** buttons on the Video
+Streams page, are fetched by the bundled MediaMTX and FFmpeg, which cannot be
+told which adapter to use.
+They go out through whichever network the server's own routing sends that
+address to, even when Reach devices through names one adapter.
+
 ## Transcoding and hardware acceleration
 
 Browsers reliably play H.264 but not H.265 / HEVC, so the plugin re-encodes

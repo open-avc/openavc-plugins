@@ -29,6 +29,7 @@ import pytest
 # The openavc checkout on the import path, for PluginAPI / the test harness.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _platform_root import add_platform_to_path  # noqa: E402
+from _reach_devices import OWN, PINNED, needs_network  # noqa: E402
 
 add_platform_to_path()
 
@@ -3057,15 +3058,16 @@ def test_parse_device2_layout():
 class _FakeDock:
     """Minimal Cora-speaking dock on a localhost socket for transport tests."""
 
-    def __init__(self, keepalives=True):
+    def __init__(self, keepalives=True, host="127.0.0.1"):
         import socket as _socket
         self.sock = _socket.socket()
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock.bind((host, 0))
         self.sock.listen(1)
         self.port = self.sock.getsockname()[1]
         self.keepalives = keepalives
         self.received = []          # parsed (flags, op, mid, payload) from client
         self.conn = None
+        self.peer = None            # the address the client connected from
         self.stop = False
         self.feature_responses = {}  # report_id -> response payload bytes
         import threading as _threading
@@ -3076,9 +3078,10 @@ class _FakeDock:
         import struct as _struct
         import time as _time
         try:
-            self.conn, _ = self.sock.accept()
+            self.conn, addr = self.sock.accept()
         except OSError:
             return
+        self.peer = addr[0]
         self.conn.settimeout(0.1)
         stream = sd_module._CoraStream()
         last_ka = 0.0
@@ -3655,3 +3658,96 @@ def test_test_route_validates_and_reports_refused():
         assert ok["success"] is True
     finally:
         loop.close()
+
+
+# ──── Network decks: Settings > Network > Reach devices through ────
+
+
+@pytest.fixture
+def pin(monkeypatch):
+    """Pin Reach devices through to an address for the test."""
+    from openavc import reach_devices
+
+    def set_to(address):
+        monkeypatch.setattr(reach_devices, "address", lambda: address)
+
+    set_to("")
+    return set_to
+
+
+def _deck_at(host):
+    dock = _FakeDock(host=host)
+    dock.feature_responses[0x08] = b"\x08" + b"\x00" * 31
+    dock.feature_responses[0x1C] = _device2_payload(pid=0x0084, serial=b"PLUSSN9")
+    return dock
+
+
+@needs_network
+def test_a_network_deck_connects_from_the_chosen_adapter(pin):
+    pin(PINNED)
+    plugin, _state = _make_plugin({})
+    dock = _deck_at(OWN)
+    link = sd_module._DockLink(OWN, dock.port, plugin.api.local_address)
+    try:
+        link._connect_blocking()
+        assert link.primary.product_id() == 0x0084
+    finally:
+        link.close()
+        dock.close()
+    assert dock.peer == PINNED
+
+
+@needs_network
+def test_with_no_adapter_chosen_a_network_deck_is_not_bound(pin):
+    plugin, _state = _make_plugin({})
+    dock = _deck_at(OWN)
+    link = sd_module._DockLink(OWN, dock.port, plugin.api.local_address)
+    try:
+        link._connect_blocking()
+    finally:
+        link.close()
+        dock.close()
+    assert dock.peer == OWN
+
+
+@needs_network
+def test_the_docked_deck_connection_leaves_from_the_chosen_adapter_too(pin):
+    pin(PINNED)
+    plugin, _state = _make_plugin({})
+    child = _deck_at(OWN)
+    link = sd_module._DockLink(OWN, 1, plugin.api.local_address)
+    link.primary = type("Primary", (), {"device2": {
+        "vid": 0x0FD9, "pid": 0x0084, "serial": "PLUSSN9", "port": child.port,
+    }})()
+    try:
+        link._connect_child_blocking()
+        assert link.child is not None
+    finally:
+        if link.child is not None:
+            link.child.close()
+        child.close()
+    assert child.peer == PINNED
+
+
+@needs_network
+def test_the_network_test_button_dials_from_the_chosen_adapter(pin):
+    import socket as _socket
+
+    pin(PINNED)
+    plugin, _state = _make_plugin({})
+    router = plugin._build_ext_router()
+    test_ep = next(r.endpoint for r in router.routes if r.path == "/network/test")
+    srv = _socket.socket()
+    srv.bind((OWN, 0))
+    srv.listen(1)
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        ok = loop.run_until_complete(test_ep({"host": OWN, "port": srv.getsockname()[1]}))
+        assert ok["success"] is True
+        srv.settimeout(2.0)
+        conn, addr = srv.accept()
+        conn.close()
+    finally:
+        loop.close()
+        srv.close()
+    assert addr[0] == PINNED

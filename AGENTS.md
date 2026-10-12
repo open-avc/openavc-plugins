@@ -543,6 +543,33 @@ canonical `/guest/*` routes. Alias traffic gets the same rate-limit tier and
 401 accounting as the canonical routes. The Programmer IDE shows the alias as
 the plugin's "Guest URL". Added in platform 0.23.0.
 
+### 5.8 Connecting to Devices
+
+```python
+# Where a connection to AV equipment at `host` leaves from (added in platform
+# 0.37.0; no capability needed). Settings > Network > Reach devices through
+# can pin device traffic to one adapter on a computer with several networks.
+# Returns that adapter's address, or None when no adapter is chosen and for a
+# host on this computer (your own sidecar, a local service). Ask for every
+# connection, not once at start: the address follows DHCP.
+ip = api.local_address(host)
+local_addr = (ip, 0) if ip else None
+reader, writer = await asyncio.open_connection(host, port, local_addr=local_addr)
+sock = socket.create_connection((host, port), timeout=5, source_address=local_addr)
+
+# httpx: give the client a transport only when ip is set. A client given a
+# transport ignores its own verify/cert/limits/http2/trust_env, so pass those
+# to AsyncHTTPTransport as well.
+transport = httpx.AsyncHTTPTransport(local_address=ip) if ip else None
+client = httpx.AsyncClient(timeout=10.0, transport=transport)
+```
+
+Leave connections to services on the internet (a cloud API, a broker hosted
+elsewhere) unbound: the chosen adapter may have no route to them. A plugin
+that calls `local_address` sets `min_openavc_version` to at least `0.37.0`,
+or feature-detects it with `getattr(api, "local_address", None)` and connects
+unbound when it is missing.
+
 ---
 
 ## 6. Plugin Lifecycle
@@ -1096,7 +1123,7 @@ SURFACE_LAYOUT = {
 }
 ```
 
-**Network units (`"network": True`):** the editor offers "Add network deck" flows (empty state, deck inspector, and status cards for configured-but-offline entries). The plugin must then: read a top-level `network_decks: [{host, port?, serial?}]` config array (explicit opt-in — never auto-attach to LAN devices), serve two ext routes — `POST ext/network/scan` returning `{browse_available, found: [{host, port, name, serial, kind, already_added}]}` (use `api.mdns_browse` when available, feature-detected) and `POST ext/network/test` taking `{host, port}` and returning `{ok, error?}` — and publish per-entry status at `plugin.<id>.net.<host_port_sanitized>.status` plus `plugin.<id>.<serial>.transport` (`"usb" | "network" | "virtual"`) and `<serial>.address` once connected.
+**Network units (`"network": True`):** the editor offers "Add network deck" flows (empty state, deck inspector, and status cards for configured-but-offline entries). The plugin must then: read a top-level `network_decks: [{host, port?, serial?}]` config array (explicit opt-in — never auto-attach to LAN devices), serve two ext routes — `POST ext/network/scan` returning `{browse_available, found: [{host, port, name, serial, kind, already_added}]}` (use `api.mdns_browse` when available, feature-detected) and `POST ext/network/test` taking `{host, port}` and returning `{success, error?}`; both the units' connections and the test bind to `api.local_address(host)` (section 5.8) — and publish per-entry status at `plugin.<id>.net.<host_port_sanitized>.status` plus `plugin.<id>.<serial>.transport` (`"usb" | "network" | "virtual"`) and `<serial>.address` once connected.
 
 The actual layout may be detected from hardware at runtime. The static definition provides the default geometry while no hardware is connected.
 
@@ -1675,6 +1702,7 @@ class OccupancySensorPlugin:
 | Not handling errors in callbacks | 10 consecutive callback failures auto-disable the plugin. |
 | Manually cleaning up subscriptions in `stop()` | Cleanup is automatic. Only close external connections in `stop()`. |
 | Subscribing to `*` (everything) | Use narrow patterns. Broad subscriptions cause unnecessary callback overhead. |
+| Opening a connection to AV equipment without asking `api.local_address(host)` | On a computer with several networks, Settings > Network > Reach devices through sends device traffic out one adapter, and an unbound socket ignores it. Bind every connection to a device to the answer (section 5.8); leave internet services unbound. |
 
 ### Configuration
 

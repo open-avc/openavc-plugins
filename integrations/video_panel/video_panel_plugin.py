@@ -294,19 +294,19 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.21.0",
+        "version": "0.22.0",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
         "license": "MIT",
         "platforms": ["win_x64", "linux_x64", "linux_arm64"],
-        # 0.31.0: the platform reads `network_ports` (below) and opens the
-        # WebRTC media port in the host firewall. Before that release it does
-        # not, and a panel in the room gets no picture on a firewalled host --
-        # which is the bug that key exists to fix, so the plugin asks for a
-        # platform that honours it. (register_router(panel_paths=...) needs
-        # 0.24.0, and is covered by the same floor.)
-        "min_openavc_version": "0.31.0",
+        # 0.37.0: the MJPEG preview binds to api.local_address (Settings >
+        # Network > Reach devices through), which earlier platforms do not
+        # have. Covered by the same floor: 0.31.0, where the platform reads
+        # `network_ports` (below) and opens the WebRTC media port in the host
+        # firewall, without which a panel in the room gets no picture on a
+        # firewalled host; and register_router(panel_paths=...), 0.24.0.
+        "min_openavc_version": "0.37.0",
         # The sidecar binds this for WebRTC media, and it is the ONLY path a
         # panel in the room has. Neither installer covered it: Windows scopes
         # its firewall rule to openavc-server.exe and this port belongs to
@@ -1879,8 +1879,19 @@ class VideoPanelPlugin:
         and the upstream response are both closed when the panel disconnects
         (Starlette closes the generator), so a closed tab can't leak the
         connection to the AV-LAN encoder.
+
+        The connection leaves through the adapter Settings > Network > Reach
+        devices through chose (api.local_address), when one is chosen. httpx
+        ignores a client's own transport settings once it is given a
+        transport, so any added to the client go on the transport too; a
+        client with a transport also stops reading proxy settings from the
+        environment, which is right for a device on the AV network.
         """
-        client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))
+        ip = self.api.local_address(httpx.URL(url).host)
+        transport = httpx.AsyncHTTPTransport(local_address=ip) if ip else None
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, read=None), transport=transport
+        )
         try:
             request = client.build_request("GET", url)
             upstream = await client.send(request, stream=True)
