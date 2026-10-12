@@ -46,28 +46,28 @@
     },
     "streamdeck": {
       "files": {
-        "control_surfaces/streamdeck/README.md": "a67476fc3eb055203fce8cc800dc37eacc38833f48298b35b786121683fa3f7f",
+        "control_surfaces/streamdeck/README.md": "65608bc548899983c1c02457e6d39f7e2906cb5bd8b11cfa23e23bda2fa3d492",
         "control_surfaces/streamdeck/fonts/DejaVuSans.ttf": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
         "control_surfaces/streamdeck/fonts/LICENSE": "25f744fa9dd47ff9d3a6fb7fc43f1077dbdc981a043339275bc3cf804d383104",
         "control_surfaces/streamdeck/fonts/lucide-info.json": "951a23c65a08f084d8e0153fb2a9febc48f65cfeecddebdccb43fe20f773935d",
         "control_surfaces/streamdeck/fonts/lucide.ttf": "0ff17e4ce16364d2dae72689336262960e7d5067cfcdb07ca283465a2a34af48",
-        "control_surfaces/streamdeck/plugin.json": "c957b974d3ca865e998f306efad776c22935940e128ef29e23e705365751c324",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "3f56915bf7599d4df29e556de9add44a43daff196c4d778735e0e563f2ad8c2e"
+        "control_surfaces/streamdeck/plugin.json": "5ef6f7e222ef8a823cb088460183c56ead12e3db85e4cbc15131e953028b5981",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "15f2e5521cbec9a080cb909c37c02315e89179096702b8f11a55ecfbd0f9d908"
       }
     },
     "video_panel": {
       "files": {
         "integrations/video_panel/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
-        "integrations/video_panel/README.md": "15a4d1b6e9932b34b24142c3f125370b04cd7dff11c82bc199130ed512ef2a5a",
+        "integrations/video_panel/README.md": "1c1078c9a7be6aae3dd3213f2b45724be8198e19febb984626c2642b7125a0e4",
         "integrations/video_panel/panel/hls.light.min.js": "839aa4ef944a01ed62b07f0f5deeb323732e8fc0e93f1d725c01e73dc2d615b1",
         "integrations/video_panel/panel/hls.light.min.js.LICENSE": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
         "integrations/video_panel/panel/video_stream.js": "4c823e0bf8d6f885d0c8a76b23c86b7a8a0c945267a8006110307909023dc8c8",
-        "integrations/video_panel/plugin.json": "8aa4ade576e65a319220cdfda9f8c3fdc80545e6b59a51ecc8636f4598a1ba6a",
+        "integrations/video_panel/plugin.json": "1167db883719a1d373a5a311760db98b4ccfd4407fadb69c5ddbd6a909359e86",
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
         "integrations/video_panel/transcode.py": "93aa973202b67a2131321e96f328f39701a27b10b3b006088a8ed9f2ac7ca6be",
-        "integrations/video_panel/video_panel_plugin.py": "b84c42cfa8534bfd936008a1d216232f9da2b0ede61cf251a55524c9f56aa727"
+        "integrations/video_panel/video_panel_plugin.py": "e1b4d18d34e17a23bf9374f54496c4313d5e54af9b79373534b1131b9c076b87"
       }
     }
   }
