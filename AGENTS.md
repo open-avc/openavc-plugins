@@ -552,6 +552,8 @@ the plugin's "Guest URL". Added in platform 0.23.0.
 # Returns that adapter's address, or None when no adapter is chosen and for a
 # host on this computer (your own sidecar, a local service). A host at a
 # 169.254 address gets the adapter's own 169.254 address when it holds one.
+# While the chosen adapter has no address at all it raises ConnectionError,
+# with a sentence naming the adapter: handle it as a connection that failed.
 # Ask for every connection, not once at start: the address follows DHCP.
 ip = api.local_address(host)
 local_addr = (ip, 0) if ip else None

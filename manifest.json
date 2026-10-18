@@ -51,8 +51,8 @@
         "control_surfaces/streamdeck/fonts/LICENSE": "25f744fa9dd47ff9d3a6fb7fc43f1077dbdc981a043339275bc3cf804d383104",
         "control_surfaces/streamdeck/fonts/lucide-info.json": "951a23c65a08f084d8e0153fb2a9febc48f65cfeecddebdccb43fe20f773935d",
         "control_surfaces/streamdeck/fonts/lucide.ttf": "0ff17e4ce16364d2dae72689336262960e7d5067cfcdb07ca283465a2a34af48",
-        "control_surfaces/streamdeck/plugin.json": "5ef6f7e222ef8a823cb088460183c56ead12e3db85e4cbc15131e953028b5981",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "15f2e5521cbec9a080cb909c37c02315e89179096702b8f11a55ecfbd0f9d908"
+        "control_surfaces/streamdeck/plugin.json": "3273c72ca6b6588b818be7e2e6d8ced155951ea963e77f1d351b2096c378e2f3",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "b5a8629cd6ed2ea5465b17b1514fa070220fdf4d132d71d100c6ead0d349341f"
       }
     },
     "video_panel": {
@@ -64,10 +64,10 @@
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
         "integrations/video_panel/panel/video_stream.js": "4c823e0bf8d6f885d0c8a76b23c86b7a8a0c945267a8006110307909023dc8c8",
-        "integrations/video_panel/plugin.json": "1167db883719a1d373a5a311760db98b4ccfd4407fadb69c5ddbd6a909359e86",
+        "integrations/video_panel/plugin.json": "f30b914dbf60acbdefa54aae500e1cef3cbfa3d1afdd0fdb6268e16512790f58",
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
         "integrations/video_panel/transcode.py": "93aa973202b67a2131321e96f328f39701a27b10b3b006088a8ed9f2ac7ca6be",
-        "integrations/video_panel/video_panel_plugin.py": "e1b4d18d34e17a23bf9374f54496c4313d5e54af9b79373534b1131b9c076b87"
+        "integrations/video_panel/video_panel_plugin.py": "d86be73fe6398e5fb2330393880b059cf3c5e9a004ab7900e63a8482bf01e917"
       }
     }
   }

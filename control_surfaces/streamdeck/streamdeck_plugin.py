@@ -1168,7 +1168,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.36.0",
+        "version": "1.36.1",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -2288,7 +2288,12 @@ class StreamDeckPlugin:
                 return {"success": False, "error": "invalid port"}
             if not host or not (0 < port < 65536):
                 return {"success": False, "error": "enter a host or IP address"}
-            ip = self.api.local_address(host)
+            try:
+                ip = self.api.local_address(host)
+            except ConnectionError as e:
+                # The adapter chosen in Reach devices through has no address;
+                # the sentence names it and says where to change it.
+                return {"success": False, "error": str(e)}
             try:
                 _reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(

@@ -9,7 +9,7 @@
       "format": "directory",
       "category": "control_surface",
       "manufacturer": "Elgato",
-      "version": "1.36.0",
+      "version": "1.36.1",
       "author": "OpenAVC",
       "license": "MIT",
       "platforms": [
@@ -89,7 +89,7 @@
       "file": "integrations/video_panel",
       "format": "directory",
       "category": "integration",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "author": "OpenAVC",
       "license": "MIT",
       "platforms": [

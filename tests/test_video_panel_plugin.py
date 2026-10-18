@@ -1703,6 +1703,25 @@ async def test_the_mjpeg_preview_leaves_through_the_chosen_adapter():
     assert encoder.peers == [PINNED]
 
 
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+@pytest.mark.asyncio
+async def test_a_chosen_adapter_with_no_address_answers_the_preview_with_its_sentence():
+    from fastapi import HTTPException
+
+    said = "Ethernet 2, chosen in Settings > Network > Reach devices through, has no address."
+    plugin = VideoPanelPlugin()
+    plugin.api = _FakeApi()
+
+    def refused(host):
+        raise ConnectionError(said)
+
+    plugin.api.local_address = refused
+    with pytest.raises(HTTPException) as failed:
+        await plugin._mjpeg_stream_response("http://192.0.2.10:8080/stream")
+    assert failed.value.status_code == 502
+    assert failed.value.detail == said
+
+
 @needs_network
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 @pytest.mark.asyncio

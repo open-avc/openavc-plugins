@@ -3730,6 +3730,24 @@ def test_the_docked_deck_connection_leaves_from_the_chosen_adapter_too(pin):
 
 
 @needs_network
+def test_the_network_test_button_says_when_the_chosen_adapter_has_no_address():
+    said = "Ethernet 2, chosen in Settings > Network > Reach devices through, has no address."
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+
+    def refused(host):
+        raise ConnectionError(said)
+
+    plugin.api.local_address = refused
+    router = plugin._build_ext_router()
+    test_ep = next(r.endpoint for r in router.routes if r.path == "/network/test")
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        answer = loop.run_until_complete(test_ep({"host": "192.0.2.10", "port": 5343}))
+    finally:
+        loop.close()
+    assert answer == {"success": False, "error": said}
+
+
 def test_the_network_test_button_dials_from_the_chosen_adapter(pin):
     import socket as _socket
 

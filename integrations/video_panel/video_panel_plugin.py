@@ -294,7 +294,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.22.0",
+        "version": "0.22.1",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -1887,7 +1887,11 @@ class VideoPanelPlugin:
         client with a transport also stops reading proxy settings from the
         environment, which is right for a device on the AV network.
         """
-        ip = self.api.local_address(httpx.URL(url).host)
+        try:
+            ip = self.api.local_address(httpx.URL(url).host)
+        except ConnectionError as exc:
+            # The adapter chosen in Reach devices through has no address.
+            raise HTTPException(502, str(exc))
         transport = httpx.AsyncHTTPTransport(local_address=ip) if ip else None
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(10.0, read=None), transport=transport
