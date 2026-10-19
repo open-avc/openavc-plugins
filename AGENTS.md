@@ -571,7 +571,10 @@ Leave connections to services on the internet (a cloud API, a broker hosted
 elsewhere) unbound: the chosen adapter may have no route to them. A plugin
 that calls `local_address` sets `min_openavc_version` to at least `0.37.0`,
 or feature-detects it with `getattr(api, "local_address", None)` and connects
-unbound when it is missing.
+unbound when it is missing. In tests, `PluginTestHarness` answers it by the same
+rule from `harness.reach_devices_address` and
+`harness.reach_devices_link_local_address` (the adapter's 169.254 address); both
+are empty by default, as with no adapter chosen.
 
 ---
 
