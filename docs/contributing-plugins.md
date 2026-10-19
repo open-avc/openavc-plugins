@@ -69,7 +69,7 @@ Before submitting a pull request:
 - [ ] Plugin uses `api.create_task()` instead of `asyncio.create_task()`
 - [ ] State values are flat primitives only (str, int, float, bool, None)
 - [ ] External connections are closed in `stop()`
-- [ ] Connections to AV equipment bind to `api.local_address(host)`, and `min_openavc_version` is at least `0.37.0` when the plugin calls it
+- [ ] Connections to AV equipment bind to `api.local_address(host)`, and `min_openavc_version` is at least `0.37.0`, or the plugin checks `getattr(api, "local_address", None)` first and connects unbound without it
 - [ ] Reconnection logic uses exponential backoff (not tight retry loops)
 - [ ] `health_check()` is implemented for plugins with external connections
 
