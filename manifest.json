@@ -27,7 +27,7 @@
     "present": {
       "files": {
         "integrations/present/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
-        "integrations/present/README.md": "c178db07bddc93d2e934c318e53a5e4076e830b210a3c97ad8fe988e661e82f6",
+        "integrations/present/README.md": "168a2ea820f35b451b0c615b9b406748d4474e9f854978e365b4981a0978944d",
         "integrations/present/encoders.py": "8eb08c3f3e11683681a3126fdea7c9c5316575feb4ac5017ab162cb79e4fa242",
         "integrations/present/enum_outputs.ps1": "a9646fee2f56883a09c674400ee185f795b1d5d0a027c9fa152c691a76fa2587",
         "integrations/present/hostoutputs.py": "cda3fe37f70dad3968eea3bb74b589f83511642bb2b0eff6c0d06b7e6b39aaa6",
@@ -39,8 +39,8 @@
         "integrations/present/panel/display.css": "ae58056cd8e270024b479ccf006572f318405acfa6a3b3515b6263b0fd2c76c8",
         "integrations/present/panel/display.html": "74c971a0529923fa81f60a5629dcee72cc14d895faef2e4818216f2033e4074c",
         "integrations/present/panel/display.js": "c5348255ea2d3271bfd5a206f9991730312a819fa398585cdec799446acc3966",
-        "integrations/present/plugin.json": "9ad443869a7e9ff51be4faac805e29ab902348d2f69aa9ce6e026599c279b001",
-        "integrations/present/present_plugin.py": "3df81528d1e27235a95e1ae5b026934082587e3ca23b57afe950165dc7ae93e6",
+        "integrations/present/plugin.json": "23fcd21d2bc398410e069b3fc82467dc4f13d6d26b5d82d07cfd1b57d11bfec3",
+        "integrations/present/present_plugin.py": "37dc892b0e8c06593cb4d3d81322509207bd6f16e469b2c9cb927f4007521497",
         "integrations/present/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4"
       }
     },

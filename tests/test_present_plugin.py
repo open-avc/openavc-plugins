@@ -153,6 +153,7 @@ def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     # the test host's NICs or whether the openavc package is importable.
     plugin._detect_local_ip = lambda: "192.0.2.10"
     plugin._http_port = lambda: 8080
+    plugin._port80_active = lambda: False
     plugin._tls_state = lambda: (False, 0)
     plugin._redirect_http_enabled = lambda: False
     # As if the sidecar config had been rendered at start with that address,
@@ -1331,6 +1332,20 @@ async def test_join_url_trusted_cert_rides_the_redirect():
     plugin2._tls_state = lambda: (True, 8443)
     plugin2._redirect_http_enabled = lambda: True
     assert await plugin2._join_url() == "http://av.example.edu:8080/present"
+
+
+@pytest.mark.asyncio
+async def test_join_url_drops_the_port_when_port_80_answers():
+    """The platform's port-80 listener lets either http form drop the port;
+    the direct https form keeps its own."""
+    plugin = _plugin()
+    plugin._port80_active = lambda: True
+    assert await plugin._join_url() == "192.0.2.10/present"
+    plugin._tls_state = lambda: (True, 8443)
+    assert await plugin._join_url() == "https://192.0.2.10:8443/present"
+    plugin.api = _FakeApi({"displays": []}, state={"system.cloud.cert_status": "installed"})
+    plugin._redirect_http_enabled = lambda: True
+    assert await plugin._join_url() == "http://192.0.2.10/present"
 
 
 @pytest.mark.asyncio

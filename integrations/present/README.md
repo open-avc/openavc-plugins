@@ -92,6 +92,8 @@ same-port https attempt. With a trusted certificate installed (and the
 http-to-https redirect on, its default), the card shows the plain `http://`
 address instead: the server redirects guests to the certified https
 address, so they land on a secure page with no certificate warning at all.
+With **Short URLs (port 80 redirect)** turned on in the server's network
+settings, a plain address drops the port, like `192.168.1.20/present`.
 
 ## Displays
 

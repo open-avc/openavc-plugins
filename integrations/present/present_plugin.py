@@ -203,7 +203,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.7.0",
+        "version": "0.7.1",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -651,18 +651,22 @@ class PresentPlugin:
         land on a green-lock page with no browser warning at all — the
         direct https form would serve the self-signed cert and put the
         interstitial right back.
+
+        Either http form drops the port when the platform has port 80
+        answering (HTTP itself on 80, or its port-80 listener), the same rule
+        the platform's own setup screen follows.
         """
         address = self._join_host()
         tls_enabled, tls_port = self._tls_state()
         if tls_enabled:
             cert = await self.api.state_get("system.cloud.cert_status")
             if cert == "installed" and self._redirect_http_enabled():
-                port = self._http_port()
+                port = 80 if self._port80_active() else self._http_port()
                 host = address if port == 80 else f"{address}:{port}"
                 return f"http://{host}/{_GUEST_ALIAS}"
             host = address if tls_port == 443 else f"{address}:{tls_port}"
             return f"https://{host}/{_GUEST_ALIAS}"
-        port = self._http_port()
+        port = 80 if self._port80_active() else self._http_port()
         host = address if port == 80 else f"{address}:{port}"
         return f"{host}/{_GUEST_ALIAS}"
 
@@ -740,6 +744,18 @@ class PresentPlugin:
             return int(get_system_config().get("network", "http_port"))
         except Exception:
             return 8080
+
+    @staticmethod
+    def _port80_active():
+        """Whether port 80 answers for the platform, so a typed http URL can
+        drop the port. Set only once a listener actually bound it (the
+        port-80 listener is best effort); False on a platform without it."""
+        try:
+            from openavc import runtime_flags
+
+            return bool(runtime_flags.port80_active)
+        except Exception:
+            return False
 
     @staticmethod
     def _tls_state():
