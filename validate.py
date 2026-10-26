@@ -354,6 +354,39 @@ def _extract_class_attr(content, attr_name):
     return None
 
 
+def validate_config_hook(content, file_name, result):
+    """The optional ``validate_config`` is called on the plugin class (which may
+    not be running) before its config is saved, synchronously. An instance
+    method or an async one is never asked, which reads as a check that passes
+    everything."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        declares_info = any(
+            isinstance(item, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "PLUGIN_INFO" for t in item.targets)
+            for item in node.body
+        )
+        if not declares_info:
+            continue
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if item.name != "validate_config":
+                continue
+            decorators = {d.id for d in item.decorator_list if isinstance(d, ast.Name)}
+            if isinstance(item, ast.AsyncFunctionDef):
+                result.error(f"{file_name}: validate_config must not be async -- "
+                             "OpenAVC calls it synchronously before saving a config")
+            elif not decorators & {"classmethod", "staticmethod"}:
+                result.error(f"{file_name}: validate_config must be a @classmethod or "
+                             "@staticmethod -- OpenAVC calls it on the class, which may not be running")
+
+
 def validate_plugin_dir(plugin_path, result):
     """Validate a plugin directory."""
 
@@ -434,6 +467,9 @@ def validate_plugin_dir(plugin_path, result):
         extensions = _extract_class_attr(content, "EXTENSIONS")
         if extensions is not None:
             validate_extensions_schema(extensions, result)
+
+    if "validate_config" in content:
+        validate_config_hook(content, main_file.name, result)
 
     # Check for plugin.json
     plugin_json_path = plugin_path / "plugin.json"

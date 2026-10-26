@@ -3769,3 +3769,159 @@ def test_the_network_test_button_dials_from_the_chosen_adapter(pin):
         loop.close()
         srv.close()
     assert addr[0] == PINNED
+
+
+# ──── validate_config: what OpenAVC asks before storing a config ────
+
+
+def _configurator_config():
+    """A config shaped the way the Stream Deck view writes one, including the
+    half-filled entries it saves while someone is still choosing (an action
+    with no type yet, a rule with no state key yet). The deck uses every part
+    of it as written, so nothing here may be reported."""
+    return {
+        "brightness": 70,
+        "button_color": "#1e293b",
+        "buttons": [
+            {"index": 0, "page": 0, "label": "Power", "bindings": {
+                "press": [{"action": "macro", "macro": "system_on"}],
+                "feedback": {"key": "var.on", "style_active": {"bg_color": "#16a34a"}},
+                "visible_when": {"all": [{"key": "var.on", "operator": "truthy"}]},
+            }},
+            {"index": 1, "page": 0, "bindings": {"press": [
+                {"action": "device.command", "device": "proj", "command": "power", "params": {"on": True},
+                 "mode": "toggle", "toggle_key": "var.on", "off_action": {"action": "macro", "macro": "off"}},
+            ]}},
+            {"index": 2, "page": 1, "bindings": {"press": [
+                {"action": "state.set", "key": "var.level", "value": 5, "mode": "hold_repeat", "hold_repeat_ms": 200},
+            ]}},
+            {"index": 3, "page": 1, "bindings": {"press": [
+                {"action": "navigate", "page": "2", "mode": "tap_hold", "hold_threshold_ms": 500,
+                 "hold_action": {"action": "navigate", "page": "__prev_page__"}},
+            ]}},
+            {"index": 4, "page": 0, "bindings": {"press": [{"action": ""}]}},
+            {"index": 5, "page": 0, "label_source": "var.name", "value_source": "var.level", "bindings": {}},
+        ],
+        "global_buttons": [
+            {"index": 7, "bindings": {"press": [{"action": "navigate", "page": "__next_page__"}]}},
+        ],
+        "auto_page": [
+            {"page": 1, "when": {"key": "device.proj.power", "operator": "eq", "value": "on"}},
+            {"page": 0, "when": {"key": "", "operator": "truthy"}},
+        ],
+        "auto_brightness": [
+            {"level": 30, "when": {"any": [{"key": "var.night", "operator": "=="}]}},
+            {"level": 30, "when": {"key": "", "operator": "truthy"}},
+        ],
+        "idle_dim": {"after_seconds": 300, "level": 10},
+        "page_names": {"0": "Home", "1": "Audio"},
+        "dials": [
+            {"index": 0, "label": "Volume", "adjust": {"key": "var.volume", "step": 2, "min": 0, "max": 100},
+             "press": [{"action": "state.set", "key": "var.mute", "value": True}],
+             "cw": [], "ccw": [{"action": ""}], "long_press": [{"action": "macro", "macro": "reset"}],
+             "pressed_adjust": {"key": "var.bass", "step": 1}, "hold_threshold_ms": 600},
+        ],
+        "touchscreen": {"idle": "blank", "zones": [
+            {"label": "Vol", "x": 0, "w": 200, "value_source": "var.volume",
+             "touch": [{"action": "macro", "macro": "mute"}], "drag_adjust": {"key": "var.volume", "step": 1}},
+            {"label": "Bass", "feedback": {"key": "var.bass"}},
+        ]},
+        "info_strip": {"items": [
+            {"label": "Room", "value_source": "var.room"},
+            {"source": "text", "text": "Hello"},
+        ]},
+        "virtual_decks": [{"model": "Stream Deck +", "serial": "VIRT-1"}],
+        "network_decks": [{"host": "192.0.2.20", "port": 5343, "serial": "", "mdns_sn": ""}],
+        "deck_names": {"VIRT-1": "Lectern"},
+        "deck_settings": {"VIRT-1": {"brightness": 40}},
+        "decks": {"ABC123": {"buttons": [{"index": 0, "page": 0, "bindings": {"press": []}}]}},
+    }
+
+
+def test_validate_config_has_nothing_to_say_about_what_the_view_writes():
+    assert StreamDeckPlugin.validate_config(_configurator_config()) == []
+    assert StreamDeckPlugin.validate_config({}) == []
+    # Anything typed into the view's number boxes saves, whatever the deck
+    # makes of it: the view re-sends the whole config on every edit.
+    typed = _configurator_config()
+    typed["touchscreen"]["zones"][0].update({"x": -40, "w": 0})
+    typed["network_decks"][0]["port"] = 70000
+    typed["auto_page"][1]["when"]["operator"] = ""
+    assert StreamDeckPlugin.validate_config(typed) == []
+
+
+def _set(path, value):
+    def apply(config):
+        target = config
+        for step in path[:-1]:
+            target = target[step]
+        target[path[-1]] = value
+    return apply
+
+
+def _append(path, value):
+    def apply(config):
+        target = config
+        for step in path:
+            target = target[step]
+        target.append(value)
+    return apply
+
+
+# (what is wrong, the change that makes it wrong, the path the sentence names)
+_MALFORMED = [
+    ("buttons not a list", _set(["buttons"], {"index": 0}), "buttons is not a list"),
+    ("button with no index", _append(["buttons"], {"page": 0}), "buttons[6] has no index"),
+    ("index as text", _set(["buttons", 0, "index"], "0"), "buttons[0]: index \"0\""),
+    ("negative page", _set(["buttons", 0, "page"], -1), "buttons[0]: page -1"),
+    ("unknown action", _set(["buttons", 0, "bindings", "press", 0, "action"], "script.call"),
+     "buttons[0].bindings.press[0]: action \"script.call\""),
+    ("navigate to a word", _set(["buttons", 3, "bindings", "press", 0, "page"], "home"),
+     "buttons[3].bindings.press[0]: page \"home\""),
+    ("params not an object", _set(["buttons", 1, "bindings", "press", 0, "params"], "on"),
+     "buttons[1].bindings.press[0]: params"),
+    ("unknown mode", _set(["buttons", 2, "bindings", "press", 0, "mode"], "hold"),
+     "buttons[2].bindings.press[0]: mode \"hold\""),
+    ("repeat rate as text", _set(["buttons", 2, "bindings", "press", 0, "hold_repeat_ms"], "200"),
+     "buttons[2].bindings.press[0].hold_repeat_ms"),
+    ("press as text", _set(["buttons", 4, "bindings", "press"], "macro"),
+     "buttons[4].bindings.press is not an action"),
+    ("visible_when as text", _set(["buttons", 0, "bindings", "visible_when"], "var.on"),
+     "buttons[0].bindings.visible_when is not a condition"),
+    ("unknown operator", _set(["auto_page", 0, "when", "operator"], "contains"),
+     "auto_page[0].when: operator \"contains\""),
+    ("rule with no page", _set(["auto_page", 0], {"when": {"key": "var.on"}}), "auto_page[0] has no page"),
+    ("level as a word", _set(["auto_brightness", 0, "level"], "dim"), "auto_brightness[0].level \"dim\""),
+    ("idle dim with no delay", _set(["idle_dim"], {"level": 5}), "idle_dim has no after_seconds"),
+    ("dial index as text", _set(["dials", 0, "index"], "0"), "dials[0]: index \"0\""),
+    ("adjust step as a word", _set(["dials", 0, "adjust", "step"], "big"), "dials[0].adjust.step \"big\""),
+    ("zone x as text", _set(["touchscreen", "zones", 0, "x"], "0"), "touchscreen.zones[0].x \"0\""),
+    ("strip idle unknown", _set(["touchscreen", "idle"], "off"), "touchscreen.idle \"off\""),
+    ("three info items", _append(["info_strip", "items"], {"label": "Extra"}), "info_strip.items holds 3"),
+    ("unknown virtual model", _set(["virtual_decks", 0, "model"], "Stream Deck Pro"),
+     "virtual_decks[0]: model \"Stream Deck Pro\""),
+    ("repeated virtual serial", _append(["virtual_decks"], {"model": "Stream Deck XL", "serial": "VIRT-1"}),
+     "virtual_decks[1] repeats serial VIRT-1"),
+    ("port as a word", _set(["network_decks", 0, "port"], "deck"), "network_decks[0]: port \"deck\""),
+    ("deck override not an object", _set(["decks", "ABC123"], []), "decks.ABC123 is not an object"),
+    ("problem inside a deck override", _set(["decks", "ABC123", "buttons", 0, "index"], "zero"),
+     "decks.ABC123.buttons[0]: index \"zero\""),
+    ("brightness as a word", _set(["brightness"], "bright"), "brightness \"bright\""),
+]
+
+
+@pytest.mark.parametrize("change,named", [(c, n) for _, c, n in _MALFORMED],
+                         ids=[label for label, _, _ in _MALFORMED])
+def test_validate_config_names_the_part_the_deck_would_skip(change, named):
+    config = _configurator_config()
+    change(config)
+    problems = StreamDeckPlugin.validate_config(config)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(named), problems[0]
+
+
+def test_validate_config_is_called_on_the_class_and_never_raises():
+    # OpenAVC asks before the plugin is running, so the hook is a class
+    # method, and it reads anything it is handed without raising.
+    for junk in (None, [], "text", {"buttons": [None, 3, "x"], "dials": [[]], "decks": {"A": None}}):
+        assert isinstance(StreamDeckPlugin.validate_config(junk), list)

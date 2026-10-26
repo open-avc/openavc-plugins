@@ -1119,6 +1119,442 @@ def _net_deck_class(pid):
     return mapping.get(pid)
 
 
+# ──── Config check ────
+#
+# What validate_config() reports: the parts of a proposed config this plugin
+# would skip or read as something else. Each rule mirrors a reader below, so
+# the check never refuses a shape the deck uses. Nothing the Stream Deck
+# view can save is refused either, since it re-sends the whole config on
+# every edit: an unfinished entry (a rule with no state key yet, an action
+# with no type yet), and a value typed into one of its number boxes (a zone
+# position or width, a network port), are left to the deck to make of.
+
+_KNOWN_ACTIONS = ("macro", "device.command", "state.set", "navigate")
+_KNOWN_MODES = ("tap", "toggle", "hold_repeat", "tap_hold")
+_KNOWN_OPERATORS = frozenset(
+    {"eq", "ne", "gt", "lt", "gte", "lte", "truthy", "falsy"}
+    | set(_CONDITION_OPERATOR_ALIASES)
+)
+_LAYOUT_LISTS = ("buttons", "global_buttons", "auto_page", "dials", "auto_brightness")
+_DIAL_ACTIONS = (
+    "press", "long_press", "cw", "ccw", "pressed_cw", "pressed_ccw",
+    "touch", "long_touch",
+)
+
+
+def _shown(value):
+    return json.dumps(value) if isinstance(value, (str, int, float, bool)) else type(value).__name__
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_slot_number(value):
+    """A key, dial or page number: a whole number, 0 or more."""
+    return _is_number(value) and float(value).is_integer() and value >= 0
+
+
+def _join(prefix, name):
+    return f"{prefix}.{name}" if prefix else name
+
+
+def _action_problems(action, path):
+    if not isinstance(action, dict):
+        return [f"{path} is not an action, so it does nothing."]
+    problems = []
+    kind = action.get("action")
+    if kind not in (None, "") and kind not in _KNOWN_ACTIONS:
+        problems.append(
+            f"{path}: action {_shown(kind)} is not one a deck runs "
+            f"({', '.join(_KNOWN_ACTIONS)}), so it does nothing."
+        )
+    if kind == "navigate":
+        page = action.get("page")
+        if page not in (None, "", "__next_page__", "__prev_page__"):
+            try:
+                int(page)
+            except (TypeError, ValueError):
+                problems.append(
+                    f"{path}: page {_shown(page)} is not a page number, "
+                    f"\"__next_page__\" or \"__prev_page__\", so the key does not change page."
+                )
+    if kind == "device.command":
+        params = action.get("params")
+        if params is not None and not isinstance(params, dict):
+            problems.append(
+                f"{path}: params is not an object, so the command is sent without them."
+            )
+    return problems
+
+
+def _action_list_problems(value, path):
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return _action_problems(value, path)
+    if isinstance(value, list):
+        problems = []
+        for i, action in enumerate(value):
+            problems += _action_problems(action, f"{path}[{i}]")
+        return problems
+    return [f"{path} is not an action or a list of actions, so it does nothing."]
+
+
+def _condition_problems(cond, path, consequence):
+    if not isinstance(cond, dict):
+        return [f"{path} is not a condition object, so {consequence}."]
+    problems = []
+    for group in ("all", "any"):
+        if group not in cond or cond[group] is None:
+            continue
+        children = cond[group]
+        if not isinstance(children, list):
+            problems.append(f"{path}.{group} is not a list of conditions, so {consequence}.")
+            continue
+        for i, child in enumerate(children):
+            problems += _condition_problems(child, f"{path}.{group}[{i}]", consequence)
+    key = cond.get("key")
+    if key is not None and not isinstance(key, str):
+        problems.append(f"{path}.key is not a state key, so {consequence}.")
+    operator = cond.get("operator")
+    if operator not in (None, "") and (
+        not isinstance(operator, str) or operator not in _KNOWN_OPERATORS
+    ):
+        problems.append(
+            f"{path}: operator {_shown(operator)} is not one the deck knows "
+            f"(eq, ne, gt, lt, gte, lte, truthy, falsy), so {consequence}."
+        )
+    return problems
+
+
+def _source_problems(entry, path, consequence):
+    problems = []
+    for field in ("label_source", "value_source", "key"):
+        value = entry.get(field)
+        if value is not None and not isinstance(value, str):
+            problems.append(f"{path}.{field} is not a state key, so {consequence}.")
+    return problems
+
+
+def _adjust_problems(adjust, path):
+    if adjust is None:
+        return []
+    if not isinstance(adjust, dict):
+        return [f"{path} is not an object, so turning does not change anything."]
+    problems = []
+    key = adjust.get("key")
+    if key is not None and not isinstance(key, str):
+        problems.append(f"{path}.key is not a state key, so turning does not change anything.")
+    for field in ("step", "min", "max"):
+        value = adjust.get(field)
+        if value is not None and _coerce_numeric(value) is None:
+            problems.append(f"{path}.{field} {_shown(value)} is not a number, so it is ignored.")
+    return problems
+
+
+def _button_problems(btn, path, paged):
+    if not isinstance(btn, dict):
+        return [f"{path} is not an object, so it is on no key."]
+    problems = []
+    index = btn.get("index")
+    if index is None:
+        problems.append(f"{path} has no index, so it is on no key.")
+    elif not _is_slot_number(index):
+        problems.append(
+            f"{path}: index {_shown(index)} is not a key number (0 or more), so it is on no key."
+        )
+    page = btn.get("page")
+    if paged and page is not None and not _is_slot_number(page):
+        problems.append(
+            f"{path}: page {_shown(page)} is not a page number (0 or more), so the key never shows."
+        )
+    problems += _source_problems(
+        {f: btn.get(f) for f in ("label_source", "value_source")}, path,
+        "the deck stops updating its keys",
+    )
+    bindings = btn.get("bindings")
+    if bindings is None:
+        return problems
+    if not isinstance(bindings, dict):
+        return problems + [f"{path}.bindings is not an object, so the key does nothing."]
+    press_path = f"{path}.bindings.press"
+    problems += _action_list_problems(bindings.get("press"), press_path)
+    press = _unwrap_binding(bindings.get("press"))
+    if isinstance(press, dict):
+        mode = press.get("mode")
+        if mode is not None and mode not in _KNOWN_MODES:
+            problems.append(
+                f"{press_path}[0]: mode {_shown(mode)} is not one a key has "
+                f"({', '.join(_KNOWN_MODES)}), so the key acts as a tap."
+            )
+        for field in ("hold_repeat_ms", "hold_threshold_ms"):
+            value = press.get(field)
+            if value is not None and not _is_number(value):
+                problems.append(
+                    f"{press_path}[0].{field} {_shown(value)} is not a number, "
+                    f"so the key fails when pressed."
+                )
+        for field in ("off_action", "hold_action"):
+            value = press.get(field)
+            if value is not None:
+                problems += _action_problems(value, f"{press_path}[0].{field}")
+    feedback = bindings.get("feedback")
+    if feedback is not None and not isinstance(feedback, dict):
+        problems.append(f"{path}.bindings.feedback is not an object, so the key never changes look.")
+    elif isinstance(feedback, dict):
+        problems += _source_problems(
+            {"key": feedback.get("key")}, f"{path}.bindings.feedback",
+            "the deck stops updating its keys",
+        )
+    visible = bindings.get("visible_when")
+    if visible is not None:
+        problems += _condition_problems(
+            visible, f"{path}.bindings.visible_when", "the key stays hidden",
+        )
+    return problems
+
+
+def _dial_problems(dial, path):
+    if not isinstance(dial, dict):
+        return [f"{path} is not an object, so it is on no dial."]
+    problems = []
+    index = dial.get("index")
+    if index is None:
+        problems.append(f"{path} has no index, so it is on no dial.")
+    elif not _is_slot_number(index):
+        problems.append(
+            f"{path}: index {_shown(index)} is not a dial number (0 or more), so it is on no dial."
+        )
+    for field in _DIAL_ACTIONS:
+        problems += _action_list_problems(dial.get(field), f"{path}.{field}")
+    for field in ("adjust", "pressed_adjust"):
+        problems += _adjust_problems(dial.get(field), f"{path}.{field}")
+    threshold = dial.get("hold_threshold_ms")
+    if threshold is not None and _coerce_numeric(threshold) is None:
+        problems.append(
+            f"{path}.hold_threshold_ms {_shown(threshold)} is not a number, so it is ignored."
+        )
+    return problems
+
+
+def _touchscreen_problems(ts, path):
+    if not isinstance(ts, dict):
+        return [f"{path} is not an object, so the touch strip shows the clock."]
+    problems = []
+    idle = ts.get("idle")
+    if idle is not None and idle not in ("clock", "blank"):
+        problems.append(
+            f"{path}.idle {_shown(idle)} is not \"clock\" or \"blank\", so the strip shows the clock."
+        )
+    zones = ts.get("zones")
+    if zones is None:
+        return problems
+    if not isinstance(zones, list):
+        return problems + [f"{path}.zones is not a list, so the strip lays out its own zones."]
+    for i, zone in enumerate(zones):
+        zone_path = f"{path}.zones[{i}]"
+        if not isinstance(zone, dict):
+            problems.append(f"{zone_path} is not an object, so it is skipped.")
+            continue
+        for field in ("x", "w"):
+            value = zone.get(field)
+            if value is not None and not isinstance(value, (int, float)):
+                problems.append(
+                    f"{zone_path}.{field} {_shown(value)} is not a number, "
+                    f"so the zone is placed by an even split instead."
+                )
+        for field in ("touch", "long_touch"):
+            problems += _action_list_problems(zone.get(field), f"{zone_path}.{field}")
+        problems += _adjust_problems(zone.get("drag_adjust"), f"{zone_path}.drag_adjust")
+        problems += _source_problems(zone, zone_path, "the deck stops updating the strip")
+        feedback = zone.get("feedback")
+        if feedback is not None and not isinstance(feedback, dict):
+            problems.append(f"{zone_path}.feedback is not an object, so the zone never changes look.")
+    return problems
+
+
+def _info_strip_problems(cfg, path):
+    if not isinstance(cfg, dict):
+        return [f"{path} is not an object, so the screen shows the clock."]
+    problems = _source_problems(cfg, path, "the deck stops updating the screen")
+    items = cfg.get("items")
+    if items is None:
+        return problems
+    if not isinstance(items, list):
+        return problems + [f"{path}.items is not a list, so it is ignored."]
+    drawn = 0
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            problems.append(f"{path}.items[{i}] is not an object, so it is skipped.")
+            continue
+        drawn += 1
+        problems += _source_problems(item, f"{path}.items[{i}]", "the deck stops updating the screen")
+    if drawn > 2:
+        problems.append(
+            f"{path}.items holds {drawn} items, and the screen fits two, "
+            f"so the ones after the second are not drawn."
+        )
+    return problems
+
+
+def _rule_problems(rule, path, value_field, consequence):
+    """An auto_page or auto_brightness rule: a ``when`` plus a page or level."""
+    if not isinstance(rule, dict):
+        return [f"{path} is not an object, so it is skipped."]
+    problems = []
+    when = rule.get("when")
+    if when is None:
+        problems.append(f"{path} has no when, so it is skipped.")
+    else:
+        problems += _condition_problems(when, f"{path}.when", consequence)
+    value = rule.get(value_field)
+    if value is None:
+        problems.append(f"{path} has no {value_field}, so it is skipped.")
+    elif value_field == "page":
+        try:
+            int(value)
+        except (TypeError, ValueError):
+            problems.append(f"{path}.page {_shown(value)} is not a page number, so it is skipped.")
+    elif _coerce_numeric(value) is None:
+        problems.append(f"{path}.{value_field} {_shown(value)} is not a number, so it is skipped.")
+    return problems
+
+
+def _layout_problems(cfg, prefix):
+    """The per-deck sections, in the flat config or one ``decks`` override."""
+    problems = []
+    for name in _LAYOUT_LISTS:
+        value = cfg.get(name)
+        if value is not None and not isinstance(value, list):
+            problems.append(f"{_join(prefix, name)} is not a list, so it is ignored.")
+    for name in ("buttons", "global_buttons"):
+        entries = cfg.get(name)
+        for i, btn in enumerate(entries if isinstance(entries, list) else []):
+            problems += _button_problems(btn, f"{_join(prefix, name)}[{i}]", name == "buttons")
+    rules = cfg.get("auto_page")
+    for i, rule in enumerate(rules if isinstance(rules, list) else []):
+        problems += _rule_problems(
+            rule, f"{_join(prefix, 'auto_page')}[{i}]", "page", "it never matches",
+        )
+    rules = cfg.get("auto_brightness")
+    for i, rule in enumerate(rules if isinstance(rules, list) else []):
+        problems += _rule_problems(
+            rule, f"{_join(prefix, 'auto_brightness')}[{i}]", "level", "it never matches",
+        )
+    dials = cfg.get("dials")
+    for i, dial in enumerate(dials if isinstance(dials, list) else []):
+        problems += _dial_problems(dial, f"{_join(prefix, 'dials')}[{i}]")
+    if cfg.get("touchscreen") is not None:
+        problems += _touchscreen_problems(cfg["touchscreen"], _join(prefix, "touchscreen"))
+    if cfg.get("info_strip") is not None:
+        problems += _info_strip_problems(cfg["info_strip"], _join(prefix, "info_strip"))
+    idle_dim = cfg.get("idle_dim")
+    if idle_dim is not None:
+        path = _join(prefix, "idle_dim")
+        if not isinstance(idle_dim, dict):
+            problems.append(f"{path} is not an object, so the deck never dims.")
+        else:
+            for field in ("after_seconds", "level"):
+                value = idle_dim.get(field)
+                if value is None:
+                    problems.append(f"{path} has no {field}, so the deck never dims.")
+                elif _coerce_numeric(value) is None:
+                    problems.append(
+                        f"{path}.{field} {_shown(value)} is not a number, so the deck never dims."
+                    )
+    names = cfg.get("page_names")
+    if names is not None and not isinstance(names, dict):
+        problems.append(f"{_join(prefix, 'page_names')} is not an object, so it is ignored.")
+    return problems
+
+
+def _config_problems(config):
+    """Every part of a proposed config the plugin would skip or misread."""
+    if not isinstance(config, dict):
+        return []
+    problems = _layout_problems(config, "")
+
+    brightness = config.get("brightness")
+    if brightness is not None and _coerce_numeric(brightness) is None:
+        problems.append(f"brightness {_shown(brightness)} is not a number, so 70 is used.")
+    for name in ("decks", "deck_names", "deck_settings"):
+        value = config.get(name)
+        if value is not None and not isinstance(value, dict):
+            problems.append(f"{name} is not an object keyed by deck serial, so it is ignored.")
+
+    decks = config.get("decks")
+    for serial, override in (decks.items() if isinstance(decks, dict) else []):
+        if not isinstance(override, dict):
+            problems.append(
+                f"decks.{serial} is not an object, so that deck uses the main layout."
+            )
+            continue
+        problems += _layout_problems(override, f"decks.{serial}")
+
+    settings = config.get("deck_settings")
+    for serial, entry in (settings.items() if isinstance(settings, dict) else []):
+        if not isinstance(entry, dict):
+            problems.append(f"deck_settings.{serial} is not an object, so it is ignored.")
+            continue
+        level = entry.get("brightness")
+        if level is not None and _coerce_numeric(level) is None:
+            problems.append(
+                f"deck_settings.{serial}.brightness {_shown(level)} is not a number, so it is ignored."
+            )
+
+    virtuals = config.get("virtual_decks")
+    if virtuals is not None and not isinstance(virtuals, list):
+        problems.append("virtual_decks is not a list, so no virtual deck is created.")
+    seen = set()
+    for i, item in enumerate(virtuals if isinstance(virtuals, list) else []):
+        path = f"virtual_decks[{i}]"
+        if not isinstance(item, dict):
+            problems.append(f"{path} is not an object, so no deck is created for it.")
+            continue
+        model = item.get("model")
+        if model not in _VIRTUAL_MODELS:
+            problems.append(
+                f"{path}: model {_shown(model)} is not a virtual deck model "
+                f"({', '.join(_VIRTUAL_MODELS)}), so no deck is created for it."
+            )
+        serial = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("serial", "")))
+        if not serial:
+            problems.append(
+                f"{path} has no serial made of letters, digits, - or _, so no deck is created for it."
+            )
+        elif serial in seen:
+            problems.append(f"{path} repeats serial {serial}, so no second deck is created.")
+        seen.add(serial)
+
+    networked = config.get("network_decks")
+    if networked is not None and not isinstance(networked, list):
+        problems.append("network_decks is not a list, so no network deck is added.")
+    seen = set()
+    for i, item in enumerate(networked if isinstance(networked, list) else []):
+        path = f"network_decks[{i}]"
+        if not isinstance(item, dict):
+            problems.append(f"{path} is not an object, so no deck is added for it.")
+            continue
+        host = str(item.get("host", "")).strip()
+        if not host:
+            problems.append(f"{path} has no host, so no deck is added for it.")
+        try:
+            port = int(item.get("port", _NET_DEFAULT_PORT))
+        except (TypeError, ValueError):
+            port = None
+        if port is None:
+            problems.append(
+                f"{path}: port {_shown(item.get('port'))} is not a number, so no deck is added for it."
+            )
+        elif host and 0 < port < 65536:
+            key = f"{host}:{port}"
+            if key in seen:
+                problems.append(f"{path} repeats {key}, so no second deck is added.")
+            seen.add(key)
+    return problems
+
+
 class _DeckSession:
     """Per-deck runtime state for one connected Stream Deck.
 
@@ -1168,7 +1604,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.36.1",
+        "version": "1.37.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1503,6 +1939,15 @@ class StreamDeckPlugin:
             },
         ],
     }
+
+    @classmethod
+    def validate_config(cls, config):
+        """Sentences naming each part of a proposed config the deck would
+        skip or misread: a key with no index, an action type it does not
+        run, a virtual deck model it does not have. OpenAVC asks before
+        storing a config and refuses one that adds a problem; an empty list
+        is a config the deck can use as written."""
+        return _config_problems(config)
 
     def __init__(self):
         self.api = None

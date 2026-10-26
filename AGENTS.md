@@ -635,6 +635,30 @@ that trips over a missing attribute costs a log line and nothing more.
         """
         await self.rebuild_from_config()
         return True
+
+    @classmethod
+    def validate_config(cls, config):
+        """Optional. Name what a proposed config gets wrong, before it is saved.
+
+        OpenAVC calls this on the class (the plugin may not be running) when
+        the IDE or the AI saves this plugin's config, after the CONFIG_SCHEMA
+        type check. Return a list of sentences, one per part the plugin would
+        skip or misread, each naming that part and what happens to it; an
+        empty list means the plugin can use the config as written. A save that
+        adds a problem is refused with your sentences; a problem the stored
+        config already had is saved and reported back as `config_problems`, so
+        a project that arrived with one can still be edited. A project load is
+        not checked. You are handed a copy. Keep it synchronous and
+        side-effect free, and never refuse a shape your own editor saves while
+        someone is still filling it in. Anything other than a list, or a raise,
+        counts as no opinion. Optional: older OpenAVC never calls it, and a
+        plugin without it is never checked, so adding it raises no
+        `min_openavc_version`.
+        """
+        problems = []
+        if not isinstance(config.get("rules", []), list):
+            problems.append("rules is not a list, so no rule runs.")
+        return problems
 ```
 
 ### 6.3 Lifecycle Flow

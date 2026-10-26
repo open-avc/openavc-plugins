@@ -58,6 +58,8 @@ Configuration changes apply live: saving updates the running decks in place, so 
 
 For reference, the plugin's config keys (all editable in the view, and writable by automation/AI): `buttons`, `global_buttons`, `auto_page`, `page_names`, `dials`, `touchscreen`, `info_strip`, `brightness` (default 70), `auto_brightness`, `idle_dim`, `button_color` (default `#1a1a2e`), `text_color` (default `#e0e0e0`), `deck_names`, `deck_settings`, `decks`, `virtual_decks`, `network_decks`.
 
+On OpenAVC 0.37.2 and later, a config written by automation or the AI assistant is checked before it is saved: a part the deck would skip (a key with no index, an action type it does not run, a virtual deck model it does not have) is refused with a sentence naming that part. A problem already in a saved config does not stop the view from saving your edits; it is named once.
+
 ## Configuring Buttons
 
 1. Click a key in the deck picture.
