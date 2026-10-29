@@ -43,6 +43,13 @@ try:
 except ImportError:  # pragma: no cover - exercised only via package-path import
     from . import transcode
 
+# A sentence raised as PluginRefusal from start() is the one the AI assistant
+# repeats to the integrator; on an older OpenAVC the card shows it either way.
+try:
+    from openavc.core.plugin_api import PluginRefusal
+except ImportError:  # OpenAVC before 0.38.0
+    PluginRefusal = RuntimeError
+
 # MediaMTX listeners. Everything is on localhost except the WebRTC media UDP
 # port, which the browser connects to directly for low-latency LAN playback.
 _API_HOST = "127.0.0.1"
@@ -294,7 +301,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.22.1",
+        "version": "0.22.2",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",
@@ -551,7 +558,7 @@ class VideoPanelPlugin:
             )
             await self.api.state_set("running", False)
             await self.api.state_set("error", msg)
-            raise RuntimeError(msg)
+            raise PluginRefusal(msg)
 
         # ffmpeg is bundled for HEVC transcode/snapshots used by later parts of
         # the plugin; resolve it now so the path is ready, but it's not invoked
@@ -578,7 +585,7 @@ class VideoPanelPlugin:
             )
             await self.api.state_set("error", msg)
             await self.api.state_set("sidecar", "failed")
-            raise RuntimeError(msg)
+            raise PluginRefusal(msg)
 
         self._supervisor = SidecarSupervisor(
             [str(self._mediamtx_bin), str(self._config_path)],

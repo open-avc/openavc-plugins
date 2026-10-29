@@ -1578,8 +1578,12 @@ async def test_start_refuses_when_media_ports_already_answer(tmp_path, monkeypat
         return {"items": []}
 
     plugin._api_get = imposter_answers
-    with pytest.raises(RuntimeError, match="already using"):
+    from integrations.present import present_plugin
+
+    with pytest.raises(RuntimeError, match="already using") as excinfo:
         await plugin.start(plugin.api)
+    # Marked for the reader, so the AI assistant can repeat it.
+    assert isinstance(excinfo.value, present_plugin.PluginRefusal)
     assert plugin.api.state["running"] is False
     assert "unclean shutdown" in plugin.api.state["error"]
     assert plugin._supervisor is None  # never spawned anything

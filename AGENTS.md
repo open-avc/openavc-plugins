@@ -610,6 +610,31 @@ child process, a socket, a serial port — because nothing else holds a referenc
 to it. The platform bounds the call and logs anything it raises, so a `stop()`
 that trips over a missing attribute costs a log line and nothing more.
 
+**When `start()` can't go on because of something the integrator can put
+right** (an API key not entered, a device not connected, a native library not
+installed), raise `PluginRefusal` with a sentence that says what to do. The
+plugin's card in the Programmer shows it, and the AI assistant answers with it
+as written, so the assistant can tell the integrator what to change. Anything
+else `start()` raises still shows on the card, but the assistant is told only
+that the plugin couldn't start and that the Programmer's Log has the details.
+`PluginRefusal` is new in platform 0.38.0; import it with a fallback, and the
+plugin needs no `min_openavc_version` for it (on an earlier release the card
+shows the sentence as before):
+
+```python
+try:
+    from openavc.core.plugin_api import PluginRefusal
+except ImportError:  # OpenAVC before 0.38.0
+    PluginRefusal = RuntimeError
+
+
+class WeatherPlugin:
+    async def start(self, api):
+        self.api = api
+        if not api.config.get("api_key"):
+            raise PluginRefusal("Enter the weather service API key in this plugin's settings.")
+```
+
 ### 6.2 Optional Methods
 
 ```python
@@ -1730,6 +1755,7 @@ class OccupancySensorPlugin:
 | Not declaring capabilities | API calls without matching capability raise `PluginPermissionError`. |
 | Blocking the event loop | Use `await` for I/O. Never use `time.sleep()` -- use `asyncio.sleep()`. |
 | Not handling errors in callbacks | 10 consecutive callback failures auto-disable the plugin. |
+| Raising `RuntimeError("Enter the API key...")` from `start()` | Raise `PluginRefusal` (section 6.1). The AI assistant answers only with a refusal's sentence; for anything else it says the plugin couldn't start and points at the Log. |
 | Manually cleaning up subscriptions in `stop()` | Cleanup is automatic. Only close external connections in `stop()`. |
 | Subscribing to `*` (everything) | Use narrow patterns. Broad subscriptions cause unnecessary callback overhead. |
 | Opening a connection to AV equipment without asking `api.local_address(host)` | On a computer with several networks, Settings > Network > Reach devices through sends device traffic out one adapter, and an unbound socket ignores it. Bind every connection to a device to the answer (section 5.8); leave internet services unbound. |

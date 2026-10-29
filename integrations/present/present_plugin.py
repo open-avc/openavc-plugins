@@ -77,6 +77,13 @@ try:
 except ImportError:  # pragma: no cover - exercised only via package-path import
     from . import encoders, kiosk, output
 
+# A sentence raised as PluginRefusal from start() is the one the AI assistant
+# repeats to the integrator; on an older OpenAVC the card shows it either way.
+try:
+    from openavc.core.plugin_api import PluginRefusal
+except ImportError:  # OpenAVC before 0.38.0
+    PluginRefusal = RuntimeError
+
 _PLUGIN_DIR = Path(__file__).resolve().parent
 
 # MediaMTX listeners. Signaling and the control API are loopback-only; three
@@ -203,7 +210,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.7.1",
+        "version": "0.7.2",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -428,7 +435,7 @@ class PresentPlugin:
             )
             await self.api.state_set("running", False)
             await self.api.state_set("error", msg)
-            raise RuntimeError(msg)
+            raise PluginRefusal(msg)
         self._ensure_executable(self._mediamtx_bin)
         self._ensure_executable(self._ffmpeg_bin)
 
@@ -449,7 +456,7 @@ class PresentPlugin:
             )
             await self.api.state_set("running", False)
             await self.api.state_set("error", msg)
-            raise RuntimeError(msg)
+            raise PluginRefusal(msg)
 
         await self.api.state_set("running", False)
         await self.api.state_set("error", "")

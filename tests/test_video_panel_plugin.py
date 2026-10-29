@@ -1984,6 +1984,8 @@ async def test_start_refuses_a_port_something_else_already_holds(monkeypatch, tm
         with pytest.raises(RuntimeError) as excinfo:
             await plugin.start(api)
         assert str(port) in str(excinfo.value)
+        # Marked for the reader, so the AI assistant can repeat it.
+        assert isinstance(excinfo.value, vp_mod.PluginRefusal)
         assert not spawned, "it spawned a MediaMTX that could never bind"
         assert api.state["sidecar"] == "failed"
         assert str(port) in api.state["error"]

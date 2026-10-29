@@ -66,6 +66,7 @@ Before submitting a pull request:
 - [ ] Code follows Python best practices (async/await, proper error handling)
 - [ ] No hardcoded paths, credentials, or environment-specific values
 - [ ] `start()` and `stop()` lifecycle methods are implemented
+- [ ] When `start()` can't go on because of something the integrator can put right (a missing API key, a device not connected), it raises `PluginRefusal` with a sentence saying what to do, imported with the `RuntimeError` fallback in `AGENTS.md` section 6.1
 - [ ] Plugin uses `api.create_task()` instead of `asyncio.create_task()`
 - [ ] State values are flat primitives only (str, int, float, bool, None)
 - [ ] External connections are closed in `stop()`

@@ -22,6 +22,13 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+# A sentence raised as PluginRefusal from start() is the one the AI assistant
+# repeats to the integrator; on an older OpenAVC the card shows it either way.
+try:
+    from openavc.core.plugin_api import PluginRefusal
+except ImportError:  # OpenAVC before 0.38.0
+    PluginRefusal = RuntimeError
+
 # StreamDeck and PIL are imported lazily in start() to ensure
 # the .deps/ DLL search path is set up by the plugin loader first.
 StreamDeck = None
@@ -1625,7 +1632,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.38.0",
+        "version": "1.38.1",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1999,8 +2006,8 @@ class StreamDeckPlugin:
             _lazy_import()
         except ImportError as e:
             if "hidapi" in str(e).lower() or "hid" in str(e).lower():
-                raise RuntimeError(self._hidapi_error_message()) from e
-            raise RuntimeError(
+                raise PluginRefusal(self._hidapi_error_message()) from e
+            raise PluginRefusal(
                 "Failed to import Stream Deck library. "
                 "Make sure the 'streamdeck' and 'pillow' packages are installed."
             ) from e
@@ -2034,7 +2041,7 @@ class StreamDeckPlugin:
             StreamDeck.DeviceManager().enumerate()
         except Exception as e:
             if "hidapi" in str(e).lower() or "hid" in str(e).lower():
-                raise RuntimeError(self._hidapi_error_message()) from e
+                raise PluginRefusal(self._hidapi_error_message()) from e
             raise
 
         # Subscribe to context actions (independent of any connected deck, and
