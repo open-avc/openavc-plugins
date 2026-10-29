@@ -46,13 +46,13 @@
     },
     "streamdeck": {
       "files": {
-        "control_surfaces/streamdeck/README.md": "556ddebea87624fbdfc01efb58cfa04265b5106b6cc1a8af0ce10879e24eb470",
+        "control_surfaces/streamdeck/README.md": "f51fd2701a7331c82466abde87ce48df20f2927bea68c14961d95866bde21b0d",
         "control_surfaces/streamdeck/fonts/DejaVuSans.ttf": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
         "control_surfaces/streamdeck/fonts/LICENSE": "25f744fa9dd47ff9d3a6fb7fc43f1077dbdc981a043339275bc3cf804d383104",
         "control_surfaces/streamdeck/fonts/lucide-info.json": "951a23c65a08f084d8e0153fb2a9febc48f65cfeecddebdccb43fe20f773935d",
         "control_surfaces/streamdeck/fonts/lucide.ttf": "0ff17e4ce16364d2dae72689336262960e7d5067cfcdb07ca283465a2a34af48",
-        "control_surfaces/streamdeck/plugin.json": "b93edd79f5ec8dc224132705a716a39a96b67f7947520945f97935ff8203a835",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "363732ef04ec481df518b3d5c40adb8c9502dd897eb6eefb45a5181c335ea829"
+        "control_surfaces/streamdeck/plugin.json": "56e3495962389d6124a9667f492b0253734945b861ee99b338c2a78817543157",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "09162c48248d8385325db1ac627490690934ec58ba6bb8eb8c569bf670ce89e5"
       }
     },
     "video_panel": {

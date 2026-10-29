@@ -1127,7 +1127,10 @@ def _net_deck_class(pid):
 # view can save is refused either, since it re-sends the whole config on
 # every edit: an unfinished entry (a rule with no state key yet, an action
 # with no type yet), and a value typed into one of its number boxes (a zone
-# position or width, a network port), are left to the deck to make of.
+# position or width, a network port), are left to the deck to make of. A
+# key the deck would write but cannot (a panel control or a device state) is
+# refused: the view offers only variables there, and the deck would drop the
+# write at every press.
 
 _KNOWN_ACTIONS = ("macro", "device.command", "state.set", "navigate")
 _KNOWN_MODES = ("tap", "toggle", "hold_repeat", "tap_hold")
@@ -1159,6 +1162,21 @@ def _join(prefix, name):
     return f"{prefix}.{name}" if prefix else name
 
 
+# What a key, dial or zone may write: a user variable or this plugin's own
+# state (its id is "streamdeck"), the rule _apply_state_set enforces when it
+# runs.
+_WRITABLE_PREFIXES = ("var.", "plugin.streamdeck.")
+
+
+def _write_problems(key, path, consequence):
+    if not isinstance(key, str) or not key or key.startswith(_WRITABLE_PREFIXES):
+        return []
+    return [
+        f"{path}: {_shown(key)} is not a variable (var.*) or the deck's own "
+        f"plugin.streamdeck.* state, the only keys a deck writes, so {consequence}."
+    ]
+
+
 def _action_problems(action, path):
     if not isinstance(action, dict):
         return [f"{path} is not an action, so it does nothing."]
@@ -1185,6 +1203,8 @@ def _action_problems(action, path):
             problems.append(
                 f"{path}: params is not an object, so the command is sent without them."
             )
+    if kind == "state.set":
+        problems += _write_problems(action.get("key"), path, "the action does nothing")
     return problems
 
 
@@ -1246,6 +1266,7 @@ def _adjust_problems(adjust, path):
     key = adjust.get("key")
     if key is not None and not isinstance(key, str):
         problems.append(f"{path}.key is not a state key, so turning does not change anything.")
+    problems += _write_problems(key, path, "the deck does not change it")
     for field in ("step", "min", "max"):
         value = adjust.get(field)
         if value is not None and _coerce_numeric(value) is None:
@@ -1604,7 +1625,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.37.0",
+        "version": "1.38.0",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (

@@ -3818,7 +3818,8 @@ def _configurator_config():
         "dials": [
             {"index": 0, "label": "Volume", "adjust": {"key": "var.volume", "step": 2, "min": 0, "max": 100},
              "press": [{"action": "state.set", "key": "var.mute", "value": True}],
-             "cw": [], "ccw": [{"action": ""}], "long_press": [{"action": "macro", "macro": "reset"}],
+             "cw": [{"action": "state.set", "key": "plugin.streamdeck.mode", "value": "trim"}],
+             "ccw": [{"action": ""}], "long_press": [{"action": "macro", "macro": "reset"}],
              "pressed_adjust": {"key": "var.bass", "step": 1}, "hold_threshold_ms": 600},
         ],
         "touchscreen": {"idle": "blank", "zones": [
@@ -3895,6 +3896,12 @@ _MALFORMED = [
     ("idle dim with no delay", _set(["idle_dim"], {"level": 5}), "idle_dim has no after_seconds"),
     ("dial index as text", _set(["dials", 0, "index"], "0"), "dials[0]: index \"0\""),
     ("adjust step as a word", _set(["dials", 0, "adjust", "step"], "big"), "dials[0].adjust.step \"big\""),
+    ("a key sets a panel control", _set(["buttons", 2, "bindings", "press", 0, "key"], "ui.btn_1.label"),
+     "buttons[2].bindings.press[0]: \"ui.btn_1.label\" is not a variable"),
+    ("a dial adjusts a device state", _set(["dials", 0, "adjust", "key"], "device.proj.volume"),
+     "dials[0].adjust: \"device.proj.volume\" is not a variable"),
+    ("a swipe adjusts another plugin's state", _set(["touchscreen", "zones", 0, "drag_adjust", "key"], "plugin.other.level"),
+     "touchscreen.zones[0].drag_adjust: \"plugin.other.level\" is not a variable"),
     ("zone x as text", _set(["touchscreen", "zones", 0, "x"], "0"), "touchscreen.zones[0].x \"0\""),
     ("strip idle unknown", _set(["touchscreen", "idle"], "off"), "touchscreen.idle \"off\""),
     ("three info items", _append(["info_strip", "items"], {"label": "Extra"}), "info_strip.items holds 3"),
