@@ -36,8 +36,16 @@ Streams are stored with the project. Each stream has:
 | Hardware acceleration | Which video chip to use when transcoding (see below) |
 
 Credentials are sent to the source as part of the stream address; you do not
-need to embed them in the URL yourself. Use **Test** when adding a stream to
-confirm it is reachable and to see whether it needs transcoding.
+need to embed them in the URL yourself. A login written into the Source URL
+(`rtsp://admin:pass@192.168.1.50/stream1`) moves into Username and Password
+when the stream is saved. Use **Test** when adding a stream to confirm it is
+reachable and to see whether it needs transcoding.
+
+On OpenAVC versions that keep logins on the system, a stream's password is
+saved on the OpenAVC system rather than in the project, so backups, exports
+and templates do not contain it, and the Video Streams page shows it as
+**Saved on this system** with **Change**. A project opened on another system
+asks for it again.
 
 ## Showing a stream on a panel
 

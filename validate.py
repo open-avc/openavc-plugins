@@ -274,6 +274,11 @@ def validate_config_schema(config_schema, result):
             result.error(f"CONFIG_SCHEMA field '{field_id}' must be a dict")
             continue
 
+        # A login. Only a real True marks one; "true" or 1 would read as
+        # marked here and be treated as an ordinary setting by OpenAVC.
+        if "secret" in field_def and not isinstance(field_def["secret"], bool):
+            result.error(f"CONFIG_SCHEMA field '{field_id}' has 'secret' that is not true or false")
+
         if "type" not in field_def:
             result.error(f"CONFIG_SCHEMA field '{field_id}' missing 'type'")
             continue
@@ -294,6 +299,60 @@ def validate_config_schema(config_schema, result):
 
         if field_type == "mapping_list" and "item_schema" not in field_def:
             result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'mapping_list' but missing 'item_schema'")
+        elif field_type == "mapping_list" and isinstance(field_def.get("item_schema"), dict):
+            # A mapping_list row has no id, so OpenAVC has nothing to keep a
+            # row's login under. A list of logins is declared in CONFIG_SECRETS.
+            for column_id, column in field_def["item_schema"].items():
+                if isinstance(column, dict) and "secret" in column:
+                    result.error(
+                        f"CONFIG_SCHEMA field '{field_id}' column '{column_id}' has 'secret': "
+                        "a mapping_list row has no id to keep a login under. Keep the list "
+                        "outside CONFIG_SCHEMA and declare it in CONFIG_SECRETS."
+                    )
+
+
+_CONFIG_SECRETS_KEYS = {"id", "fields", "generated"}
+
+
+def validate_config_secrets(config_secrets, config_schema, result):
+    """Validate a CONFIG_SECRETS dict: the config lists whose items hold a
+    login, keyed by the list's config key."""
+    if not isinstance(config_secrets, dict):
+        result.error("CONFIG_SECRETS must be a dict")
+        return
+    schema_keys = set(config_schema) if isinstance(config_schema, dict) else set()
+    for list_key, entry in config_secrets.items():
+        where = f"CONFIG_SECRETS['{list_key}']"
+        if not isinstance(list_key, str) or not list_key:
+            result.error(f"CONFIG_SECRETS has a key that is not a non-empty string: {list_key!r}")
+            continue
+        if list_key in schema_keys:
+            result.error(
+                f"{where}: '{list_key}' is also a CONFIG_SCHEMA field. Mark a schema field "
+                "with 'secret': True instead."
+            )
+        if not isinstance(entry, dict):
+            result.error(f"{where} must be a dict with 'id' and 'fields'")
+            continue
+        unknown = sorted(set(entry) - _CONFIG_SECRETS_KEYS)
+        if unknown:
+            result.error(f"{where} has unknown key(s) {unknown}: only 'id', 'fields' and 'generated'")
+        id_key = entry.get("id")
+        if not isinstance(id_key, str) or not id_key:
+            result.error(f"{where} needs 'id': the key in each item that holds its unique id")
+        fields = entry.get("fields")
+        if not isinstance(fields, list) or not fields:
+            result.error(f"{where} needs 'fields': a list of the keys in each item that hold a login")
+        else:
+            names = [f for f in fields if isinstance(f, str) and f]
+            if len(names) != len(fields):
+                result.error(f"{where}['fields'] must hold non-empty strings only")
+            if len(set(names)) != len(names):
+                result.error(f"{where}['fields'] names a key twice")
+            if isinstance(id_key, str) and id_key in names:
+                result.error(f"{where}: the id key '{id_key}' cannot also be a login")
+        if "generated" in entry and not isinstance(entry["generated"], bool):
+            result.error(f"{where}['generated'] must be true or false")
 
 
 def validate_extensions_schema(extensions, result):
@@ -336,6 +395,26 @@ def validate_extensions_schema(extensions, result):
                     f"EXTENSIONS['{ext_type}'] has duplicate {id_field} '{ext_id}'"
                 )
             seen.add(ext_id)
+
+
+def _extract_declared(content, attr_name):
+    """A class attribute's literal value, following one ``NAME = NAME`` alias
+    to the module-level dict it names (as extract_plugin_info does). None when
+    it is not there or not a literal."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+    node = _find_assignment(tree, attr_name)
+    if isinstance(node, ast.Name):
+        _, module_nodes = _module_level_assignments(tree)
+        node = module_nodes.get(node.id)
+    if node is None:
+        return None
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        return None
 
 
 def _extract_class_attr(content, attr_name):
@@ -442,24 +521,22 @@ def validate_plugin_dir(plugin_path, result):
     if "time.sleep(" in content:
         result.error(f"{main_file.name}: uses time.sleep() which blocks the event loop. Use asyncio.sleep() instead.")
 
-    # Check for CONFIG_SCHEMA
-    has_config_schema = "CONFIG_SCHEMA" in content
-    if has_config_schema:
-        try:
-            tree = ast.parse(content)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    for item in node.body:
-                        if isinstance(item, ast.Assign):
-                            for target in item.targets:
-                                if isinstance(target, ast.Name) and target.id == "CONFIG_SCHEMA":
-                                    try:
-                                        schema = ast.literal_eval(item.value)
-                                        validate_config_schema(schema, result)
-                                    except Exception:
-                                        pass
-        except Exception:
-            pass
+    # Check for CONFIG_SCHEMA. Followed through `CONFIG_SCHEMA = CONFIG_SCHEMA`
+    # to a module-level dict, which a class-body literal read alone skipped.
+    config_schema = None
+    if "CONFIG_SCHEMA" in content:
+        config_schema = _extract_declared(content, "CONFIG_SCHEMA")
+        if config_schema is not None:
+            validate_config_schema(config_schema, result)
+
+    # Check for CONFIG_SECRETS (the config lists whose items hold a login).
+    if "CONFIG_SECRETS" in content:
+        config_secrets = _extract_declared(content, "CONFIG_SECRETS")
+        if config_secrets is None:
+            result.warn(f"{main_file.name}: could not read CONFIG_SECRETS statically -- "
+                        "it is not being validated. Declare it as a dict literal.")
+        else:
+            validate_config_secrets(config_secrets, config_schema, result)
 
     # Check for EXTENSIONS (UI extensions). Best-effort: only literal dicts can
     # be checked; ones built at runtime are skipped.

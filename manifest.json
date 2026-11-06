@@ -14,20 +14,20 @@
     },
     "dante": {
       "files": {
-        "integrations/dante/dante_plugin.py": "1218bb373fb4f8d72df7860a852927449f9fea123e7c681032f92d55e5df7cbe",
-        "integrations/dante/plugin.json": "4d459a9c73cc05df39bd6723c198f06c78bd886ec6726a5284507609ef7c4642"
+        "integrations/dante/dante_plugin.py": "de36547eca62ce61f84e96a0c4f7309fa090b9b58cb75bf65187984ec315e329",
+        "integrations/dante/plugin.json": "299fede7829ee15cb321c23eb449e7072ffb9c52844a1f2b24f65280daca6365"
       }
     },
     "mqtt": {
       "files": {
-        "integrations/mqtt/mqtt_bridge_plugin.py": "50d8c4897bbf9ae1ff53d3a1fc37a5d05bfb858972cd02483231757d463b6cdc",
-        "integrations/mqtt/plugin.json": "19de260ed0e75caed9f95d77763d16c520242add407b8faa0f5f039d37f2ea22"
+        "integrations/mqtt/mqtt_bridge_plugin.py": "d397c85a0291494b17f226b5db6da999764134559e96ee7abf5c5e8a648ec092",
+        "integrations/mqtt/plugin.json": "38b001fc84bb2afdf13dcb84588f4a3e01b2103416c18fa6a26221e0d6a1abd2"
       }
     },
     "present": {
       "files": {
         "integrations/present/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
-        "integrations/present/README.md": "168a2ea820f35b451b0c615b9b406748d4474e9f854978e365b4981a0978944d",
+        "integrations/present/README.md": "abe854445e7f336522377d793b78ec08a429351ed00915f1bcf66aaa84f17be3",
         "integrations/present/encoders.py": "8eb08c3f3e11683681a3126fdea7c9c5316575feb4ac5017ab162cb79e4fa242",
         "integrations/present/enum_outputs.ps1": "a9646fee2f56883a09c674400ee185f795b1d5d0a027c9fa152c691a76fa2587",
         "integrations/present/hostoutputs.py": "cda3fe37f70dad3968eea3bb74b589f83511642bb2b0eff6c0d06b7e6b39aaa6",
@@ -39,8 +39,8 @@
         "integrations/present/panel/display.css": "ae58056cd8e270024b479ccf006572f318405acfa6a3b3515b6263b0fd2c76c8",
         "integrations/present/panel/display.html": "74c971a0529923fa81f60a5629dcee72cc14d895faef2e4818216f2033e4074c",
         "integrations/present/panel/display.js": "c5348255ea2d3271bfd5a206f9991730312a819fa398585cdec799446acc3966",
-        "integrations/present/plugin.json": "f9469ce9b92a4ae0e083ed3ca58ff91331b1816689252903a5a6f89085fbdbef",
-        "integrations/present/present_plugin.py": "f460e961982740e13ef3ba42450ca4887115089ef93cc1a715fdf961e0708a4e",
+        "integrations/present/plugin.json": "549502cd3dd4f3eed7b8f64cff7aabb45ef4f6f07ae6a4046174620f9d4ef911",
+        "integrations/present/present_plugin.py": "404a0c9593aa9f61e20b4ef6fd9350abd35752d4d13fbf76a103a983b0dae12d",
         "integrations/present/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4"
       }
     },
@@ -58,16 +58,16 @@
     "video_panel": {
       "files": {
         "integrations/video_panel/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
-        "integrations/video_panel/README.md": "1c1078c9a7be6aae3dd3213f2b45724be8198e19febb984626c2642b7125a0e4",
+        "integrations/video_panel/README.md": "b9de3e336b35980fa61477d50e3304df5215e562946f5ffc47e4342a4058ca69",
         "integrations/video_panel/panel/hls.light.min.js": "839aa4ef944a01ed62b07f0f5deeb323732e8fc0e93f1d725c01e73dc2d615b1",
         "integrations/video_panel/panel/hls.light.min.js.LICENSE": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
         "integrations/video_panel/panel/video_stream.js": "4c823e0bf8d6f885d0c8a76b23c86b7a8a0c945267a8006110307909023dc8c8",
-        "integrations/video_panel/plugin.json": "525dd1ab87ae49ab3286c042acdc43df37327dd6b471f25e56655e459a76f35c",
+        "integrations/video_panel/plugin.json": "7b24a968aa453890531c32dd0ee7831baeb86783ec40d0d8bffb26349bf02878",
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
         "integrations/video_panel/transcode.py": "93aa973202b67a2131321e96f328f39701a27b10b3b006088a8ed9f2ac7ca6be",
-        "integrations/video_panel/video_panel_plugin.py": "000e36568eb726678380a095eb35f139a3b0514f1f9504f8dc0bb2e43f30caf6"
+        "integrations/video_panel/video_panel_plugin.py": "f7bd27e2be065c7e5e52b55c86f8bc47e6b09b79ec49e008ce5370791b161c91"
       }
     }
   }

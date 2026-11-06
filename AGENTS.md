@@ -285,6 +285,55 @@ CONFIG_SCHEMA = {
 
 If a field has `required: True` and no `default` value, the IDE shows a **Setup Dialog** when the user first enables the plugin. The user must fill in required fields before the plugin can start.
 
+### Secrets (passwords, API keys, tokens)
+
+Declare every setting that holds a login, so OpenAVC keeps it on the system instead of in the project. A declared value is stored in the system's login file, and the project file holds the placeholder `<saved on this system>` in its place. A backup, an export, a template and the copies the cloud keeps then never contain it.
+
+A settings field is a login when it is marked `secret: True`, top level or inside a `group`. A field named `password` counts without the mark; mark it anyway.
+
+```python
+CONFIG_SCHEMA = {
+    "username": {"type": "string", "label": "Username"},
+    "password": {"type": "string", "label": "Password", "secret": True},
+    "connection": {
+        "type": "group",
+        "label": "Connection",
+        "fields": {
+            "api_key": {"type": "string", "label": "API key", "required": True, "secret": True},
+        },
+    },
+}
+```
+
+`secret` must be `True` or `False`. A `mapping_list` column cannot be a secret: its rows have no id to keep a login under.
+
+A login inside a list the plugin keeps in its config (not a `CONFIG_SCHEMA` field) is declared in `CONFIG_SECRETS`, keyed by the list's config key:
+
+```python
+CONFIG_SECRETS = {
+    # Each item of config["streams"] is identified by its "stream_id";
+    # its "password" is a login.
+    "streams": {"id": "stream_id", "fields": ["password"]},
+    # Keys the plugin makes itself: nobody is asked for one.
+    "displays": {"id": "id", "fields": ["display_key"], "generated": True},
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `id` | The key in each item that holds its unique id. A login is kept under the item's id, so a reordered list keeps every login with its item. |
+| `fields` | The keys in each item that hold a login. |
+| `generated` | Optional, default `False`. `True` when the plugin makes these values itself (a key it hands out). OpenAVC never asks a person for one. |
+
+What OpenAVC does with a declared login:
+
+- **Every config save moves it**: the settings form, the API, the AI assistant, and the plugin's own `api.save_config()`. The project keeps the placeholder.
+- **`api.config` holds the saved value**, so the plugin reads its login as it always did.
+- **A login not saved on this system is handed to the plugin as `""`**, never as the placeholder: after a restore onto another system, an import without logins, or a space built from a template. The settings form asks for it again. A `generated` value comes back empty too, so the plugin makes a new one, as it would for a new item.
+- **An older OpenAVC ignores both declarations** and keeps the value in the project, as before. Declaring a secret needs no `min_openavc_version` raise.
+
+A plugin that serves its own HTTP routes keeps the login inside the plugin: answer with the placeholder instead of the value (`from openavc.core.device_logins import SAVED_LOGIN`, with the literal `"<saved on this system>"` as the fallback on an older OpenAVC), and read the placeholder sent back as "keep the saved one".
+
 ---
 
 ## 5. Plugin API Reference
@@ -404,6 +453,8 @@ broker = api.config.get("broker_host", "localhost")
 # the in-memory config reverts so api.config never reports an unsaved value.
 await api.save_config({"broker_host": "new-broker.example.com", "broker_port": 1883})
 ```
+
+`api.config` holds each declared login's saved value (section 4, Secrets), and `api.save_config()` moves each one back into the system's login file. Save the whole config as `api.config` gave it; a login that came back empty because it is not saved on this system stays waiting for a person to enter it.
 
 ### 5.6 Identity and Logging
 
@@ -1434,6 +1485,8 @@ The validator checks:
 - Main plugin file naming convention (`*_plugin.py`)
 - `README.md` exists
 - `start()` and `stop()` methods exist
+- `CONFIG_SCHEMA` field shapes, and `secret` set to `True` or `False` only, never on a `mapping_list` column
+- `CONFIG_SECRETS` shape (`id`, `fields`, `generated`), and no list that is also a `CONFIG_SCHEMA` field
 - index.json entry matches plugin fields
 
 ---
@@ -1767,6 +1820,8 @@ class OccupancySensorPlugin:
 | Required field with no `default` but no `required: True` | Mark it `required: True` so the Setup Dialog appears. |
 | Using `config_schema` instead of `CONFIG_SCHEMA` | It's a class attribute named `CONFIG_SCHEMA` (uppercase). |
 | `select` field without `options` list | `select` type requires an `options` array with `value` and `label`. |
+| A password, API key or token not declared | Mark the field `secret: True`, or declare its list in `CONFIG_SECRETS` (section 4, Secrets). An undeclared login is in every copy of the project. |
+| A plugin route that answers with a stored login | Answer with the `<saved on this system>` placeholder, and read it sent back as "keep the saved one" (section 4, Secrets). |
 
 ### index.json
 

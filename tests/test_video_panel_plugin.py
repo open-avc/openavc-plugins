@@ -482,6 +482,179 @@ def test_crud_validation_and_conflicts(monkeypatch):
     assert bad.status_code == 422
 
 
+# ──── Stream logins ────
+#
+# A stream's password never leaves the plugin: the list the Programmer draws
+# says SAVED_LOGIN in its place, and SAVED_LOGIN sent back means "keep it".
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_saved_login_is_the_platforms_marker():
+    """The Programmer draws the platform's marker as "Saved on this system",
+    so the plugin's stand-in for a password has to be exactly that string,
+    whether or not the platform is importable when the plugin loads."""
+    from _platform_root import add_platform_to_path
+
+    if add_platform_to_path() is None:
+        pytest.skip("no OpenAVC checkout found")
+    from openavc.core.device_logins import SAVED_LOGIN as platform_marker
+
+    from integrations.video_panel import video_panel_plugin
+
+    assert video_panel_plugin.SAVED_LOGIN == platform_marker
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_the_stream_list_never_carries_a_password(monkeypatch):
+    from integrations.video_panel.video_panel_plugin import SAVED_LOGIN
+
+    client, _plugin, _added, _deleted = _crud_client(monkeypatch)
+    added = client.post("/streams", json={
+        "name": "Lobby", "rtsp_url": "rtsp://cam/1", "username": "admin", "password": "s3cret!",
+    }).json()
+    assert added["password"] == SAVED_LOGIN
+    client.post("/streams", json={"name": "Open", "rtsp_url": "rtsp://cam/2"})
+
+    listing = client.get("/streams")
+    assert "s3cret!" not in listing.text
+    by_id = {s["stream_id"]: s for s in listing.json()["streams"]}
+    assert by_id["lobby"]["password"] == SAVED_LOGIN
+    assert by_id["lobby"]["username"] == "admin"
+    assert by_id["open"]["password"] == ""
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_the_marker_sent_back_keeps_the_password_and_empty_clears_it(monkeypatch):
+    from integrations.video_panel.video_panel_plugin import SAVED_LOGIN
+
+    stream = {
+        "stream_id": "lobby", "name": "Lobby", "rtsp_url": "rtsp://cam/1",
+        "username": "admin", "password": "s3cret!",
+    }
+    client, plugin, added, _deleted = _crud_client(monkeypatch, {"streams": [stream]})
+
+    r = client.put("/streams/lobby", json={
+        "name": "Lobby", "rtsp_url": "rtsp://cam/9", "username": "admin", "password": SAVED_LOGIN,
+    })
+    assert r.status_code == 200, r.text
+    assert plugin.api.saved[-1]["streams"][0]["password"] == "s3cret!"
+    assert added[-1][1]["source"] == "rtsp://admin:s3cret%21@cam/9"
+
+    # Renamed, it keeps the stream's own password under its new id.
+    r = client.put("/streams/lobby", json={
+        "name": "Lobby", "stream_id": "hall", "rtsp_url": "rtsp://cam/9",
+        "username": "admin", "password": SAVED_LOGIN,
+    })
+    assert r.status_code == 200, r.text
+    saved = plugin.api.saved[-1]["streams"][0]
+    assert (saved["stream_id"], saved["password"]) == ("hall", "s3cret!")
+
+    # An empty password is still "no password".
+    client.put("/streams/hall", json={
+        "name": "Lobby", "rtsp_url": "rtsp://cam/9", "username": "admin", "password": "",
+    })
+    assert plugin.api.saved[-1]["streams"][0]["password"] == ""
+
+    # A new stream has no saved password for the marker to stand for.
+    client.post("/streams", json={
+        "name": "New", "rtsp_url": "rtsp://cam/3", "username": "admin", "password": SAVED_LOGIN,
+    })
+    new = next(s for s in plugin.api.saved[-1]["streams"] if s["stream_id"] == "new")
+    assert new["password"] == ""
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_login_in_the_address_is_split_out():
+    split = VideoPanelPlugin._split_url_login
+    assert split("rtsp://admin:p%40ss@cam:554/s1") == ("rtsp://cam:554/s1", "admin", "p@ss")
+    # An unescaped @ in the password: the host is after the last one.
+    assert split("rtsp://admin:p@ss@cam/s1") == ("rtsp://cam/s1", "admin", "p@ss")
+    assert split("rtsp://admin@cam/s1") == ("rtsp://cam/s1", "admin", None)
+    assert split("srt://u:p@10.0.0.5:9000?streamid=a@b") == ("srt://10.0.0.5:9000?streamid=a@b", "u", "p")
+    assert split("rtsp://cam/s1") == ("rtsp://cam/s1", None, None)
+    assert split("not-a-url") == ("not-a-url", None, None)
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_login_typed_into_the_address_moves_into_the_fields_on_save(monkeypatch):
+    client, plugin, added, _deleted = _crud_client(monkeypatch)
+
+    r = client.post("/streams", json={"name": "Lobby", "rtsp_url": "rtsp://admin:p%40ss@cam/1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["rtsp_url"] == "rtsp://cam/1"
+    saved = plugin.api.saved[-1]["streams"][0]
+    assert (saved["rtsp_url"], saved["username"], saved["password"]) == ("rtsp://cam/1", "admin", "p@ss")
+    # The stream plays from the address it always did.
+    assert added[-1][1]["source"] == "rtsp://admin:p%40ss@cam/1"
+    assert plugin.api.logs == [] or all("replaced" not in m for m, _ in plugin.api.logs)
+
+    # The address's login is the one that played, so it wins over the fields.
+    r = client.put("/streams/lobby", json={
+        "name": "Lobby", "rtsp_url": "rtsp://viewer:other@cam/1", "username": "admin", "password": "p@ss",
+    })
+    assert r.status_code == 200, r.text
+    saved = plugin.api.saved[-1]["streams"][0]
+    assert (saved["username"], saved["password"]) == ("viewer", "other")
+    assert any("replaced its Username and Password" in m for m, _ in plugin.api.logs)
+    assert not any("other" in m for m, _ in plugin.api.logs)
+
+    # A username alone moves the username and keeps the password.
+    client.put("/streams/lobby", json={
+        "name": "Lobby", "rtsp_url": "rtsp://operator@cam/1", "username": "", "password": "kept",
+    })
+    saved = plugin.api.saved[-1]["streams"][0]
+    assert (saved["rtsp_url"], saved["username"], saved["password"]) == ("rtsp://cam/1", "operator", "kept")
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+@pytest.mark.asyncio
+async def test_a_stream_saved_with_a_login_in_its_address_moves_it_once(monkeypatch):
+    old = {
+        "stream_id": "lobby", "name": "Lobby", "rtsp_url": "rtsp://admin:p%40ss@cam/1",
+        "username": "", "password": "",
+    }
+    plain = {"stream_id": "open", "name": "Open", "rtsp_url": "rtsp://cam/2", "username": "", "password": ""}
+    _client, plugin, added, _deleted = _crud_client(monkeypatch, {"streams": [old, plain]})
+
+    await plugin._load_streams()
+    assert len(plugin.api.saved) == 1
+    moved = plugin.api.saved[0]["streams"][0]
+    assert (moved["rtsp_url"], moved["username"], moved["password"]) == ("rtsp://cam/1", "admin", "p@ss")
+    assert plugin.api.saved[0]["streams"][1] == plain
+    assert ("/v3/config/paths/add/lobby", {"source": "rtsp://admin:p%40ss@cam/1", "sourceOnDemand": True}) in added
+
+    # The next start finds nothing to move and saves nothing.
+    await plugin._load_streams()
+    assert len(plugin.api.saved) == 1
+
+
+@pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
+def test_a_test_with_the_marker_uses_the_saved_password(monkeypatch):
+    from integrations.video_panel.video_panel_plugin import SAVED_LOGIN
+
+    stream = {
+        "stream_id": "lobby", "name": "Lobby", "rtsp_url": "rtsp://cam/1",
+        "username": "admin", "password": "s3cret",
+    }
+    client, plugin, _added, _deleted = _crud_client(monkeypatch, {"streams": [stream]})
+    plugin._ffmpeg_bin = "/opt/ffmpeg"
+    probed = []
+
+    async def fake_probe(url):
+        probed.append(url)
+        return {"success": True}
+
+    monkeypatch.setattr(plugin, "_probe_rtsp", fake_probe)
+
+    body = {"rtsp_url": "rtsp://cam/9", "username": "admin", "password": SAVED_LOGIN, "stream_id": "lobby"}
+    assert client.post("/streams/probe", json=body).status_code == 200
+    # A Programmer that sends no stream id: the stream at the same address.
+    client.post("/streams/probe", json={"rtsp_url": "rtsp://cam/1", "username": "admin", "password": SAVED_LOGIN})
+    # Nothing it can stand for: tested with no password.
+    client.post("/streams/probe", json={"rtsp_url": "rtsp://cam/5", "username": "admin", "password": SAVED_LOGIN})
+    assert probed == ["rtsp://admin:s3cret@cam/9", "rtsp://admin:s3cret@cam/1", "rtsp://admin:@cam/5"]
+
+
 # ──── Transcode path wiring ────
 
 

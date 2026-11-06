@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_INFO = {
     "id": "dante",
     "name": "Dante DDM",
-    "version": "1.2.1",
+    "version": "1.2.2",
     "author": "OpenAVC",
     "description": "Audio routing via Dante Domain Manager or Dante Director Professional.",
     "category": "integration",
@@ -75,6 +75,7 @@ CONFIG_SCHEMA = {
                 "description": "API key from Dante Director or DDM admin interface.",
                 "required": True,
                 "placeholder": "paste your API key here",
+                "secret": True,
             },
             "verify_tls": {
                 "type": "boolean",

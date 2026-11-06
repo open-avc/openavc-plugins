@@ -112,6 +112,11 @@ project and managed on the plugin's page in the Programmer. Each display has:
 Routing treats both kinds identically — a stream display pins, follows
 `Auto`, and fires the same state keys and events as a browser display.
 
+On OpenAVC versions that keep logins on the system, each display's key and
+stream key are kept by the OpenAVC system rather than in the project. A project
+opened on another system, or a space built from a template, gives its displays
+new keys, so each display is pointed at its new link or stream URL.
+
 ## Setting up a browser display
 
 1. Add a display on the **Present** plugin page in the Programmer.

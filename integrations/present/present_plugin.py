@@ -210,7 +210,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.7.2",
+        "version": "0.7.3",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",
@@ -358,6 +358,15 @@ class PresentPlugin:
             ),
             "default": "",
         },
+    }
+
+    # Each display's key and stream key are logins the plugin makes itself.
+    # OpenAVC keeps them in the system's login file rather than in the project
+    # and hands them back in `api.config`; one that is not saved on this
+    # system comes back empty, and _load_displays makes a new one. An older
+    # OpenAVC ignores this and keeps them in the project.
+    CONFIG_SECRETS = {
+        "displays": {"id": "id", "fields": ["display_key", "stream_key"], "generated": True},
     }
 
     MACRO_ACTIONS = {
