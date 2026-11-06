@@ -36,7 +36,7 @@ except ModuleNotFoundError:
         allow_module_level=True,
     )
 
-from integrations.dante.dante_plugin import DanteDDMPlugin, _sanitize_id
+from integrations.dante.dante_plugin import DanteDDMPlugin, _sanitize_id, _settings
 
 
 # ──── Fixtures ────
@@ -186,6 +186,55 @@ async def test_start_sets_initial_state():
     assert await harness.state_get("plugin.dante.device_count") is not None
     assert await harness.state_get("plugin.dante.subscription_count") is not None
 
+    await harness.stop_plugin(plugin)
+
+
+# The settings as the Programmer's settings form saves them: each field inside
+# the group CONFIG_SCHEMA declares it in.
+GROUPED_CONFIG = {
+    "connection": {
+        "ddm_url": "https://ddm.local/graphql",
+        "api_key": "test-api-key",
+        "verify_tls": False,
+    },
+    "polling": {"domain_id": "domain-2", "poll_interval": 60},
+}
+
+
+class TestSettings:
+    def test_grouped_settings_are_read_from_their_groups(self):
+        assert _settings(GROUPED_CONFIG) == {
+            "ddm_url": "https://ddm.local/graphql",
+            "api_key": "test-api-key",
+            "verify_tls": False,
+            "domain_id": "domain-2",
+            "poll_interval": 60,
+        }
+
+    def test_top_level_settings_still_work(self):
+        assert _settings(SAMPLE_CONFIG)["api_key"] == "test-api-key"
+
+    def test_a_grouped_value_wins_over_a_top_level_one(self):
+        config = {"api_key": "old-key", "connection": {"api_key": "new-key"}}
+        assert _settings(config)["api_key"] == "new-key"
+
+
+@pytest.mark.asyncio
+async def test_start_connects_with_settings_saved_by_the_form():
+    """A Dante set up through the settings form connects: its URL, key, TLS
+    choice and domain are read from their groups."""
+    harness = PluginTestHarness()
+    plugin = DanteDDMPlugin()
+    httpx_mock = MagicMock()
+    httpx_mock.AsyncClient.return_value = _mock_httpx_client()
+    with patch.dict("sys.modules", {"httpx": httpx_mock}):
+        await harness.start_plugin(plugin, config=GROUPED_CONFIG)
+    kwargs = httpx_mock.AsyncClient.call_args.kwargs
+
+    assert plugin._connected is True
+    assert kwargs["headers"]["Authorization"] == "test-api-key"
+    assert kwargs["verify"] is False
+    assert plugin._domain_id == "domain-2"
     await harness.stop_plugin(plugin)
 
 

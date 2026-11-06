@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_INFO = {
     "id": "dante",
     "name": "Dante DDM",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "author": "OpenAVC",
     "description": "Audio routing via Dante Domain Manager or Dante Director Professional.",
     "category": "integration",
@@ -31,6 +31,27 @@ PLUGIN_INFO = {
     ],
     "dependencies": ["httpx>=0.27.0"],
 }
+
+# The groups CONFIG_SCHEMA puts its fields in. The settings form saves each
+# field inside its group; see _settings.
+_SETTING_GROUPS = ("connection", "polling")
+
+
+def _settings(config: dict) -> dict:
+    """The plugin's settings as one flat dict.
+
+    The settings form saves each field inside its group, as CONFIG_SCHEMA
+    declares them (``{"connection": {"api_key": ...}}``). A config written by
+    hand or through the API may have them at the top level instead. A value
+    inside its group wins over the same key at the top level.
+    """
+    flat = {k: v for k, v in config.items() if k not in _SETTING_GROUPS}
+    for group in _SETTING_GROUPS:
+        values = config.get(group)
+        if isinstance(values, dict):
+            flat.update(values)
+    return flat
+
 
 CONFIG_SCHEMA = {
     "connection": {
@@ -295,7 +316,7 @@ class DanteDDMPlugin:
     async def start(self, api):
         self.api = api
         self._shutting_down = False
-        cfg = api.config
+        cfg = _settings(api.config)
 
         # Set initial state
         await api.state_set("connected", False)
