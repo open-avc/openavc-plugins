@@ -39,8 +39,8 @@
         "integrations/present/panel/display.css": "ae58056cd8e270024b479ccf006572f318405acfa6a3b3515b6263b0fd2c76c8",
         "integrations/present/panel/display.html": "74c971a0529923fa81f60a5629dcee72cc14d895faef2e4818216f2033e4074c",
         "integrations/present/panel/display.js": "c5348255ea2d3271bfd5a206f9991730312a819fa398585cdec799446acc3966",
-        "integrations/present/plugin.json": "549502cd3dd4f3eed7b8f64cff7aabb45ef4f6f07ae6a4046174620f9d4ef911",
-        "integrations/present/present_plugin.py": "404a0c9593aa9f61e20b4ef6fd9350abd35752d4d13fbf76a103a983b0dae12d",
+        "integrations/present/plugin.json": "d5c78bbf5c3e853ef29280f59630d417cf90de3c727dcd800ed7ca54ec05db2e",
+        "integrations/present/present_plugin.py": "66a8fd141aa387182fdc3f56d6826d03435ab97db5e8ffeceb1b3272b169fa12",
         "integrations/present/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4"
       }
     },
@@ -64,10 +64,10 @@
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
         "integrations/video_panel/panel/video_stream.js": "4c823e0bf8d6f885d0c8a76b23c86b7a8a0c945267a8006110307909023dc8c8",
-        "integrations/video_panel/plugin.json": "7b24a968aa453890531c32dd0ee7831baeb86783ec40d0d8bffb26349bf02878",
+        "integrations/video_panel/plugin.json": "b31a13d570454c902ababd6c78aa4e009be498abe6b81e4c0df185d3bb0bd152",
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
         "integrations/video_panel/transcode.py": "93aa973202b67a2131321e96f328f39701a27b10b3b006088a8ed9f2ac7ca6be",
-        "integrations/video_panel/video_panel_plugin.py": "f7bd27e2be065c7e5e52b55c86f8bc47e6b09b79ec49e008ce5370791b161c91"
+        "integrations/video_panel/video_panel_plugin.py": "7660aac373dcb78c2d3a4cf6ff1d74334ba4f385344c0b6f1402d4832ff1394e"
       }
     }
   }

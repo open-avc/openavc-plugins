@@ -63,6 +63,10 @@ except ImportError:  # OpenAVC before the login file
 
 # MediaMTX listeners. Everything is on localhost except the WebRTC media UDP
 # port, which the browser connects to directly for low-latency LAN playback.
+# Every port is distinct from the Present plugin's (API 9998, WebRTC
+# signalling 8891, WebRTC media UDP 8190, RTSP 8554, SRT 8899) so both plugins
+# can run on one system; tests/test_mediamtx_ports.py fails when the two share
+# one.
 _API_HOST = "127.0.0.1"
 _API_PORT = 9997
 _WEBRTC_HOST = "127.0.0.1"
@@ -317,7 +321,7 @@ class VideoPanelPlugin:
     PLUGIN_INFO = {
         "id": "video_panel",
         "name": "Video Panel",
-        "version": "0.23.0",
+        "version": "0.23.1",
         "author": "OpenAVC",
         "description": "Show H.264 and H.265 video streams (IP cameras and other RTSP sources) on the panel.",
         "category": "integration",

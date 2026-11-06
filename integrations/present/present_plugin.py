@@ -90,12 +90,14 @@ _PLUGIN_DIR = Path(__file__).resolve().parent
 # listeners face the LAN: the WebRTC media UDP port (browsers connect to it
 # directly for low-latency media) and the RTSP + SRT listeners hardware
 # decoders pull stream-display outputs from (read-only, out/* paths, see
-# _render_config). All ports are distinct from the Video Panel plugin's
-# (8889/8189/9997/8556) so both plugins can run side by side.
+# _render_config). Every port is distinct from the Video Panel plugin's (API
+# 9997, WebRTC signalling 8889, WebRTC media UDP 8189, HLS 8890, RTSP 8556) so
+# both plugins can run on one system; tests/test_mediamtx_ports.py fails when
+# the two share one.
 _API_HOST = "127.0.0.1"
 _API_PORT = 9998
 _WEBRTC_HOST = "127.0.0.1"
-_WEBRTC_PORT = 8890
+_WEBRTC_PORT = 8891
 _WEBRTC_UDP_PORT = 8190
 _RTSP_PORT = 8554
 _SRT_PORT = 8899
@@ -210,7 +212,7 @@ class PresentPlugin:
     PLUGIN_INFO = {
         "id": "present",
         "name": "Present",
-        "version": "0.7.3",
+        "version": "0.7.4",
         "author": "OpenAVC",
         "description": "Wireless presentation: share a laptop screen from the browser to the space's displays.",
         "category": "integration",

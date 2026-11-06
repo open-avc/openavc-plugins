@@ -272,7 +272,7 @@ def test_render_config_is_valid_and_locked_down():
 
     # Distinct ports from the video_panel plugin so both can run side by side.
     assert cfg["api"] is True and cfg["apiAddress"] == "127.0.0.1:9998"
-    assert cfg["webrtc"] is True and cfg["webrtcAddress"] == "127.0.0.1:8890"
+    assert cfg["webrtc"] is True and cfg["webrtcAddress"] == "127.0.0.1:8891"
     assert cfg["webrtcLocalUDPAddress"] == ":8190"
     # The join host rides in every WebRTC offer as an extra host candidate;
     # pion's own interface list goes stale the moment the host's IP changes.
@@ -617,7 +617,7 @@ def test_whep_offer_requires_key_and_rewrites_location():
     # Forwarded to the localhost sidecar's in/<presenter> WHEP endpoint with
     # read creds in userinfo. allow_internal=True opts past the SSRF guard.
     assert api.proxy_calls[-1] == {
-        "url": "http://openavc:sidecarpass@127.0.0.1:8890/in/alice/whep",
+        "url": "http://openavc:sidecarpass@127.0.0.1:8891/in/alice/whep",
         "method": "POST",
         "allow_internal": True,
     }
@@ -628,7 +628,7 @@ def test_whep_offer_requires_key_and_rewrites_location():
 
 def test_whep_trickle_and_teardown_target_the_session():
     client, _plugin_, api = _guest_client(displays=[_DISPLAY])
-    expected = "http://openavc:sidecarpass@127.0.0.1:8890/in/alice/whep/abc-123-uuid"
+    expected = "http://openavc:sidecarpass@127.0.0.1:8891/in/alice/whep/abc-123-uuid"
 
     pr = client.patch(
         "/whep/main/alice/abc-123-uuid",
@@ -746,7 +746,7 @@ def test_whip_publish_requires_token_and_rewrites_location():
     # Forwarded to the sidecar's in/<presenter> WHIP endpoint with NO
     # credentials — the localhost "any" user carries publish.
     assert api.proxy_calls[-1] == {
-        "url": "http://127.0.0.1:8890/in/alice/whip",
+        "url": "http://127.0.0.1:8891/in/alice/whip",
         "method": "POST",
         "allow_internal": True,
     }
@@ -758,7 +758,7 @@ def test_whip_publish_requires_token_and_rewrites_location():
 def test_whip_trickle_and_teardown_target_the_session():
     client, _plugin_, api = _guest_client()
     token, _ = api.mint_guest_token("whip:alice")
-    expected = "http://127.0.0.1:8890/in/alice/whip/abc-123-uuid"
+    expected = "http://127.0.0.1:8891/in/alice/whip/abc-123-uuid"
 
     pr = client.patch(
         "/whip/alice/abc-123-uuid",
