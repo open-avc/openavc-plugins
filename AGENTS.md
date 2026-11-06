@@ -661,6 +661,16 @@ child process, a socket, a serial port — because nothing else holds a referenc
 to it. The platform bounds the call and logs anything it raises, so a `stop()`
 that trips over a missing attribute costs a log line and nothing more.
 
+**`start()` returns as soon as the plugin is set up; it never waits on the
+network.** Saving the plugin's settings restarts it and waits for `start()`
+before the Save button finishes, and the platform gives `start()` 30 seconds
+before it reports the plugin as failed. A connection to a broker, a cloud
+service or a device goes in a task (`api.create_task()`), which reports how it
+is going through the plugin's state and `health_check()`: an address that drops
+packets would otherwise hold every save for the full 30 seconds. MQTT Bridge is
+the example: its first broker connection runs in a task, each attempt is
+bounded, and its card says why it is not connected.
+
 **When `start()` can't go on because of something the integrator can put
 right** (an API key not entered, a device not connected, a native library not
 installed), raise `PluginRefusal` with a sentence that says what to do. The

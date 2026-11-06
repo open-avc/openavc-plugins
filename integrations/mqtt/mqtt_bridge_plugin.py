@@ -14,10 +14,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# How long one attempt to reach the broker may take. A broker address that
+# drops packets (a wrong address, the broker's host switched off) would
+# otherwise wait out the operating system's own connect timeout, a minute or
+# more, before the card could say anything.
+_CONNECT_TIMEOUT = 10.0
+
 PLUGIN_INFO = {
     "id": "mqtt",
     "name": "MQTT Bridge",
-    "version": "1.4.1",
+    "version": "1.4.2",
     "author": "OpenAVC",
     "description": "Bridge OpenAVC state to and from an MQTT broker for BMS, IoT, and Home Assistant integration.",
     "category": "integration",
@@ -198,6 +204,11 @@ EXTENSIONS = {
                     "label": "Mappings",
                     "format": "number",
                 },
+                {
+                    "key": "plugin.mqtt.last_error",
+                    "label": "Last error",
+                    "format": "string",
+                },
             ],
         }
     ],
@@ -300,7 +311,9 @@ class MQTTBridgePlugin:
         # Inbound: topic -> mapping dict (action, variable_id, device_id, etc.)
         self._inbound_mappings: dict[str, dict] = {}
         self._suppress_echo: set[str] = set()
+        self._connect_task = None
         self._reconnect_task = None
+        self._last_error = ""
 
     async def start(self, api):
         self.api = api
@@ -330,9 +343,12 @@ class MQTTBridgePlugin:
         await api.state_set("connected", False)
         await api.state_set("broker", f"{cfg.get('broker_host', 'localhost')}:{cfg.get('broker_port', 1883)}")
         await api.state_set("mapping_count", total)
+        await self._set_last_error("")
 
-        # Connect to broker
-        await self._connect(cfg)
+        # Connect to the broker in the background. start() returns at once, so
+        # a broker that does not answer never holds up a settings save or the
+        # system's start; the card says why it is not connected.
+        self._connect_task = api.create_task(self._connect(cfg), name="mqtt_connect")
 
         # Subscribe to outbound state changes
         if self._outbound_keys:
@@ -341,12 +357,13 @@ class MQTTBridgePlugin:
         api.log(f"MQTT Bridge started ({len(self._outbound_keys)} outbound, {len(self._inbound_mappings)} inbound)")
 
     async def stop(self):
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            try:
-                await self._reconnect_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._connect_task, self._reconnect_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         if self._client:
             try:
@@ -365,7 +382,14 @@ class MQTTBridgePlugin:
     async def health_check(self):
         if self._client and self._client.is_connected:
             return {"status": "ok", "message": "Connected to broker"}
+        if self._last_error:
+            return {"status": "error", "message": self._last_error}
         return {"status": "error", "message": "Disconnected from broker"}
+
+    async def _set_last_error(self, message: str):
+        """Why the bridge is not connected, for the card and the health check."""
+        self._last_error = message
+        await self.api.state_set("last_error", message)
 
     async def _connect(self, cfg: dict):
         """Connect to the MQTT broker."""
@@ -373,6 +397,7 @@ class MQTTBridgePlugin:
             from gmqtt import Client as MQTTClient
         except ImportError:
             self.api.log("gmqtt not installed. Install it with: pip install gmqtt", level="error")
+            await self._set_last_error("The gmqtt library is not installed.")
             return
 
         client_id = cfg.get("client_id", "") or f"openavc-{PLUGIN_INFO['id']}"
@@ -398,10 +423,22 @@ class MQTTBridgePlugin:
         port = cfg.get("broker_port", 1883)
 
         try:
-            await self._client.connect(host, port, ssl=ssl_ctx)
+            await asyncio.wait_for(
+                self._client.connect(host, port, ssl=ssl_ctx), timeout=_CONNECT_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            self.api.log(
+                f"No answer from {host}:{port} within {_CONNECT_TIMEOUT:g}s", level="error"
+            )
+            await self.api.state_set("connected", False)
+            await self._set_last_error(
+                f"No answer from the broker at {host}:{port}. Check the address and that the broker is on."
+            )
+            self._schedule_reconnect(cfg)
         except Exception as e:
             self.api.log(f"Failed to connect to {host}:{port}: {e}", level="error")
             await self.api.state_set("connected", False)
+            await self._set_last_error(f"Could not connect to {host}:{port}: {e}")
             self._schedule_reconnect(cfg)
 
     def _on_connect(self, client, flags, rc, properties):
@@ -412,9 +449,13 @@ class MQTTBridgePlugin:
         if rc != 0:
             self.api.log(f"Broker rejected connection (code {rc})", level="error")
             await self.api.state_set("connected", False)
+            await self._set_last_error(
+                f"The broker refused the connection (code {rc})."
+            )
             return
 
         await self.api.state_set("connected", True)
+        await self._set_last_error("")
         await self.api.event_emit("connected")
         self.api.log("Connected to MQTT broker")
 

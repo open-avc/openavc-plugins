@@ -20,8 +20,8 @@
     },
     "mqtt": {
       "files": {
-        "integrations/mqtt/mqtt_bridge_plugin.py": "d397c85a0291494b17f226b5db6da999764134559e96ee7abf5c5e8a648ec092",
-        "integrations/mqtt/plugin.json": "38b001fc84bb2afdf13dcb84588f4a3e01b2103416c18fa6a26221e0d6a1abd2"
+        "integrations/mqtt/mqtt_bridge_plugin.py": "baf8cb7dc88920915cb0a80270d1aeffb61b635bc197038509da18a69ab5adea",
+        "integrations/mqtt/plugin.json": "1f67429ab44ee3c52ee43eca4530bd598a490aff352f521602c48b900d260e24"
       }
     },
     "present": {

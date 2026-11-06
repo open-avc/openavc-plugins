@@ -40,7 +40,7 @@
       "file": "integrations/mqtt",
       "format": "directory",
       "category": "integration",
-      "version": "1.4.1",
+      "version": "1.4.2",
       "author": "OpenAVC",
       "license": "MIT",
       "platforms": [
