@@ -47,7 +47,7 @@
     "streamdeck": {
       "files": {
         "control_surfaces/streamdeck/README.md": "f51fd2701a7331c82466abde87ce48df20f2927bea68c14961d95866bde21b0d",
-        "control_surfaces/streamdeck/conditions.py": "231f01907b7fe6aa5cabbef5dbb0e2d3dfc7d1617d856122e0f214eb119e8fa6",
+        "control_surfaces/streamdeck/conditions.py": "f62de6604a2693daf1f143609d288c3fa33e312c3db9a2a350853c1385565b91",
         "control_surfaces/streamdeck/config_check.py": "6242a9cb01ece36de15a216155ea1af146d579e7fdb9ddbd85110b5050f2b3cb",
         "control_surfaces/streamdeck/deck_classes.py": "95da51584067966b21b5a2309ea09af31ec5854b17c6708141cbcfa761e59558",
         "control_surfaces/streamdeck/declared_decks.py": "750b56686a6d5dd1e5d256ee5277f9ac22e7ed74951e3c13100b16b6ada64501",
@@ -55,10 +55,12 @@
         "control_surfaces/streamdeck/fonts/LICENSE": "25f744fa9dd47ff9d3a6fb7fc43f1077dbdc981a043339275bc3cf804d383104",
         "control_surfaces/streamdeck/fonts/lucide-info.json": "951a23c65a08f084d8e0153fb2a9febc48f65cfeecddebdccb43fe20f773935d",
         "control_surfaces/streamdeck/fonts/lucide.ttf": "0ff17e4ce16364d2dae72689336262960e7d5067cfcdb07ca283465a2a34af48",
+        "control_surfaces/streamdeck/key_entries.py": "505ea3248c0112bfe92f6525795cae53720947b9b05a95049aa4fdae48e1e4c9",
         "control_surfaces/streamdeck/net_deck.py": "4287fc3c598fc46746abfc7b7b647853c5c565a5889a4171ea51be92230fc3fd",
-        "control_surfaces/streamdeck/plugin.json": "8a70d0893e933f93a9e7709e17a0107f266410a5a3571743b0c9317309a6ecc2",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "46452546bce666d0d19b5cb5e54e08c585eba176578fbd84d0737b6cddb22e66",
-        "control_surfaces/streamdeck/virtual_deck.py": "61e9cd9663a73eb1c7068ea0d7d8ce67718f0fa696f24617358db6bbb4a39aef"
+        "control_surfaces/streamdeck/plugin.json": "3a0392b2dc2e017b3b6265e2b2b7385f79d4f8da1bc257ad9e186609267b9c77",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "9fadcad09be01aabc5495f006b40137ec4ecf5d9961ac5d3df495406b9d5ebf2",
+        "control_surfaces/streamdeck/virtual_deck.py": "61e9cd9663a73eb1c7068ea0d7d8ce67718f0fa696f24617358db6bbb4a39aef",
+        "control_surfaces/streamdeck/watch_keys.py": "4111e9c55ef11221808af8bcc148b0e70a2940c81a3abc80339d6e34f0f15713"
       }
     },
     "video_panel": {
