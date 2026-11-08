@@ -3478,6 +3478,49 @@ def test_reconcile_creates_links_publishes_status_and_drops_removed():
         loop.close()
 
 
+def test_reconcile_opens_a_live_network_transport_as_its_library_deck(monkeypatch):
+    # A transport the link reports up becomes a deck of the class the
+    # library names for its product id; one already open, or one whose id
+    # the library does not know, does not.
+    dm = pytest.importorskip("StreamDeck.DeviceManager")
+    monkeypatch.setattr(sd_module, "StreamDeck", dm)
+    plugin, _state, _m, _d = _make_plugin_with_recorders({
+        "network_decks": [{"host": "192.0.2.8", "port": 5343}]
+    })
+    loop = __import__("asyncio").new_event_loop()
+    plugin._loop = loop
+
+    class _Transport:
+        def __init__(self, path, pid):
+            self._path, self._pid = path, pid
+
+        def path(self):
+            return self._path
+
+        def product_id(self):
+            return self._pid
+
+        def close(self):
+            pass
+
+    known = _Transport("tcp:192.0.2.8:20001", 0x0080)
+    already_open = _Transport("tcp:192.0.2.8:20002", 0x0080)
+    unknown = _Transport("tcp:192.0.2.8:20003", 0x1234)
+    plugin._sessions[already_open.path()] = object()
+
+    async def fake_ensure(self, _loop, _log):
+        return [known, already_open, unknown]
+
+    monkeypatch.setattr(sd_module._DockLink, "ensure", fake_ensure)
+    new_decks = []
+    try:
+        loop.run_until_complete(plugin._reconcile_network_decks(new_decks))
+    finally:
+        loop.close()
+    assert [type(d) for d in new_decks] == [dm.StreamDeckOriginalV2]
+    assert new_decks[0].device is known
+
+
 def test_persist_network_serials_records_observed_serial():
     plugin, _state, _m, _d = _make_plugin_with_recorders({
         "network_decks": [{"host": "192.0.2.9", "port": 5343}]
