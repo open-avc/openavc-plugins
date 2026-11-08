@@ -2123,9 +2123,13 @@ def test_virtual_deck_entries_validation():
 def test_virtual_deck_serial_sanitized():
     plugin, _state = _make_plugin({"virtual_decks": [
         {"model": "Stream Deck Mini", "serial": "My Deck.1"},
+        {"model": "Stream Deck Neo", "serial": "Desk_2-b"},
     ]})
     entries = plugin._virtual_deck_entries()
-    assert entries == [{"model": "Stream Deck Mini", "serial": "MyDeck1"}]
+    assert entries == [
+        {"model": "Stream Deck Mini", "serial": "MyDeck1"},
+        {"model": "Stream Deck Neo", "serial": "Desk_2-b"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -3976,3 +3980,702 @@ def test_validate_config_is_called_on_the_class_and_never_raises():
     # method, and it reads anything it is handed without raising.
     for junk in (None, [], "text", {"buttons": [None, 3, "x"], "dials": [[]], "decks": {"A": None}}):
         assert isinstance(StreamDeckPlugin.validate_config(junk), list)
+
+
+# ──── validate_config: every sentence, word for word ────
+#
+# The table above checks that one change produces one sentence naming the
+# right part. These pin the whole list the check returns for each shape it
+# reads, the wording included, and the shapes it says nothing about.
+
+_EXACT = [
+    ('brightness none is fine', _set(["brightness"], None),
+     []),
+    ('brightness numeric text is fine', _set(["brightness"], "70"),
+     []),
+    ('deck_names not an object', _set(["deck_names"], ["VIRT-1"]),
+     [
+         'deck_names is not an object keyed by deck serial, so it is ignored.',
+     ]),
+    ('decks not an object', _set(["decks"], "ABC123"),
+     [
+         'decks is not an object keyed by deck serial, so it is ignored.',
+     ]),
+    ('deck_settings not an object', _set(["deck_settings"], 4),
+     [
+         'deck_settings is not an object keyed by deck serial, so it is ignored.',
+     ]),
+    ('deck_settings entry not an object', _set(["deck_settings", "VIRT-1"], 40),
+     [
+         'deck_settings.VIRT-1 is not an object, so it is ignored.',
+     ]),
+    ('deck_settings brightness a word', _set(["deck_settings", "VIRT-1", "brightness"], "dim"),
+     [
+         'deck_settings.VIRT-1.brightness "dim" is not a number, so it is ignored.',
+     ]),
+    ('deck_settings brightness numeric text', _set(["deck_settings", "VIRT-1", "brightness"], "40"),
+     []),
+    ('virtual_decks not a list', _set(["virtual_decks"], {"model": "Stream Deck XL"}),
+     [
+         'virtual_decks is not a list, so no virtual deck is created.',
+     ]),
+    ('virtual deck not an object', _append(["virtual_decks"], "Stream Deck XL"),
+     [
+         'virtual_decks[1] is not an object, so no deck is created for it.',
+     ]),
+    ('virtual deck serial only symbols', _set(["virtual_decks", 0, "serial"], "!!"),
+     [
+         'virtual_decks[0] has no serial made of letters, digits, - or _, so no deck is created for it.',
+     ]),
+    ('virtual deck no serial', _set(["virtual_decks", 0], {"model": "Stream Deck XL"}),
+     [
+         'virtual_decks[0] has no serial made of letters, digits, - or _, so no deck is created for it.',
+     ]),
+    ('virtual deck serial cleaned to a repeat', _append(["virtual_decks"], {"model": "Stream Deck XL", "serial": "VIRT 1!"}),
+     []),
+    ('virtual deck bad model and no serial', _set(["virtual_decks", 0], {"model": 7}),
+     [
+         'virtual_decks[0]: model 7 is not a virtual deck model (Stream Deck Neo, Stream Deck Mini, Stream Deck MK.2, Stream Deck XL, Stream Deck +, Stream Deck Pedal), so no deck is created for it.',
+         'virtual_decks[0] has no serial made of letters, digits, - or _, so no deck is created for it.',
+     ]),
+    # The reader skips the first entry (no such model), so serial A is free
+    # and the second entry does make a deck: this sentence is wrong. It is
+    # pinned so the check cannot change without someone deciding it should.
+    ('virtual repeat after a bad model', _set(["virtual_decks"], [{"model": "bogus", "serial": "A"}, {"model": "Stream Deck XL", "serial": "A"}]),
+     [
+         'virtual_decks[0]: model "bogus" is not a virtual deck model (Stream Deck Neo, Stream Deck Mini, Stream Deck MK.2, Stream Deck XL, Stream Deck +, Stream Deck Pedal), so no deck is created for it.',
+         'virtual_decks[1] repeats serial A, so no second deck is created.',
+     ]),
+    ('network_decks not a list', _set(["network_decks"], "192.0.2.20"),
+     [
+         'network_decks is not a list, so no network deck is added.',
+     ]),
+    ('network deck not an object', _append(["network_decks"], "192.0.2.21"),
+     [
+         'network_decks[1] is not an object, so no deck is added for it.',
+     ]),
+    ('network deck no host', _set(["network_decks", 0, "host"], "  "),
+     [
+         'network_decks[0] has no host, so no deck is added for it.',
+     ]),
+    ('network deck no host and bad port', _set(["network_decks", 0], {"port": "x"}),
+     [
+         'network_decks[0] has no host, so no deck is added for it.',
+         'network_decks[0]: port "x" is not a number, so no deck is added for it.',
+     ]),
+    ('network deck repeated', _append(["network_decks"], {"host": " 192.0.2.20 ", "port": "5343"}),
+     [
+         'network_decks[1] repeats 192.0.2.20:5343, so no second deck is added.',
+     ]),
+    ('network deck default port repeat', _append(["network_decks"], {"host": "192.0.2.20"}),
+     [
+         'network_decks[1] repeats 192.0.2.20:5343, so no second deck is added.',
+     ]),
+    ('network deck port 0 then a repeat', _set(["network_decks"], [{"host": "h", "port": 0}, {"host": "h", "port": 0}, {"host": "h", "port": 70000}]),
+     []),
+    ('network deck port a list', _set(["network_decks", 0, "port"], [5343]),
+     [
+         'network_decks[0]: port list is not a number, so no deck is added for it.',
+     ]),
+    ('global_buttons not a list', _set(["global_buttons"], {}),
+     [
+         'global_buttons is not a list, so it is ignored.',
+     ]),
+    ('auto_page not a list', _set(["auto_page"], "x"),
+     [
+         'auto_page is not a list, so it is ignored.',
+     ]),
+    ('auto_brightness not a list', _set(["auto_brightness"], 1),
+     [
+         'auto_brightness is not a list, so it is ignored.',
+     ]),
+    ('dials not a list', _set(["dials"], {"index": 0}),
+     [
+         'dials is not a list, so it is ignored.',
+     ]),
+    ('page_names not an object', _set(["page_names"], ["Home"]),
+     [
+         'page_names is not an object, so it is ignored.',
+     ]),
+    ('button not an object', _append(["buttons"], 3),
+     [
+         'buttons[6] is not an object, so it is on no key.',
+     ]),
+    ('button index a bool', _set(["buttons", 0, "index"], True),
+     [
+         'buttons[0]: index true is not a key number (0 or more), so it is on no key.',
+     ]),
+    ('button index a fraction', _set(["buttons", 0, "index"], 1.5),
+     [
+         'buttons[0]: index 1.5 is not a key number (0 or more), so it is on no key.',
+     ]),
+    ('button index whole float', _set(["buttons", 0, "index"], 2.0),
+     []),
+    ('global button with a bad page', _set(["global_buttons", 0, "page"], "x"),
+     []),
+    ('button label_source not text', _set(["buttons", 5, "label_source"], 4),
+     [
+         'buttons[5].label_source is not a state key, so the deck stops updating its keys.',
+     ]),
+    ('button value_source not text', _set(["buttons", 5, "value_source"], ["var.level"]),
+     [
+         'buttons[5].value_source is not a state key, so the deck stops updating its keys.',
+     ]),
+    ('bindings not an object', _set(["buttons", 0, "bindings"], []),
+     [
+         'buttons[0].bindings is not an object, so the key does nothing.',
+     ]),
+    ('press is one action object', _set(["buttons", 0, "bindings", "press"], {"action": "script.call"}),
+     [
+         'buttons[0].bindings.press: action "script.call" is not one a deck runs (macro, device.command, state.set, navigate), so it does nothing.',
+     ]),
+    ('press holds a number', _set(["buttons", 0, "bindings", "press"], [5]),
+     [
+         'buttons[0].bindings.press[0] is not an action, so it does nothing.',
+     ]),
+    ('press empty list', _set(["buttons", 0, "bindings", "press"], []),
+     []),
+    ('press first not an object', _set(["buttons", 0, "bindings", "press"], ["x", {"action": "macro"}]),
+     [
+         'buttons[0].bindings.press[0] is not an action, so it does nothing.',
+     ]),
+    ('navigate page none', _set(["buttons", 3, "bindings", "press", 0, "page"], None),
+     []),
+    ('navigate page next', _set(["buttons", 3, "bindings", "press", 0, "page"], "__next_page__"),
+     []),
+    ('navigate page a float', _set(["buttons", 3, "bindings", "press", 0, "page"], 2.7),
+     []),
+    ('navigate page a list', _set(["buttons", 3, "bindings", "press", 0, "page"], [2]),
+     [
+         'buttons[3].bindings.press[0]: page list is not a page number, "__next_page__" or "__prev_page__", so the key does not change page.',
+     ]),
+    ('state.set to a device', _set(["buttons", 2, "bindings", "press", 0, "key"], "device.proj.power"),
+     [
+         'buttons[2].bindings.press[0]: "device.proj.power" is not a variable (var.*) or the deck\'s own plugin.streamdeck.* state, the only keys a deck writes, so the action does nothing.',
+     ]),
+    ('state.set with no key', _set(["buttons", 2, "bindings", "press", 0, "key"], ""),
+     []),
+    ('state.set with a numeric key', _set(["buttons", 2, "bindings", "press", 0, "key"], 9),
+     []),
+    ('hold threshold as text', _set(["buttons", 3, "bindings", "press", 0, "hold_threshold_ms"], "500"),
+     [
+         'buttons[3].bindings.press[0].hold_threshold_ms "500" is not a number, so the key fails when pressed.',
+     ]),
+    ('hold repeat a bool', _set(["buttons", 2, "bindings", "press", 0, "hold_repeat_ms"], True),
+     [
+         'buttons[2].bindings.press[0].hold_repeat_ms true is not a number, so the key fails when pressed.',
+     ]),
+    ('mode none is fine', _set(["buttons", 1, "bindings", "press", 0, "mode"], None),
+     []),
+    ('off_action unknown', _set(["buttons", 1, "bindings", "press", 0, "off_action"], {"action": "x"}),
+     [
+         'buttons[1].bindings.press[0].off_action: action "x" is not one a deck runs (macro, device.command, state.set, navigate), so it does nothing.',
+     ]),
+    ('off_action not an object', _set(["buttons", 1, "bindings", "press", 0, "off_action"], "macro"),
+     [
+         'buttons[1].bindings.press[0].off_action is not an action, so it does nothing.',
+     ]),
+    ('hold_action navigate word', _set(["buttons", 3, "bindings", "press", 0, "hold_action", "page"], "home"),
+     [
+         'buttons[3].bindings.press[0].hold_action: page "home" is not a page number, "__next_page__" or "__prev_page__", so the key does not change page.',
+     ]),
+    ('second press action unknown', _append(["buttons", 0, "bindings", "press"], {"action": "x", "mode": "bogus"}),
+     [
+         'buttons[0].bindings.press[1]: action "x" is not one a deck runs (macro, device.command, state.set, navigate), so it does nothing.',
+     ]),
+    ('feedback not an object', _set(["buttons", 0, "bindings", "feedback"], "var.on"),
+     [
+         'buttons[0].bindings.feedback is not an object, so the key never changes look.',
+     ]),
+    ('feedback key not text', _set(["buttons", 0, "bindings", "feedback", "key"], 1),
+     [
+         'buttons[0].bindings.feedback.key is not a state key, so the deck stops updating its keys.',
+     ]),
+    ('visible_when all not a list', _set(["buttons", 0, "bindings", "visible_when"], {"all": "var.on"}),
+     [
+         'buttons[0].bindings.visible_when.all is not a list of conditions, so the key stays hidden.',
+     ]),
+    ('visible_when all none', _set(["buttons", 0, "bindings", "visible_when"], {"all": None, "key": "var.on"}),
+     []),
+    ('visible_when nested child bad', _set(["buttons", 0, "bindings", "visible_when"], {"any": [{"key": 3}, "x", {"operator": 4}]}),
+     [
+         'buttons[0].bindings.visible_when.any[0].key is not a state key, so the key stays hidden.',
+         'buttons[0].bindings.visible_when.any[1] is not a condition object, so the key stays hidden.',
+         'buttons[0].bindings.visible_when.any[2]: operator 4 is not one the deck knows (eq, ne, gt, lt, gte, lte, truthy, falsy), so the key stays hidden.',
+     ]),
+    ('visible_when operator alias', _set(["buttons", 0, "bindings", "visible_when"], {"key": "var.on", "operator": ">="}),
+     []),
+    ('visible_when operator not text', _set(["buttons", 0, "bindings", "visible_when"], {"key": "var.on", "operator": ["eq"]}),
+     [
+         'buttons[0].bindings.visible_when: operator list is not one the deck knows (eq, ne, gt, lt, gte, lte, truthy, falsy), so the key stays hidden.',
+     ]),
+    ('several problems on one button', _set(["buttons", 0], {"index": "a", "page": "b", "label_source": 1, "bindings": {"press": [{"action": "x"}], "feedback": [], "visible_when": 3}}),
+     [
+         'buttons[0]: index "a" is not a key number (0 or more), so it is on no key.',
+         'buttons[0]: page "b" is not a page number (0 or more), so the key never shows.',
+         'buttons[0].label_source is not a state key, so the deck stops updating its keys.',
+         'buttons[0].bindings.press[0]: action "x" is not one a deck runs (macro, device.command, state.set, navigate), so it does nothing.',
+         'buttons[0].bindings.feedback is not an object, so the key never changes look.',
+         'buttons[0].bindings.visible_when is not a condition object, so the key stays hidden.',
+     ]),
+    ('auto_page rule not an object', _append(["auto_page"], "x"),
+     [
+         'auto_page[2] is not an object, so it is skipped.',
+     ]),
+    ('auto_page no when', _set(["auto_page", 0], {"page": 1}),
+     [
+         'auto_page[0] has no when, so it is skipped.',
+     ]),
+    ('auto_page when bad operator', _set(["auto_page", 0, "when", "operator"], "has"),
+     [
+         'auto_page[0].when: operator "has" is not one the deck knows (eq, ne, gt, lt, gte, lte, truthy, falsy), so it never matches.',
+     ]),
+    ('auto_page page a float', _set(["auto_page", 0, "page"], 1.9),
+     []),
+    ('auto_page page a list', _set(["auto_page", 0, "page"], [1]),
+     [
+         'auto_page[0].page list is not a page number, so it is skipped.',
+     ]),
+    ('auto_page empty rule', _set(["auto_page", 0], {}),
+     [
+         'auto_page[0] has no when, so it is skipped.',
+         'auto_page[0] has no page, so it is skipped.',
+     ]),
+    ('auto_brightness no level', _set(["auto_brightness", 0], {"when": {"key": "var.night"}}),
+     [
+         'auto_brightness[0] has no level, so it is skipped.',
+     ]),
+    ('auto_brightness when not an object', _set(["auto_brightness", 0, "when"], "var.night"),
+     [
+         'auto_brightness[0].when is not a condition object, so it never matches.',
+     ]),
+    ('auto_brightness level numeric text', _set(["auto_brightness", 0, "level"], "30"),
+     []),
+    ('idle_dim not an object', _set(["idle_dim"], 300),
+     [
+         'idle_dim is not an object, so the deck never dims.',
+     ]),
+    ('idle_dim level a word', _set(["idle_dim", "level"], "low"),
+     [
+         'idle_dim.level "low" is not a number, so the deck never dims.',
+     ]),
+    ('idle_dim empty', _set(["idle_dim"], {}),
+     [
+         'idle_dim has no after_seconds, so the deck never dims.',
+         'idle_dim has no level, so the deck never dims.',
+     ]),
+    ('dial not an object', _append(["dials"], "x"),
+     [
+         'dials[1] is not an object, so it is on no dial.',
+     ]),
+    ('dial no index', _set(["dials", 0], {"label": "Vol"}),
+     [
+         'dials[0] has no index, so it is on no dial.',
+     ]),
+    ('dial negative index', _set(["dials", 0, "index"], -1),
+     [
+         'dials[0]: index -1 is not a dial number (0 or more), so it is on no dial.',
+     ]),
+    ('dial press unknown', _set(["dials", 0, "press"], [{"action": "x"}]),
+     [
+         'dials[0].press[0]: action "x" is not one a deck runs (macro, device.command, state.set, navigate), so it does nothing.',
+     ]),
+    ('dial pressed_cw a word', _set(["dials", 0, "pressed_cw"], "x"),
+     [
+         'dials[0].pressed_cw is not an action or a list of actions, so it does nothing.',
+     ]),
+    ('dial long_touch to a device', _set(["dials", 0, "long_touch"], {"action": "state.set", "key": "device.x.y"}),
+     [
+         'dials[0].long_touch: "device.x.y" is not a variable (var.*) or the deck\'s own plugin.streamdeck.* state, the only keys a deck writes, so the action does nothing.',
+     ]),
+    ('dial adjust not an object', _set(["dials", 0, "adjust"], "var.volume"),
+     [
+         'dials[0].adjust is not an object, so turning does not change anything.',
+     ]),
+    ('dial adjust key not text', _set(["dials", 0, "adjust", "key"], 5),
+     [
+         'dials[0].adjust.key is not a state key, so turning does not change anything.',
+     ]),
+    ('dial adjust min and max words', _set(["dials", 0, "adjust"], {"key": "var.v", "min": "lo", "max": "hi", "step": "2"}),
+     [
+         'dials[0].adjust.min "lo" is not a number, so it is ignored.',
+         'dials[0].adjust.max "hi" is not a number, so it is ignored.',
+     ]),
+    ('dial pressed_adjust to a panel', _set(["dials", 0, "pressed_adjust", "key"], "ui.x.y"),
+     [
+         'dials[0].pressed_adjust: "ui.x.y" is not a variable (var.*) or the deck\'s own plugin.streamdeck.* state, the only keys a deck writes, so the deck does not change it.',
+     ]),
+    ('dial hold threshold a word', _set(["dials", 0, "hold_threshold_ms"], "long"),
+     [
+         'dials[0].hold_threshold_ms "long" is not a number, so it is ignored.',
+     ]),
+    ('dial hold threshold numeric text', _set(["dials", 0, "hold_threshold_ms"], "600"),
+     []),
+    ('touchscreen not an object', _set(["touchscreen"], "clock"),
+     [
+         'touchscreen is not an object, so the touch strip shows the clock.',
+     ]),
+    ('touchscreen none is fine', _set(["touchscreen"], None),
+     []),
+    ('touchscreen idle clock', _set(["touchscreen", "idle"], "clock"),
+     []),
+    ('touchscreen zones not a list', _set(["touchscreen", "zones"], {"label": "x"}),
+     [
+         'touchscreen.zones is not a list, so the strip lays out its own zones.',
+     ]),
+    ('touchscreen zones none', _set(["touchscreen", "zones"], None),
+     []),
+    ('zone not an object then a zone', _set(["touchscreen", "zones"], ["x", {"x": "0"}]),
+     [
+         'touchscreen.zones[0] is not an object, so it is skipped.',
+         'touchscreen.zones[1].x "0" is not a number, so the zone is placed by an even split instead.',
+     ]),
+    ('zone not an object', _append(["touchscreen", "zones"], "x"),
+     [
+         'touchscreen.zones[2] is not an object, so it is skipped.',
+     ]),
+    ('zone w a bool', _set(["touchscreen", "zones", 0, "w"], True),
+     []),
+    ('zone x and w text', _set(["touchscreen", "zones", 0], {"x": "0", "w": "10"}),
+     [
+         'touchscreen.zones[0].x "0" is not a number, so the zone is placed by an even split instead.',
+         'touchscreen.zones[0].w "10" is not a number, so the zone is placed by an even split instead.',
+     ]),
+    ('zone touch unknown', _set(["touchscreen", "zones", 0, "touch"], [{"action": "x"}]),
+     [
+         'touchscreen.zones[0].touch[0]: action "x" is not one a deck runs (macro, device.command, state.set, navigate), so it does nothing.',
+     ]),
+    ('zone long_touch a word', _set(["touchscreen", "zones", 0, "long_touch"], "x"),
+     [
+         'touchscreen.zones[0].long_touch is not an action or a list of actions, so it does nothing.',
+     ]),
+    ('zone drag_adjust not an object', _set(["touchscreen", "zones", 0, "drag_adjust"], 1),
+     [
+         'touchscreen.zones[0].drag_adjust is not an object, so turning does not change anything.',
+     ]),
+    ('zone value_source not text', _set(["touchscreen", "zones", 0, "value_source"], 1),
+     [
+         'touchscreen.zones[0].value_source is not a state key, so the deck stops updating the strip.',
+     ]),
+    ('zone key not text', _set(["touchscreen", "zones", 0, "key"], 1),
+     [
+         'touchscreen.zones[0].key is not a state key, so the deck stops updating the strip.',
+     ]),
+    ('zone feedback not an object', _set(["touchscreen", "zones", 1, "feedback"], "var.bass"),
+     [
+         'touchscreen.zones[1].feedback is not an object, so the zone never changes look.',
+     ]),
+    ('touchscreen idle and zones bad', _set(["touchscreen"], {"idle": 0, "zones": 1}),
+     [
+         'touchscreen.idle 0 is not "clock" or "blank", so the strip shows the clock.',
+         'touchscreen.zones is not a list, so the strip lays out its own zones.',
+     ]),
+    ('info_strip not an object', _set(["info_strip"], []),
+     [
+         'info_strip is not an object, so the screen shows the clock.',
+     ]),
+    ('info_strip none is fine', _set(["info_strip"], None),
+     []),
+    ('info_strip label_source not text', _set(["info_strip", "label_source"], 1),
+     [
+         'info_strip.label_source is not a state key, so the deck stops updating the screen.',
+     ]),
+    ('info_strip items not a list', _set(["info_strip", "items"], {}),
+     [
+         'info_strip.items is not a list, so it is ignored.',
+     ]),
+    ('info_strip items none', _set(["info_strip", "items"], None),
+     []),
+    ('info item not an object', _set(["info_strip", "items", 0], "x"),
+     [
+         'info_strip.items[0] is not an object, so it is skipped.',
+     ]),
+    ('info item value_source not text', _set(["info_strip", "items", 0, "value_source"], 3),
+     [
+         'info_strip.items[0].value_source is not a state key, so the deck stops updating the screen.',
+     ]),
+    ('info items three with a junk one', _append(["info_strip", "items"], "x"),
+     [
+         'info_strip.items[2] is not an object, so it is skipped.',
+     ]),
+    ('info items four', _set(["info_strip", "items"], [{"label": "Room"}, {"source": "text"}, {"label": "a"}, {"label": "b"}]),
+     [
+         'info_strip.items holds 4 items, and the screen fits two, so the ones after the second are not drawn.',
+     ]),
+    ('deck override layout problems', _set(["decks", "ABC123"], {"buttons": "x", "dials": [{"index": "a"}], "idle_dim": 1, "page_names": 2, "touchscreen": 3, "info_strip": 4}),
+     [
+         'decks.ABC123.buttons is not a list, so it is ignored.',
+         'decks.ABC123.dials[0]: index "a" is not a dial number (0 or more), so it is on no dial.',
+         'decks.ABC123.touchscreen is not an object, so the touch strip shows the clock.',
+         'decks.ABC123.info_strip is not an object, so the screen shows the clock.',
+         'decks.ABC123.idle_dim is not an object, so the deck never dims.',
+         'decks.ABC123.page_names is not an object, so it is ignored.',
+     ]),
+    ('deck override global button page fine', _set(["decks", "ABC123"], {"global_buttons": [{"index": 0, "page": "x"}]}),
+     []),
+    ('two deck overrides', _set(["decks"], {"A": {"buttons": [{"index": "x"}]}, "B": [], "C": {"auto_page": [{"when": 1, "page": "p"}]}}),
+     [
+         'decks.A.buttons[0]: index "x" is not a key number (0 or more), so it is on no key.',
+         'decks.B is not an object, so that deck uses the main layout.',
+         'decks.C.auto_page[0].when is not a condition object, so it never matches.',
+         'decks.C.auto_page[0].page "p" is not a page number, so it is skipped.',
+     ]),
+]
+
+
+@pytest.mark.parametrize("change,expected", [(c, e) for _, c, e in _EXACT],
+                         ids=[label for label, _, _ in _EXACT])
+def test_validate_config_says_exactly_this(change, expected):
+    config = _configurator_config()
+    change(config)
+    assert StreamDeckPlugin.validate_config(config) == expected
+
+
+# ──── The condition operators: the edges ────
+
+
+@pytest.mark.parametrize("alias,canonical", [
+    ("equals", "eq"), ("not_equals", "ne"), ("==", "eq"), ("!=", "ne"),
+    (">", "gt"), ("<", "lt"), (">=", "gte"), ("<=", "lte"),
+    ("equal", "eq"), ("not_equal", "ne"), ("greater_than", "gt"), ("less_than", "lt"),
+    ("greater_or_equal", "gte"), ("less_or_equal", "lte"),
+])
+def test_every_operator_alias_answers_as_its_operator(alias, canonical):
+    for actual, target in ((1, 2), (2, 1), (2, 2), ("on", "on"), ("on", "off"), (True, "yes")):
+        assert _eval_operator(alias, actual, target) == _eval_operator(canonical, actual, target)
+
+
+def test_eval_operator_orders_what_is_not_a_number_as_python_does():
+    assert _eval_operator("gt", "b", "a") is True
+    assert _eval_operator("lt", "b", "a") is False
+    assert _eval_operator("lt", "a", "b") is True
+    assert _eval_operator("gte", "a", "a") is True
+    assert _eval_operator("gte", "a", "b") is False
+    assert _eval_operator("lte", "b", "a") is False
+    assert _eval_operator("lte", "a", "b") is True
+    assert _eval_operator("lte", "a", "a") is True
+    # Values that cannot be put in order against each other are no match.
+    assert _eval_operator("gt", "a", [1]) is False
+    assert _eval_operator("lte", {}, "a") is False
+    assert _eval_operator("gte", None, None) is False
+
+
+def test_eval_operator_compares_as_written_when_coercion_cannot_decide():
+    # A bool against a word that is not a yes or a no.
+    assert _eval_operator("eq", True, "maybe") is False
+    assert _eval_operator("ne", True, "maybe") is True
+    # A bool against a number: a number is no bool word, but True is 1.
+    assert _eval_operator("eq", True, 1) is True
+    assert _eval_operator("eq", True, 2) is False
+    assert _eval_operator("ne", False, 0) is False
+    # Two different types, neither a number.
+    assert _eval_operator("eq", "a", ["a"]) is False
+    assert _eval_operator("ne", None, "x") is True
+    assert _eval_operator("eq", None, None) is True
+    # A number written as text against a float.
+    assert _eval_operator("eq", "1.0", 1) is True
+    assert _eval_operator("ne", "2", 2.5) is True
+    # Bool words, either case.
+    assert _eval_operator("eq", True, "YES") is True
+    assert _eval_operator("eq", False, "Off") is True
+    assert _eval_operator("eq", True, "0") is False
+
+
+# ──── Teardown: stopping the plugin, and a deck that goes away ────
+
+
+class _Handle:
+    """A timer or task handle; records its cancel in the shared call list."""
+
+    def __init__(self, calls, name):
+        self.calls, self.name = calls, name
+
+    def cancel(self):
+        self.calls.append(("cancel", self.name))
+
+
+class _ClosingDeck:
+    """Records reset() and close() in the shared call list; either can fail."""
+
+    def __init__(self, calls, name, fail=None):
+        self.calls, self.name, self.fail = calls, name, fail
+
+    def reset(self):
+        self.calls.append(("reset", self.name))
+        if self.fail == "reset":
+            raise RuntimeError(f"{self.name} reset failed")
+
+    def close(self):
+        self.calls.append(("close", self.name))
+        if self.fail == "close":
+            raise RuntimeError(f"{self.name} close failed")
+
+
+class _ClosingLink:
+    def __init__(self, calls, name):
+        self.calls, self.name = calls, name
+
+    def close(self):
+        self.calls.append(("link closed", self.name))
+
+
+def _arm_timers(session, calls, name):
+    """One of every timer a deck's teardown cancels."""
+    session.mirror_bump_handle = _Handle(calls, f"{name} bump")
+    session.overlay_handle = _Handle(calls, f"{name} overlay")
+    session.strip_render_task = _Handle(calls, f"{name} strip")
+    session.flash_zones = {0: _Handle(calls, f"{name} flash 0"), 2: _Handle(calls, f"{name} flash 2")}
+    session.macro_clear_handles = {(0, 1): _Handle(calls, f"{name} macro")}
+
+
+def _timers_left(session):
+    return (
+        session.mirror_bump_handle, session.overlay_handle, session.strip_render_task,
+        session.flash_zones, session.macro_clear_handles,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_every_timer_then_releases_each_deck():
+    plugin, _state, _m, _d = _make_plugin_with_recorders({})
+    calls = []
+    sessions = []
+    for name, fail in (("a", None), ("b", "reset"), ("c", "close")):
+        session = _session_for(plugin)
+        session.deck = _ClosingDeck(calls, name, fail)
+        _arm_timers(session, calls, name)
+        session.hold_tasks = {1: "kept"}
+        sessions.append(session)
+    idle = _session_for(plugin)   # a deck with no timer running
+    idle.deck = _ClosingDeck(calls, "d")
+    plugin._dock_links = {"h1:5343": _ClosingLink(calls, "h1"), "h2:5343": _ClosingLink(calls, "h2")}
+    plugin._mirror_blobs = {("A", "key_0"): (b"", "image/png")}
+
+    await plugin.stop()
+
+    deck_calls = []
+    for name, released in (("a", ["reset", "close"]), ("b", ["reset"]), ("c", ["reset", "close"])):
+        deck_calls += [
+            ("cancel", f"{name} bump"), ("cancel", f"{name} overlay"), ("cancel", f"{name} strip"),
+            ("cancel", f"{name} flash 0"), ("cancel", f"{name} flash 2"), ("cancel", f"{name} macro"),
+        ] + [(step, name) for step in released]
+    deck_calls += [("reset", "d"), ("close", "d")]
+    assert calls == deck_calls + [("link closed", "h1"), ("link closed", "h2")]
+    for session in sessions:
+        assert _timers_left(session) == (None, None, None, {}, {})
+        assert session.hold_tasks == {1: "kept"}
+    assert _timers_left(idle) == (None, None, None, {}, {})
+    assert plugin._sessions == {}
+    assert plugin._mirror_blobs == {}
+    assert plugin._dock_links == {}
+    assert plugin._test_logs == [
+        {"level": "warning", "message": "Error closing deck: b reset failed"},
+        {"level": "warning", "message": "Error closing deck: c close failed"},
+        {"level": "info", "message": "Stream Deck plugin stopped"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_deck_is_torn_down_and_its_disconnect_published():
+    plugin, state, _m, _d = _make_plugin_with_recorders({})
+    calls = []
+    session = _session_for(plugin)
+    session.serial, session.model = "S1", "Stream Deck XL"
+    session.deck = _ClosingDeck(calls, "s1", fail="close")
+    _arm_timers(session, calls, "s1")
+    session.hold_tasks = {3: "task-3", 4: "task-4"}
+    session.press_times = {3: 1.0}
+    session.dial_press_times = {0: 1.0}
+    session.dial_turned = {0}
+    session.feedback_subs = ["sub-1", "sub-2"]
+    session.strip_image = object()
+    session.strip_dirty = "all"
+    session.overlay_active = True
+    other = _session_for(plugin)
+    other.serial = "S2"
+    plugin._mirror_blobs = {("S1", "key_0"): (b"", "image/png"), ("S2", "key_0"): (b"", "image/png")}
+
+    plugin.api.cancel_task = lambda task_id: calls.append(("cancel task", task_id))
+
+    async def unsubscribe(sub_id):
+        calls.append(("unsubscribe", sub_id))
+        if sub_id == "sub-1":
+            raise RuntimeError("already gone")
+
+    async def emit(name, payload=None):
+        calls.append(("emit", name, payload))
+
+    plugin.api.state_unsubscribe = unsubscribe
+    plugin.api.event_emit = emit
+    state.subscribe(
+        "plugin.streamdeck.S1.connected",
+        lambda key, old, new, source: calls.append(("published", key, new)),
+    )
+
+    await plugin._handle_deck_lost(session)
+
+    assert calls == [
+        ("cancel task", "task-3"), ("cancel task", "task-4"),
+        ("unsubscribe", "sub-1"), ("unsubscribe", "sub-2"),
+        ("close", "s1"),
+        ("published", "plugin.streamdeck.S1.connected", False),
+        ("cancel", "s1 bump"), ("cancel", "s1 overlay"), ("cancel", "s1 strip"),
+        ("cancel", "s1 flash 0"), ("cancel", "s1 flash 2"), ("cancel", "s1 macro"),
+        ("emit", "disconnected", {"serial": "S1"}),
+    ]
+    assert _timers_left(session) == (None, None, None, {}, {})
+    assert session.hold_tasks == {} and session.press_times == {}
+    assert session.dial_press_times == {} and session.dial_turned == set()
+    assert session.feedback_subs == []
+    assert session.strip_image is None and session.strip_dirty is None
+    assert session.overlay_active is False
+    assert list(plugin._sessions.values()) == [other]
+    assert list(plugin._mirror_blobs) == [("S2", "key_0")]
+    assert state.get("plugin.streamdeck.deck_count") == 1
+    assert plugin._test_logs[0] == {
+        "level": "warning", "message": "Stream Deck disconnected (Stream Deck XL S/N: S1)",
+    }
+
+
+# ──── The deck lists the config declares ────
+
+
+def test_the_virtual_models_offered_are_the_preset_table():
+    models = [
+        "Stream Deck Neo", "Stream Deck Mini", "Stream Deck MK.2",
+        "Stream Deck XL", "Stream Deck +", "Stream Deck Pedal",
+    ]
+    assert StreamDeckPlugin.SURFACE_LAYOUT["virtual_models"] == models
+    assert list(sd_module._VIRTUAL_MODELS) == models
+
+
+def test_deck_lists_that_are_not_lists_declare_no_deck():
+    plugin, _state = _make_plugin({
+        "virtual_decks": {"model": "Stream Deck XL", "serial": "A"},
+        "network_decks": "192.0.2.1",
+    })
+    assert plugin._virtual_deck_entries() == []
+    assert plugin._network_deck_entries() == []
+
+
+def test_a_serial_after_an_unknown_model_is_still_free():
+    plugin, _state = _make_plugin({"virtual_decks": [
+        {"model": "bogus", "serial": "A"},
+        {"model": "Stream Deck XL", "serial": "A"},
+    ]})
+    assert plugin._virtual_deck_entries() == [{"model": "Stream Deck XL", "serial": "A"}]
+
+
+def test_network_deck_entries_carry_what_was_recorded():
+    plugin, _state = _make_plugin({"network_decks": [
+        {"host": " 192.0.2.30 ", "port": "5400", "serial": "DECK1", "mdns_sn": "DOCK1"},
+        {"host": "192.0.2.30", "port": 5400, "serial": "OTHER"},   # the same address
+        {"host": "192.0.2.31", "port": 0},                        # out of range
+        {"host": "192.0.2.32", "serial": None, "mdns_sn": 0},
+    ]})
+    assert plugin._network_deck_entries() == [
+        {"host": "192.0.2.30", "port": 5400, "key": "192.0.2.30:5400",
+         "serial": "DECK1", "mdns_sn": "DOCK1"},
+        {"host": "192.0.2.32", "port": 5343, "key": "192.0.2.32:5343",
+         "serial": "", "mdns_sn": ""},
+    ]
