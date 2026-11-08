@@ -6,6 +6,11 @@ Button presses execute macros; button images update based on system state.
 
 Supported models: Neo, Mini, MK.2/Original V2, XL, Plus, Pedal, and over the
 network the Network Dock and the Stream Deck Studio (net_deck.py).
+
+Beside this module: conditions.py (the rule visible_when, auto_page and
+auto_brightness are judged by), config_check.py (what validate_config
+reports), declared_decks.py (the virtual and network decks the config
+declares) and virtual_deck.py (a deck that exists only in software).
 """
 
 import asyncio
@@ -14,13 +19,16 @@ import io
 import json
 import os
 import platform as platform_mod
-import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from .conditions import coerce_numeric, condition_state_keys, eval_condition
+from .config_check import config_problems, unwrap_binding
+from .declared_decks import network_deck_entries, virtual_deck_entries
 from .deck_classes import net_deck_class
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
+from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
 
 # A sentence raised as PluginRefusal from start() is the one the AI assistant
 # repeats to the integrator; on an older OpenAVC the card shows it either way.
@@ -84,745 +92,6 @@ def _patch_hidapi_search():
     LibUSBHIDAPI.Library._load_hidapi_library = _extended_load
 
 
-def _unwrap_binding(value):
-    """Unwrap a binding value that may be a single dict or an array of dicts.
-
-    The Surface Configurator stores press/release/hold as arrays to support
-    multiple sequential actions. The plugin handler expects a single dict
-    (the first action, which carries the mode and config).
-    """
-    if isinstance(value, list) and len(value) > 0:
-        return value[0] if isinstance(value[0], dict) else None
-    if isinstance(value, dict):
-        return value
-    return None
-
-
-# ──── Condition Evaluation ────
-#
-# Self-contained copy of the platform's condition evaluator
-# (openavc/core/condition_eval.py). Vendored rather than imported so this
-# community plugin stays portable and doesn't couple to platform internals.
-# Semantics are kept identical to the platform evaluator so a `visible_when`
-# or `auto_page` condition behaves the same here as in a macro skip_if or a
-# trigger guard.
-
-_CONDITION_OPERATOR_ALIASES = {
-    "equals": "eq", "not_equals": "ne", "==": "eq", "!=": "ne",
-    ">": "gt", "<": "lt", ">=": "gte", "<=": "lte",
-    "equal": "eq", "not_equal": "ne", "greater_than": "gt", "less_than": "lt",
-    "greater_or_equal": "gte", "less_or_equal": "lte",
-}
-
-
-def _coerce_numeric(value):
-    """Try to coerce a value to a number for comparison."""
-    if isinstance(value, (int, float)):
-        return value
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return None
-    return None
-
-
-def _coerce_bool(value):
-    """Normalize boolean-like values for comparison."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        low = value.lower()
-        if low in ("true", "1", "yes", "on"):
-            return True
-        if low in ("false", "0", "no", "off"):
-            return False
-    return None
-
-
-def _eval_operator(op, actual, target):
-    """Evaluate a comparison operator with alias normalization and type coercion.
-
-    Raises ValueError on an unknown operator (callers treat that as no match).
-    """
-    op = _CONDITION_OPERATOR_ALIASES.get(op, op)
-
-    if op in ("eq", "ne"):
-        if isinstance(actual, bool) or isinstance(target, bool):
-            a_bool = _coerce_bool(actual)
-            t_bool = _coerce_bool(target)
-            if a_bool is not None and t_bool is not None:
-                return (a_bool == t_bool) if op == "eq" else (a_bool != t_bool)
-        if type(actual) is not type(target):
-            a_num = _coerce_numeric(actual)
-            t_num = _coerce_numeric(target)
-            if a_num is not None and t_num is not None:
-                return (a_num == t_num) if op == "eq" else (a_num != t_num)
-        return (actual == target) if op == "eq" else (actual != target)
-
-    if op in ("gt", "lt", "gte", "lte"):
-        if actual is None or target is None:
-            return False
-        a_num = _coerce_numeric(actual)
-        t_num = _coerce_numeric(target)
-        if a_num is not None and t_num is not None:
-            if op == "gt":
-                return a_num > t_num
-            if op == "lt":
-                return a_num < t_num
-            if op == "gte":
-                return a_num >= t_num
-            return a_num <= t_num
-        try:
-            if op == "gt":
-                return actual > target
-            if op == "lt":
-                return actual < target
-            if op == "gte":
-                return actual >= target
-            return actual <= target
-        except TypeError:
-            return False
-
-    if op == "truthy":
-        return bool(actual)
-    if op == "falsy":
-        return not bool(actual)
-    raise ValueError(f"Unknown condition operator: {op!r}")
-
-
-def _condition_state_keys(cond):
-    """Collect every state key referenced by a condition.
-
-    Handles a single ``{key, operator, value}`` condition plus the compound
-    ``{all: [...]}`` and ``{any: [...]}`` forms (recursively).
-    """
-    keys = []
-    if not isinstance(cond, dict):
-        return keys
-    for group in ("all", "any"):
-        sub = cond.get(group)
-        if isinstance(sub, list):
-            for child in sub:
-                keys.extend(_condition_state_keys(child))
-    key = cond.get("key")
-    if key:
-        keys.append(key)
-    return keys
-
-
-# ──── Virtual decks ────
-#
-# A virtual deck is a software stand-in implementing the same device interface
-# the sessions consume — it opens, renders, and receives input exactly like
-# attached hardware, except the "display" is the live mirror served over the
-# plugin's HTTP routes and input arrives via the simulate_input context
-# action. Lets layouts be built and tested with no deck attached.
-
-_NO_DISPLAY = {"size": (0, 0), "format": "", "flip": (False, False), "rotation": 0}
-
-# Geometry/format presets per virtual model. These mirror the bundled
-# library's per-device constants (Devices/StreamDeck*.py) so a virtual deck
-# renders byte-identically to the real hardware path.
-_VIRTUAL_MODELS = {
-    "Stream Deck Neo": {
-        "key_count": 8, "rows": 2, "cols": 4, "dials": 0, "touch_keys": 2,
-        "touch": False, "visual": True,
-        "key_format": {"size": (96, 96), "format": "JPEG", "flip": (True, True), "rotation": 0},
-        "screen_format": {"size": (248, 58), "format": "JPEG", "flip": (True, True), "rotation": 0},
-        "touchscreen_format": _NO_DISPLAY,
-    },
-    "Stream Deck Mini": {
-        "key_count": 6, "rows": 2, "cols": 3, "dials": 0, "touch_keys": 0,
-        "touch": False, "visual": True,
-        "key_format": {"size": (80, 80), "format": "BMP", "flip": (False, True), "rotation": 90},
-        "screen_format": _NO_DISPLAY,
-        "touchscreen_format": _NO_DISPLAY,
-    },
-    "Stream Deck MK.2": {
-        "key_count": 15, "rows": 3, "cols": 5, "dials": 0, "touch_keys": 0,
-        "touch": False, "visual": True,
-        "key_format": {"size": (72, 72), "format": "JPEG", "flip": (True, True), "rotation": 0},
-        "screen_format": _NO_DISPLAY,
-        "touchscreen_format": _NO_DISPLAY,
-    },
-    "Stream Deck XL": {
-        "key_count": 32, "rows": 4, "cols": 8, "dials": 0, "touch_keys": 0,
-        "touch": False, "visual": True,
-        "key_format": {"size": (96, 96), "format": "JPEG", "flip": (True, True), "rotation": 0},
-        "screen_format": _NO_DISPLAY,
-        "touchscreen_format": _NO_DISPLAY,
-    },
-    "Stream Deck +": {
-        "key_count": 8, "rows": 2, "cols": 4, "dials": 4, "touch_keys": 0,
-        "touch": True, "visual": True,
-        "key_format": {"size": (120, 120), "format": "JPEG", "flip": (False, False), "rotation": 0},
-        "screen_format": _NO_DISPLAY,
-        "touchscreen_format": {"size": (800, 100), "format": "JPEG", "flip": (False, False), "rotation": 0},
-    },
-    "Stream Deck Pedal": {
-        "key_count": 3, "rows": 1, "cols": 3, "dials": 0, "touch_keys": 0,
-        "touch": False, "visual": False,
-        "key_format": _NO_DISPLAY,
-        "screen_format": _NO_DISPLAY,
-        "touchscreen_format": _NO_DISPLAY,
-    },
-}
-
-
-class _VirtualDeck:
-    """Software deck implementing the device interface the sessions consume."""
-
-    def __init__(self, model, serial, preset):
-        self._model = model
-        self._serial = serial
-        self._preset = preset
-        self._open = False
-        self.brightness = None
-
-    def id(self):
-        return f"virtual:{self._serial}"
-
-    def open(self):
-        self._open = True
-
-    def close(self):
-        self._open = False
-
-    def reset(self):
-        pass
-
-    def is_open(self):
-        return self._open
-
-    def connected(self):
-        return True
-
-    def is_visual(self):
-        return self._preset["visual"]
-
-    def is_touch(self):
-        return self._preset["touch"]
-
-    def deck_type(self):
-        return self._model
-
-    def get_serial_number(self):
-        return self._serial
-
-    def key_count(self):
-        return self._preset["key_count"]
-
-    def key_layout(self):
-        return (self._preset["rows"], self._preset["cols"])
-
-    def dial_count(self):
-        return self._preset["dials"]
-
-    def touch_key_count(self):
-        return self._preset["touch_keys"]
-
-    def key_image_format(self):
-        return dict(self._preset["key_format"])
-
-    def screen_image_format(self):
-        return dict(self._preset["screen_format"])
-
-    def touchscreen_image_format(self):
-        return dict(self._preset["touchscreen_format"])
-
-    def set_brightness(self, level):
-        self.brightness = level
-
-    # Display writes are swallowed — the live mirror taps the pre-encoded
-    # images upstream, so nothing needs storing here.
-    def set_key_image(self, key, image):
-        pass
-
-    def set_key_color(self, key, r, g, b):
-        pass
-
-    def set_screen_image(self, image):
-        pass
-
-    def set_touchscreen_image(self, image, x_pos=0, y_pos=0, width=0, height=0):
-        pass
-
-    # Input callbacks are unused — simulated input dispatches straight to the
-    # plugin's session handlers.
-    def set_key_callback_async(self, cb, loop=None):
-        pass
-
-    def set_dial_callback_async(self, cb, loop=None):
-        pass
-
-    def set_touchscreen_callback_async(self, cb, loop=None):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-# ──── Config check ────
-#
-# What validate_config() reports: the parts of a proposed config this plugin
-# would skip or read as something else. Each rule mirrors a reader below, so
-# the check never refuses a shape the deck uses. Nothing the Stream Deck
-# view can save is refused either, since it re-sends the whole config on
-# every edit: an unfinished entry (a rule with no state key yet, an action
-# with no type yet), and a value typed into one of its number boxes (a zone
-# position or width, a network port), are left to the deck to make of. A
-# key the deck would write but cannot (a panel control or a device state) is
-# refused: the view offers only variables there, and the deck would drop the
-# write at every press.
-
-_KNOWN_ACTIONS = ("macro", "device.command", "state.set", "navigate")
-_KNOWN_MODES = ("tap", "toggle", "hold_repeat", "tap_hold")
-_KNOWN_OPERATORS = frozenset(
-    {"eq", "ne", "gt", "lt", "gte", "lte", "truthy", "falsy"}
-    | set(_CONDITION_OPERATOR_ALIASES)
-)
-_LAYOUT_LISTS = ("buttons", "global_buttons", "auto_page", "dials", "auto_brightness")
-_DIAL_ACTIONS = (
-    "press", "long_press", "cw", "ccw", "pressed_cw", "pressed_ccw",
-    "touch", "long_touch",
-)
-
-
-def _shown(value):
-    return json.dumps(value) if isinstance(value, (str, int, float, bool)) else type(value).__name__
-
-
-def _is_number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _is_slot_number(value):
-    """A key, dial or page number: a whole number, 0 or more."""
-    return _is_number(value) and float(value).is_integer() and value >= 0
-
-
-def _join(prefix, name):
-    return f"{prefix}.{name}" if prefix else name
-
-
-# What a key, dial or zone may write: a user variable or this plugin's own
-# state (its id is "streamdeck"), the rule _apply_state_set enforces when it
-# runs.
-_WRITABLE_PREFIXES = ("var.", "plugin.streamdeck.")
-
-
-def _write_problems(key, path, consequence):
-    if not isinstance(key, str) or not key or key.startswith(_WRITABLE_PREFIXES):
-        return []
-    return [
-        f"{path}: {_shown(key)} is not a variable (var.*) or the deck's own "
-        f"plugin.streamdeck.* state, the only keys a deck writes, so {consequence}."
-    ]
-
-
-def _action_problems(action, path):
-    if not isinstance(action, dict):
-        return [f"{path} is not an action, so it does nothing."]
-    problems = []
-    kind = action.get("action")
-    if kind not in (None, "") and kind not in _KNOWN_ACTIONS:
-        problems.append(
-            f"{path}: action {_shown(kind)} is not one a deck runs "
-            f"({', '.join(_KNOWN_ACTIONS)}), so it does nothing."
-        )
-    if kind == "navigate":
-        page = action.get("page")
-        if page not in (None, "", "__next_page__", "__prev_page__"):
-            try:
-                int(page)
-            except (TypeError, ValueError):
-                problems.append(
-                    f"{path}: page {_shown(page)} is not a page number, "
-                    f"\"__next_page__\" or \"__prev_page__\", so the key does not change page."
-                )
-    if kind == "device.command":
-        params = action.get("params")
-        if params is not None and not isinstance(params, dict):
-            problems.append(
-                f"{path}: params is not an object, so the command is sent without them."
-            )
-    if kind == "state.set":
-        problems += _write_problems(action.get("key"), path, "the action does nothing")
-    return problems
-
-
-def _action_list_problems(value, path):
-    if value is None:
-        return []
-    if isinstance(value, dict):
-        return _action_problems(value, path)
-    if isinstance(value, list):
-        problems = []
-        for i, action in enumerate(value):
-            problems += _action_problems(action, f"{path}[{i}]")
-        return problems
-    return [f"{path} is not an action or a list of actions, so it does nothing."]
-
-
-def _condition_problems(cond, path, consequence):
-    if not isinstance(cond, dict):
-        return [f"{path} is not a condition object, so {consequence}."]
-    problems = []
-    for group in ("all", "any"):
-        if group not in cond or cond[group] is None:
-            continue
-        children = cond[group]
-        if not isinstance(children, list):
-            problems.append(f"{path}.{group} is not a list of conditions, so {consequence}.")
-            continue
-        for i, child in enumerate(children):
-            problems += _condition_problems(child, f"{path}.{group}[{i}]", consequence)
-    key = cond.get("key")
-    if key is not None and not isinstance(key, str):
-        problems.append(f"{path}.key is not a state key, so {consequence}.")
-    operator = cond.get("operator")
-    if operator not in (None, "") and (
-        not isinstance(operator, str) or operator not in _KNOWN_OPERATORS
-    ):
-        problems.append(
-            f"{path}: operator {_shown(operator)} is not one the deck knows "
-            f"(eq, ne, gt, lt, gte, lte, truthy, falsy), so {consequence}."
-        )
-    return problems
-
-
-def _source_problems(entry, path, consequence):
-    problems = []
-    for field in ("label_source", "value_source", "key"):
-        value = entry.get(field)
-        if value is not None and not isinstance(value, str):
-            problems.append(f"{path}.{field} is not a state key, so {consequence}.")
-    return problems
-
-
-def _adjust_problems(adjust, path):
-    if adjust is None:
-        return []
-    if not isinstance(adjust, dict):
-        return [f"{path} is not an object, so turning does not change anything."]
-    problems = []
-    key = adjust.get("key")
-    if key is not None and not isinstance(key, str):
-        problems.append(f"{path}.key is not a state key, so turning does not change anything.")
-    problems += _write_problems(key, path, "the deck does not change it")
-    for field in ("step", "min", "max"):
-        value = adjust.get(field)
-        if value is not None and _coerce_numeric(value) is None:
-            problems.append(f"{path}.{field} {_shown(value)} is not a number, so it is ignored.")
-    return problems
-
-
-def _button_problems(btn, path, paged):
-    if not isinstance(btn, dict):
-        return [f"{path} is not an object, so it is on no key."]
-    problems = []
-    index = btn.get("index")
-    if index is None:
-        problems.append(f"{path} has no index, so it is on no key.")
-    elif not _is_slot_number(index):
-        problems.append(
-            f"{path}: index {_shown(index)} is not a key number (0 or more), so it is on no key."
-        )
-    page = btn.get("page")
-    if paged and page is not None and not _is_slot_number(page):
-        problems.append(
-            f"{path}: page {_shown(page)} is not a page number (0 or more), so the key never shows."
-        )
-    problems += _source_problems(
-        {f: btn.get(f) for f in ("label_source", "value_source")}, path,
-        "the deck stops updating its keys",
-    )
-    bindings = btn.get("bindings")
-    if bindings is None:
-        return problems
-    if not isinstance(bindings, dict):
-        return problems + [f"{path}.bindings is not an object, so the key does nothing."]
-    press_path = f"{path}.bindings.press"
-    problems += _action_list_problems(bindings.get("press"), press_path)
-    press = _unwrap_binding(bindings.get("press"))
-    if isinstance(press, dict):
-        mode = press.get("mode")
-        if mode is not None and mode not in _KNOWN_MODES:
-            problems.append(
-                f"{press_path}[0]: mode {_shown(mode)} is not one a key has "
-                f"({', '.join(_KNOWN_MODES)}), so the key acts as a tap."
-            )
-        for field in ("hold_repeat_ms", "hold_threshold_ms"):
-            value = press.get(field)
-            if value is not None and not _is_number(value):
-                problems.append(
-                    f"{press_path}[0].{field} {_shown(value)} is not a number, "
-                    f"so the key fails when pressed."
-                )
-        for field in ("off_action", "hold_action"):
-            value = press.get(field)
-            if value is not None:
-                problems += _action_problems(value, f"{press_path}[0].{field}")
-    feedback = bindings.get("feedback")
-    if feedback is not None and not isinstance(feedback, dict):
-        problems.append(f"{path}.bindings.feedback is not an object, so the key never changes look.")
-    elif isinstance(feedback, dict):
-        problems += _source_problems(
-            {"key": feedback.get("key")}, f"{path}.bindings.feedback",
-            "the deck stops updating its keys",
-        )
-    visible = bindings.get("visible_when")
-    if visible is not None:
-        problems += _condition_problems(
-            visible, f"{path}.bindings.visible_when", "the key stays hidden",
-        )
-    return problems
-
-
-def _dial_problems(dial, path):
-    if not isinstance(dial, dict):
-        return [f"{path} is not an object, so it is on no dial."]
-    problems = []
-    index = dial.get("index")
-    if index is None:
-        problems.append(f"{path} has no index, so it is on no dial.")
-    elif not _is_slot_number(index):
-        problems.append(
-            f"{path}: index {_shown(index)} is not a dial number (0 or more), so it is on no dial."
-        )
-    for field in _DIAL_ACTIONS:
-        problems += _action_list_problems(dial.get(field), f"{path}.{field}")
-    for field in ("adjust", "pressed_adjust"):
-        problems += _adjust_problems(dial.get(field), f"{path}.{field}")
-    threshold = dial.get("hold_threshold_ms")
-    if threshold is not None and _coerce_numeric(threshold) is None:
-        problems.append(
-            f"{path}.hold_threshold_ms {_shown(threshold)} is not a number, so it is ignored."
-        )
-    return problems
-
-
-def _touchscreen_problems(ts, path):
-    if not isinstance(ts, dict):
-        return [f"{path} is not an object, so the touch strip shows the clock."]
-    problems = []
-    idle = ts.get("idle")
-    if idle is not None and idle not in ("clock", "blank"):
-        problems.append(
-            f"{path}.idle {_shown(idle)} is not \"clock\" or \"blank\", so the strip shows the clock."
-        )
-    zones = ts.get("zones")
-    if zones is None:
-        return problems
-    if not isinstance(zones, list):
-        return problems + [f"{path}.zones is not a list, so the strip lays out its own zones."]
-    for i, zone in enumerate(zones):
-        zone_path = f"{path}.zones[{i}]"
-        if not isinstance(zone, dict):
-            problems.append(f"{zone_path} is not an object, so it is skipped.")
-            continue
-        for field in ("x", "w"):
-            value = zone.get(field)
-            if value is not None and not isinstance(value, (int, float)):
-                problems.append(
-                    f"{zone_path}.{field} {_shown(value)} is not a number, "
-                    f"so the zone is placed by an even split instead."
-                )
-        for field in ("touch", "long_touch"):
-            problems += _action_list_problems(zone.get(field), f"{zone_path}.{field}")
-        problems += _adjust_problems(zone.get("drag_adjust"), f"{zone_path}.drag_adjust")
-        problems += _source_problems(zone, zone_path, "the deck stops updating the strip")
-        feedback = zone.get("feedback")
-        if feedback is not None and not isinstance(feedback, dict):
-            problems.append(f"{zone_path}.feedback is not an object, so the zone never changes look.")
-    return problems
-
-
-def _info_strip_problems(cfg, path):
-    if not isinstance(cfg, dict):
-        return [f"{path} is not an object, so the screen shows the clock."]
-    problems = _source_problems(cfg, path, "the deck stops updating the screen")
-    items = cfg.get("items")
-    if items is None:
-        return problems
-    if not isinstance(items, list):
-        return problems + [f"{path}.items is not a list, so it is ignored."]
-    drawn = 0
-    for i, item in enumerate(items):
-        if not isinstance(item, dict):
-            problems.append(f"{path}.items[{i}] is not an object, so it is skipped.")
-            continue
-        drawn += 1
-        problems += _source_problems(item, f"{path}.items[{i}]", "the deck stops updating the screen")
-    if drawn > 2:
-        problems.append(
-            f"{path}.items holds {drawn} items, and the screen fits two, "
-            f"so the ones after the second are not drawn."
-        )
-    return problems
-
-
-def _rule_problems(rule, path, value_field, consequence):
-    """An auto_page or auto_brightness rule: a ``when`` plus a page or level."""
-    if not isinstance(rule, dict):
-        return [f"{path} is not an object, so it is skipped."]
-    problems = []
-    when = rule.get("when")
-    if when is None:
-        problems.append(f"{path} has no when, so it is skipped.")
-    else:
-        problems += _condition_problems(when, f"{path}.when", consequence)
-    value = rule.get(value_field)
-    if value is None:
-        problems.append(f"{path} has no {value_field}, so it is skipped.")
-    elif value_field == "page":
-        try:
-            int(value)
-        except (TypeError, ValueError):
-            problems.append(f"{path}.page {_shown(value)} is not a page number, so it is skipped.")
-    elif _coerce_numeric(value) is None:
-        problems.append(f"{path}.{value_field} {_shown(value)} is not a number, so it is skipped.")
-    return problems
-
-
-def _layout_problems(cfg, prefix):
-    """The per-deck sections, in the flat config or one ``decks`` override."""
-    problems = []
-    for name in _LAYOUT_LISTS:
-        value = cfg.get(name)
-        if value is not None and not isinstance(value, list):
-            problems.append(f"{_join(prefix, name)} is not a list, so it is ignored.")
-    for name in ("buttons", "global_buttons"):
-        entries = cfg.get(name)
-        for i, btn in enumerate(entries if isinstance(entries, list) else []):
-            problems += _button_problems(btn, f"{_join(prefix, name)}[{i}]", name == "buttons")
-    rules = cfg.get("auto_page")
-    for i, rule in enumerate(rules if isinstance(rules, list) else []):
-        problems += _rule_problems(
-            rule, f"{_join(prefix, 'auto_page')}[{i}]", "page", "it never matches",
-        )
-    rules = cfg.get("auto_brightness")
-    for i, rule in enumerate(rules if isinstance(rules, list) else []):
-        problems += _rule_problems(
-            rule, f"{_join(prefix, 'auto_brightness')}[{i}]", "level", "it never matches",
-        )
-    dials = cfg.get("dials")
-    for i, dial in enumerate(dials if isinstance(dials, list) else []):
-        problems += _dial_problems(dial, f"{_join(prefix, 'dials')}[{i}]")
-    if cfg.get("touchscreen") is not None:
-        problems += _touchscreen_problems(cfg["touchscreen"], _join(prefix, "touchscreen"))
-    if cfg.get("info_strip") is not None:
-        problems += _info_strip_problems(cfg["info_strip"], _join(prefix, "info_strip"))
-    idle_dim = cfg.get("idle_dim")
-    if idle_dim is not None:
-        path = _join(prefix, "idle_dim")
-        if not isinstance(idle_dim, dict):
-            problems.append(f"{path} is not an object, so the deck never dims.")
-        else:
-            for field in ("after_seconds", "level"):
-                value = idle_dim.get(field)
-                if value is None:
-                    problems.append(f"{path} has no {field}, so the deck never dims.")
-                elif _coerce_numeric(value) is None:
-                    problems.append(
-                        f"{path}.{field} {_shown(value)} is not a number, so the deck never dims."
-                    )
-    names = cfg.get("page_names")
-    if names is not None and not isinstance(names, dict):
-        problems.append(f"{_join(prefix, 'page_names')} is not an object, so it is ignored.")
-    return problems
-
-
-def _config_problems(config):
-    """Every part of a proposed config the plugin would skip or misread."""
-    if not isinstance(config, dict):
-        return []
-    problems = _layout_problems(config, "")
-
-    brightness = config.get("brightness")
-    if brightness is not None and _coerce_numeric(brightness) is None:
-        problems.append(f"brightness {_shown(brightness)} is not a number, so 70 is used.")
-    for name in ("decks", "deck_names", "deck_settings"):
-        value = config.get(name)
-        if value is not None and not isinstance(value, dict):
-            problems.append(f"{name} is not an object keyed by deck serial, so it is ignored.")
-
-    decks = config.get("decks")
-    for serial, override in (decks.items() if isinstance(decks, dict) else []):
-        if not isinstance(override, dict):
-            problems.append(
-                f"decks.{serial} is not an object, so that deck uses the main layout."
-            )
-            continue
-        problems += _layout_problems(override, f"decks.{serial}")
-
-    settings = config.get("deck_settings")
-    for serial, entry in (settings.items() if isinstance(settings, dict) else []):
-        if not isinstance(entry, dict):
-            problems.append(f"deck_settings.{serial} is not an object, so it is ignored.")
-            continue
-        level = entry.get("brightness")
-        if level is not None and _coerce_numeric(level) is None:
-            problems.append(
-                f"deck_settings.{serial}.brightness {_shown(level)} is not a number, so it is ignored."
-            )
-
-    virtuals = config.get("virtual_decks")
-    if virtuals is not None and not isinstance(virtuals, list):
-        problems.append("virtual_decks is not a list, so no virtual deck is created.")
-    seen = set()
-    for i, item in enumerate(virtuals if isinstance(virtuals, list) else []):
-        path = f"virtual_decks[{i}]"
-        if not isinstance(item, dict):
-            problems.append(f"{path} is not an object, so no deck is created for it.")
-            continue
-        model = item.get("model")
-        if model not in _VIRTUAL_MODELS:
-            problems.append(
-                f"{path}: model {_shown(model)} is not a virtual deck model "
-                f"({', '.join(_VIRTUAL_MODELS)}), so no deck is created for it."
-            )
-        serial = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("serial", "")))
-        if not serial:
-            problems.append(
-                f"{path} has no serial made of letters, digits, - or _, so no deck is created for it."
-            )
-        elif serial in seen:
-            problems.append(f"{path} repeats serial {serial}, so no second deck is created.")
-        seen.add(serial)
-
-    networked = config.get("network_decks")
-    if networked is not None and not isinstance(networked, list):
-        problems.append("network_decks is not a list, so no network deck is added.")
-    seen = set()
-    for i, item in enumerate(networked if isinstance(networked, list) else []):
-        path = f"network_decks[{i}]"
-        if not isinstance(item, dict):
-            problems.append(f"{path} is not an object, so no deck is added for it.")
-            continue
-        host = str(item.get("host", "")).strip()
-        if not host:
-            problems.append(f"{path} has no host, so no deck is added for it.")
-        try:
-            port = int(item.get("port", NET_DEFAULT_PORT))
-        except (TypeError, ValueError):
-            port = None
-        if port is None:
-            problems.append(
-                f"{path}: port {_shown(item.get('port'))} is not a number, so no deck is added for it."
-            )
-        elif host and 0 < port < 65536:
-            key = f"{host}:{port}"
-            if key in seen:
-                problems.append(f"{path} repeats {key}, so no second deck is added.")
-            seen.add(key)
-    return problems
-
-
 class _DeckSession:
     """Per-deck runtime state for one connected Stream Deck.
 
@@ -866,13 +135,33 @@ class _DeckSession:
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
         self.input_seq = 0              # monotonic counter for the input echo
 
+    def cancel_timers(self):
+        """Cancel every timer and debounced task the deck has running: the
+        mirror bump, the overlay restore, the strip redraw, the touch flashes
+        and the macro marks' clears."""
+        if self.mirror_bump_handle is not None:
+            self.mirror_bump_handle.cancel()
+            self.mirror_bump_handle = None
+        if self.overlay_handle is not None:
+            self.overlay_handle.cancel()
+            self.overlay_handle = None
+        if self.strip_render_task is not None:
+            self.strip_render_task.cancel()
+            self.strip_render_task = None
+        for handle in self.flash_zones.values():
+            handle.cancel()
+        self.flash_zones.clear()
+        for handle in self.macro_clear_handles.values():
+            handle.cancel()
+        self.macro_clear_handles.clear()
+
 
 class StreamDeckPlugin:
 
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.38.2",
+        "version": "1.38.3",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -966,15 +255,8 @@ class StreamDeckPlugin:
         # The editor offers "Add network deck" (ext/network/scan + /test
         # routes, network_decks config array).
         "network": True,
-        # Must match the _VIRTUAL_MODELS preset table below.
-        "virtual_models": [
-            "Stream Deck Neo",
-            "Stream Deck Mini",
-            "Stream Deck MK.2",
-            "Stream Deck XL",
-            "Stream Deck +",
-            "Stream Deck Pedal",
-        ],
+        # The models a virtual deck can be (virtual_deck.py).
+        "virtual_models": list(VIRTUAL_MODELS),
     }
 
     AI_GUIDE = (
@@ -1215,7 +497,7 @@ class StreamDeckPlugin:
         run, a virtual deck model it does not have. OpenAVC asks before
         storing a config and refuses one that adds a problem; an empty list
         is a config the deck can use as written."""
-        return _config_problems(config)
+        return config_problems(config)
 
     def __init__(self):
         self.api = None
@@ -1227,7 +509,6 @@ class StreamDeckPlugin:
         # always mirror; physical decks mirror while the Live View is open.
         self._mirror_blobs = {}
         self._mirror_physical = False
-        self._icon_font = None   # Loaded Lucide TTF font for icon rendering
         self._icon_map = {}      # icon-name -> unicode code point
         self._icon_cache = {}    # (icon_name, size, color_hex) -> PIL Image
         self._text_font_path = None  # Bundled label font (legible on Linux/Pi)
@@ -1308,21 +589,7 @@ class StreamDeckPlugin:
     async def stop(self):
         """Release every connected Stream Deck."""
         for session in list(self._sessions.values()):
-            if session.mirror_bump_handle is not None:
-                session.mirror_bump_handle.cancel()
-                session.mirror_bump_handle = None
-            if session.overlay_handle is not None:
-                session.overlay_handle.cancel()
-                session.overlay_handle = None
-            if session.strip_render_task is not None:
-                session.strip_render_task.cancel()
-                session.strip_render_task = None
-            for handle in session.flash_zones.values():
-                handle.cancel()
-            session.flash_zones.clear()
-            for handle in session.macro_clear_handles.values():
-                handle.cancel()
-            session.macro_clear_handles.clear()
+            session.cancel_timers()
             try:
                 session.deck.reset()
                 session.deck.close()
@@ -1464,7 +731,7 @@ class StreamDeckPlugin:
         deck.reset()
 
         session = _DeckSession(deck)
-        session.is_virtual = isinstance(deck, _VirtualDeck)
+        session.is_virtual = isinstance(deck, VirtualDeck)
         net_device = getattr(deck, "device", None)
         session.is_network = bool(getattr(net_device, "is_network", False))
         session.address = net_device.address if session.is_network else ""
@@ -1622,8 +889,8 @@ class StreamDeckPlugin:
         for entry in declared_virtual:
             if f"virtual:{entry['serial']}" not in self._sessions:
                 new_decks.append(
-                    _VirtualDeck(
-                        entry["model"], entry["serial"], _VIRTUAL_MODELS[entry["model"]]
+                    VirtualDeck(
+                        entry["model"], entry["serial"], VIRTUAL_MODELS[entry["model"]]
                     )
                 )
 
@@ -1681,24 +948,10 @@ class StreamDeckPlugin:
             pass
 
         await self.api.state_set(f"{session.serial}.connected", False)
-        if session.mirror_bump_handle is not None:
-            session.mirror_bump_handle.cancel()
-            session.mirror_bump_handle = None
-        if session.overlay_handle is not None:
-            session.overlay_handle.cancel()
-            session.overlay_handle = None
-        if session.strip_render_task is not None:
-            session.strip_render_task.cancel()
-            session.strip_render_task = None
+        session.cancel_timers()
         session.strip_image = None
         session.strip_dirty = None
-        for handle in session.flash_zones.values():
-            handle.cancel()
-        session.flash_zones.clear()
         session.overlay_active = False
-        for handle in session.macro_clear_handles.values():
-            handle.cancel()
-        session.macro_clear_handles.clear()
         self._drop_mirror_blobs(session.serial)
         await self._publish_deck_state()
         await self.api.event_emit("disconnected", {"serial": session.serial})
@@ -1706,69 +959,20 @@ class StreamDeckPlugin:
     # ──── Virtual decks + live mirror ────
 
     def _virtual_deck_entries(self):
-        """Validated ``virtual_decks`` config entries.
-
-        Each entry needs a ``model`` from the preset table and a ``serial``;
-        serials are sanitized to state-key-safe characters and deduplicated.
-        """
-        raw = self.api.config.get("virtual_decks", [])
-        if not isinstance(raw, list):
-            return []
-        entries = []
-        seen = set()
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            model = item.get("model")
-            serial = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("serial", "")))
-            if model not in _VIRTUAL_MODELS or not serial or serial in seen:
-                continue
-            seen.add(serial)
-            entries.append({"model": model, "serial": serial})
-        return entries
+        """The virtual decks the config declares (declared_decks.py)."""
+        return virtual_deck_entries(self.api.config.get("virtual_decks", []))
 
     # ──── Network decks ────
 
     def _network_deck_entries(self):
-        """Validated ``network_decks`` config entries.
+        """The network decks the config declares (declared_decks.py).
 
-        Each entry needs a ``host`` (IP or hostname); ``port`` defaults to
-        5343. ``serial`` is recorded automatically after the first connect so
-        a deck that moves to a new DHCP address can be found again via
-        discovery. Entries are explicit opt-in — the plugin never attaches to
-        a deck on the network that hasn't been added here.
+        ``serial`` is recorded automatically after the first connect so a
+        deck that moves to a new DHCP address can be found again through
+        discovery. Entries are explicit opt-in: the plugin never attaches to
+        a deck on the network that has not been added here.
         """
-        raw = self.api.config.get("network_decks", [])
-        if not isinstance(raw, list):
-            return []
-        entries = []
-        seen = set()
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            host = str(item.get("host", "")).strip()
-            try:
-                port = int(item.get("port", NET_DEFAULT_PORT))
-            except (TypeError, ValueError):
-                continue
-            if not host or not (0 < port < 65536):
-                continue
-            key = f"{host}:{port}"
-            if key in seen:
-                continue
-            seen.add(key)
-            entries.append({
-                "host": host,
-                "port": port,
-                "key": key,
-                # The deck's own serial (recorded after the first connect)
-                "serial": str(item.get("serial", "") or ""),
-                # The serial the unit advertises via discovery (recorded at
-                # add time) — for a dock this is the dock's serial, not the
-                # docked deck's, so re-resolve accepts either.
-                "mdns_sn": str(item.get("mdns_sn", "") or ""),
-            })
-        return entries
+        return network_deck_entries(self.api.config.get("network_decks", []))
 
     async def _reconcile_network_decks(self, new_decks):
         """Watchdog half of network decks.
@@ -2645,7 +1849,7 @@ class StreamDeckPlugin:
             if turned:
                 return  # push-and-turn was a grip, not a click
             held = asyncio.get_running_loop().time() - press_time
-            threshold = _coerce_numeric(cfg.get("hold_threshold_ms"))
+            threshold = coerce_numeric(cfg.get("hold_threshold_ms"))
             threshold = (threshold if threshold and threshold > 0 else 500) / 1000.0
             long_actions = self._action_list(cfg.get("long_press"))
             if held >= threshold and long_actions:
@@ -2703,13 +1907,13 @@ class StreamDeckPlugin:
         ``plugin.<id>.*`` state or ``var.*`` user variables only).
         """
         key = adjust.get("key", "")
-        step = _coerce_numeric(adjust.get("step"))
+        step = coerce_numeric(adjust.get("step"))
         if step is None:
             step = 1
-        minimum = _coerce_numeric(adjust.get("min"))
-        maximum = _coerce_numeric(adjust.get("max"))
+        minimum = coerce_numeric(adjust.get("min"))
+        maximum = coerce_numeric(adjust.get("max"))
 
-        current = _coerce_numeric(await self.api.state_get(key))
+        current = coerce_numeric(await self.api.state_get(key))
         if current is None:
             current = minimum if minimum is not None else 0
 
@@ -2799,15 +2003,15 @@ class StreamDeckPlugin:
         False (with a debug log) when the bounds are missing, so the caller
         can fall back to relative stepping.
         """
-        minimum = _coerce_numeric(drag.get("min"))
-        maximum = _coerce_numeric(drag.get("max"))
+        minimum = coerce_numeric(drag.get("min"))
+        maximum = coerce_numeric(drag.get("max"))
         if minimum is None or maximum is None or maximum <= minimum:
             self.api.log(
                 "Touch fader needs min and max on its adjust; ignoring touch",
                 level="debug",
             )
             return False
-        step = _coerce_numeric(drag.get("step"))
+        step = coerce_numeric(drag.get("step"))
         if step is None or step <= 0:
             step = 1
         zx = zone.get("x", 0)
@@ -2920,12 +2124,12 @@ class StreamDeckPlugin:
         """Resolve a meter's min/max: explicit > surrounding adjust > 0..100."""
         meter = meter if isinstance(meter, dict) else {}
         bounds = bounds_source if isinstance(bounds_source, dict) else {}
-        minimum = _coerce_numeric(meter.get("min"))
-        maximum = _coerce_numeric(meter.get("max"))
+        minimum = coerce_numeric(meter.get("min"))
+        maximum = coerce_numeric(meter.get("max"))
         if minimum is None:
-            minimum = _coerce_numeric(bounds.get("min"))
+            minimum = coerce_numeric(bounds.get("min"))
         if maximum is None:
-            maximum = _coerce_numeric(bounds.get("max"))
+            maximum = coerce_numeric(bounds.get("max"))
         if minimum is None:
             minimum = 0
         if maximum is None:
@@ -2947,12 +2151,12 @@ class StreamDeckPlugin:
         explicit = meter is True or isinstance(meter, dict)
         bounds = bounds_source if isinstance(bounds_source, dict) else {}
         auto = (
-            _coerce_numeric(bounds.get("min")) is not None
-            and _coerce_numeric(bounds.get("max")) is not None
+            coerce_numeric(bounds.get("min")) is not None
+            and coerce_numeric(bounds.get("max")) is not None
         )
         if not explicit and not auto:
             return None
-        value = _coerce_numeric(raw_value)
+        value = coerce_numeric(raw_value)
         if value is None:
             return None
         minimum, maximum = self._meter_bounds(meter, bounds_source)
@@ -2965,7 +2169,7 @@ class StreamDeckPlugin:
             for rule in thresholds:
                 if not isinstance(rule, dict) or not rule.get("color"):
                     continue
-                above = _coerce_numeric(rule.get("above"))
+                above = coerce_numeric(rule.get("above"))
                 if above is None or value < above:
                     continue
                 if best is None or above > best[0]:
@@ -3432,12 +2636,12 @@ class StreamDeckPlugin:
                 if not isinstance(rule, dict):
                     continue
                 when = rule.get("when")
-                level = _coerce_numeric(rule.get("level"))
+                level = coerce_numeric(rule.get("level"))
                 if when is None or level is None:
                     continue
                 if await self._eval_condition(when):
                     return max(0, min(100, int(level)))
-        base = _coerce_numeric(self._unit_brightness(session))
+        base = coerce_numeric(self._unit_brightness(session))
         return max(0, min(100, int(base if base is not None else 70)))
 
     def _unit_brightness(self, session):
@@ -3452,7 +2656,7 @@ class StreamDeckPlugin:
         if isinstance(settings, dict):
             entry = settings.get(session.serial)
             if isinstance(entry, dict):
-                level = _coerce_numeric(entry.get("brightness"))
+                level = coerce_numeric(entry.get("brightness"))
                 if level is not None:
                     return level
         return self.api.config.get("brightness", 70)
@@ -3481,8 +2685,8 @@ class StreamDeckPlugin:
         cfg = self._deck_config(session).get("idle_dim")
         if not isinstance(cfg, dict) or session.idle_dimmed:
             return
-        after = _coerce_numeric(cfg.get("after_seconds"))
-        level = _coerce_numeric(cfg.get("level"))
+        after = coerce_numeric(cfg.get("after_seconds"))
+        level = coerce_numeric(cfg.get("level"))
         if after is None or after <= 0 or level is None:
             return
         now = asyncio.get_event_loop().time()
@@ -3680,7 +2884,7 @@ class StreamDeckPlugin:
             text_color = assignment.get("text_color") or global_text
 
             # Toggle mode: on_label/off_label override static label
-            press_binding = _unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
+            press_binding = unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
             if press_binding and isinstance(press_binding, dict) and press_binding.get("mode") == "toggle":
                 tk = press_binding.get("toggle_key", "")
                 tv = press_binding.get("toggle_value")
@@ -3748,7 +2952,7 @@ class StreamDeckPlugin:
         bindings = assignment.get("bindings", {})
         if not isinstance(bindings, dict):
             return None
-        press = _unwrap_binding(bindings.get("press"))
+        press = unwrap_binding(bindings.get("press"))
         if not isinstance(press, dict) or press.get("action") != "navigate":
             return None
         try:
@@ -4116,43 +3320,9 @@ class StreamDeckPlugin:
     # ──── Conditions, Visibility & Auto-Page ────
 
     async def _eval_condition(self, cond) -> bool:
-        """Evaluate a visible_when / auto_page condition against current state.
-
-        Supports a single ``{key, operator, value}`` condition, a compound
-        ``{all: [...]}`` (every sub-condition must be true) and ``{any: [...]}``
-        (at least one true) — matching the panel UI visible_when schema. An
-        empty ``all`` is vacuously true and an empty ``any`` is false. Operator
-        semantics mirror the platform condition evaluator.
-        """
-        if not isinstance(cond, dict):
-            return False
-
-        all_list = cond.get("all")
-        if isinstance(all_list, list):
-            for child in all_list:
-                if not await self._eval_condition(child):
-                    return False
-            return True
-
-        any_list = cond.get("any")
-        if isinstance(any_list, list):
-            for child in any_list:
-                if await self._eval_condition(child):
-                    return True
-            return False
-
-        key = cond.get("key")
-        if not key:
-            return False
-        actual = await self.api.state_get(key)
-        try:
-            return _eval_operator(cond.get("operator", "eq"), actual, cond.get("value"))
-        except ValueError:
-            self.api.log(
-                f"Ignoring unknown condition operator {cond.get('operator')!r}",
-                level="debug",
-            )
-            return False
+        """Whether a visible_when / auto_page / auto_brightness condition
+        holds against current state (the rule is conditions.py)."""
+        return await eval_condition(cond, self.api.state_get, self.api.log)
 
     async def _is_button_visible(self, assignment) -> bool:
         """True unless the button's visible_when condition evaluates false."""
@@ -4226,18 +3396,18 @@ class StreamDeckPlugin:
                 if isinstance(feedback, dict) and feedback.get("key"):
                     watch_keys.add(feedback["key"])
                 # Toggle key (for label/icon updates on toggle state change)
-                press = _unwrap_binding(bindings.get("press"))
+                press = unwrap_binding(bindings.get("press"))
                 if isinstance(press, dict) and press.get("toggle_key"):
                     watch_keys.add(press["toggle_key"])
                 # Visibility condition keys
-                watch_keys.update(_condition_state_keys(bindings.get("visible_when")))
+                watch_keys.update(condition_state_keys(bindings.get("visible_when")))
 
         # Auto-page rule keys (tracked separately — only these drive paging)
         auto_page = cfg.get("auto_page", [])
         if isinstance(auto_page, list):
             for rule in auto_page:
                 if isinstance(rule, dict):
-                    session.auto_page_keys.update(_condition_state_keys(rule.get("when")))
+                    session.auto_page_keys.update(condition_state_keys(rule.get("when")))
         watch_keys |= session.auto_page_keys
 
         # Touchscreen strip keys (tracked separately — a change re-renders the
@@ -4283,7 +3453,7 @@ class StreamDeckPlugin:
         if isinstance(auto_brightness, list):
             for rule in auto_brightness:
                 if isinstance(rule, dict):
-                    session.brightness_keys.update(_condition_state_keys(rule.get("when")))
+                    session.brightness_keys.update(condition_state_keys(rule.get("when")))
         watch_keys |= session.brightness_keys
 
         # Macro feedback map: which (page, key) bindings reference which
@@ -4403,10 +3573,10 @@ class StreamDeckPlugin:
         feedback = bindings.get("feedback", {})
         if isinstance(feedback, dict) and feedback.get("key") == key:
             return True
-        press = _unwrap_binding(bindings.get("press"))
+        press = unwrap_binding(bindings.get("press"))
         if isinstance(press, dict) and press.get("toggle_key") == key:
             return True
-        return key in _condition_state_keys(bindings.get("visible_when"))
+        return key in condition_state_keys(bindings.get("visible_when"))
 
     # ──── Macro run feedback ────
 
@@ -4502,7 +3672,7 @@ class StreamDeckPlugin:
             for session in self._sessions_for(data.get("serial")):
                 await self._change_page(session, page)
         elif event_name.endswith(".set_brightness"):
-            level = _coerce_numeric(data.get("level"))
+            level = coerce_numeric(data.get("level"))
             if level is None:
                 return
             level = max(0, min(100, int(level)))
@@ -4523,7 +3693,7 @@ class StreamDeckPlugin:
             text = str(data.get("text", "")).strip()
             if not text:
                 return
-            seconds = _coerce_numeric(data.get("seconds"))
+            seconds = coerce_numeric(data.get("seconds"))
             seconds = float(seconds) if seconds is not None and seconds > 0 else 5.0
             for session in self._sessions_for(data.get("serial")):
                 if session.deck and session.deck.is_visual():

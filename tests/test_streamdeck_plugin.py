@@ -40,11 +40,12 @@ if str(_PLUGINS_ROOT) not in sys.path:
 
 # The plugin module imports only the standard library at import time
 # (StreamDeck/PIL are imported lazily inside start()), so it always imports.
-from control_surfaces.streamdeck.streamdeck_plugin import (  # noqa: E402
-    StreamDeckPlugin,
-    _condition_state_keys,
-    _eval_operator,
+from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
+from control_surfaces.streamdeck.conditions import (  # noqa: E402
+    condition_state_keys,
+    eval_operator,
 )
+from control_surfaces.streamdeck.virtual_deck import VIRTUAL_MODELS  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 import control_surfaces.streamdeck.net_deck as net_deck  # noqa: E402
 
@@ -126,68 +127,68 @@ def _session_for(plugin, deck=None):
 
 
 def test_eval_operator_eq_ne_strings():
-    assert _eval_operator("eq", "on", "on") is True
-    assert _eval_operator("eq", "on", "off") is False
-    assert _eval_operator("ne", "on", "off") is True
-    assert _eval_operator("ne", "on", "on") is False
+    assert eval_operator("eq", "on", "on") is True
+    assert eval_operator("eq", "on", "off") is False
+    assert eval_operator("ne", "on", "off") is True
+    assert eval_operator("ne", "on", "on") is False
 
 
 def test_eval_operator_numeric_string_coercion():
     # Strings that look like numbers compare numerically, not lexically.
-    assert _eval_operator("gt", "10", "5") is True
-    assert _eval_operator("lt", "10", "5") is False
-    assert _eval_operator("gte", "5", "5") is True
-    assert _eval_operator("lte", "5", "5") is True
-    assert _eval_operator("eq", 5, "5") is True
+    assert eval_operator("gt", "10", "5") is True
+    assert eval_operator("lt", "10", "5") is False
+    assert eval_operator("gte", "5", "5") is True
+    assert eval_operator("lte", "5", "5") is True
+    assert eval_operator("eq", 5, "5") is True
 
 
 def test_eval_operator_bool_coercion():
-    assert _eval_operator("eq", True, "on") is True
-    assert _eval_operator("eq", False, "off") is True
-    assert _eval_operator("eq", True, "off") is False
+    assert eval_operator("eq", True, "on") is True
+    assert eval_operator("eq", False, "off") is True
+    assert eval_operator("eq", True, "off") is False
 
 
 def test_eval_operator_truthy_falsy():
-    assert _eval_operator("truthy", 1, None) is True
-    assert _eval_operator("truthy", 0, None) is False
-    assert _eval_operator("truthy", "", None) is False
-    assert _eval_operator("falsy", 0, None) is True
-    assert _eval_operator("falsy", "x", None) is False
+    assert eval_operator("truthy", 1, None) is True
+    assert eval_operator("truthy", 0, None) is False
+    assert eval_operator("truthy", "", None) is False
+    assert eval_operator("falsy", 0, None) is True
+    assert eval_operator("falsy", "x", None) is False
 
 
 def test_eval_operator_none_guards():
-    assert _eval_operator("gt", None, 5) is False
-    assert _eval_operator("lt", 5, None) is False
+    assert eval_operator("gt", None, 5) is False
+    assert eval_operator("lt", 5, None) is False
 
 
 def test_eval_operator_aliases():
-    assert _eval_operator("equals", "a", "a") is True
-    assert _eval_operator(">", "10", "5") is True
+    assert eval_operator("equals", "a", "a") is True
+    assert eval_operator(">", "10", "5") is True
 
 
 def test_eval_operator_unknown_raises():
     with pytest.raises(ValueError):
-        _eval_operator("bogus", 1, 1)
+        eval_operator("bogus", 1, 1)
 
 
 # ──── Condition key extraction ────
 
 
 def test_condition_state_keys_single():
-    assert _condition_state_keys({"key": "device.a.power", "operator": "eq", "value": "on"}) == [
+    assert condition_state_keys({"key": "device.a.power", "operator": "eq", "value": "on"}) == [
         "device.a.power"
     ]
 
 
 def test_condition_state_keys_any_all_nested():
     cond = {"any": [{"key": "a"}, {"all": [{"key": "b"}, {"key": "c"}]}]}
-    assert _condition_state_keys(cond) == ["a", "b", "c"]
+    assert condition_state_keys(cond) == ["a", "b", "c"]
 
 
 def test_condition_state_keys_empty_and_invalid():
-    assert _condition_state_keys(None) == []
-    assert _condition_state_keys({}) == []
-    assert _condition_state_keys({"any": []}) == []
+    assert condition_state_keys(None) == []
+    assert condition_state_keys({}) == []
+    assert condition_state_keys({"any": []}) == []
 
 
 # ──── _eval_condition (single / any / all) ────
@@ -4442,43 +4443,43 @@ def test_validate_config_says_exactly_this(change, expected):
 ])
 def test_every_operator_alias_answers_as_its_operator(alias, canonical):
     for actual, target in ((1, 2), (2, 1), (2, 2), ("on", "on"), ("on", "off"), (True, "yes")):
-        assert _eval_operator(alias, actual, target) == _eval_operator(canonical, actual, target)
+        assert eval_operator(alias, actual, target) == eval_operator(canonical, actual, target)
 
 
 def test_eval_operator_orders_what_is_not_a_number_as_python_does():
-    assert _eval_operator("gt", "b", "a") is True
-    assert _eval_operator("lt", "b", "a") is False
-    assert _eval_operator("lt", "a", "b") is True
-    assert _eval_operator("gte", "a", "a") is True
-    assert _eval_operator("gte", "a", "b") is False
-    assert _eval_operator("lte", "b", "a") is False
-    assert _eval_operator("lte", "a", "b") is True
-    assert _eval_operator("lte", "a", "a") is True
+    assert eval_operator("gt", "b", "a") is True
+    assert eval_operator("lt", "b", "a") is False
+    assert eval_operator("lt", "a", "b") is True
+    assert eval_operator("gte", "a", "a") is True
+    assert eval_operator("gte", "a", "b") is False
+    assert eval_operator("lte", "b", "a") is False
+    assert eval_operator("lte", "a", "b") is True
+    assert eval_operator("lte", "a", "a") is True
     # Values that cannot be put in order against each other are no match.
-    assert _eval_operator("gt", "a", [1]) is False
-    assert _eval_operator("lte", {}, "a") is False
-    assert _eval_operator("gte", None, None) is False
+    assert eval_operator("gt", "a", [1]) is False
+    assert eval_operator("lte", {}, "a") is False
+    assert eval_operator("gte", None, None) is False
 
 
 def test_eval_operator_compares_as_written_when_coercion_cannot_decide():
     # A bool against a word that is not a yes or a no.
-    assert _eval_operator("eq", True, "maybe") is False
-    assert _eval_operator("ne", True, "maybe") is True
+    assert eval_operator("eq", True, "maybe") is False
+    assert eval_operator("ne", True, "maybe") is True
     # A bool against a number: a number is no bool word, but True is 1.
-    assert _eval_operator("eq", True, 1) is True
-    assert _eval_operator("eq", True, 2) is False
-    assert _eval_operator("ne", False, 0) is False
+    assert eval_operator("eq", True, 1) is True
+    assert eval_operator("eq", True, 2) is False
+    assert eval_operator("ne", False, 0) is False
     # Two different types, neither a number.
-    assert _eval_operator("eq", "a", ["a"]) is False
-    assert _eval_operator("ne", None, "x") is True
-    assert _eval_operator("eq", None, None) is True
+    assert eval_operator("eq", "a", ["a"]) is False
+    assert eval_operator("ne", None, "x") is True
+    assert eval_operator("eq", None, None) is True
     # A number written as text against a float.
-    assert _eval_operator("eq", "1.0", 1) is True
-    assert _eval_operator("ne", "2", 2.5) is True
+    assert eval_operator("eq", "1.0", 1) is True
+    assert eval_operator("ne", "2", 2.5) is True
     # Bool words, either case.
-    assert _eval_operator("eq", True, "YES") is True
-    assert _eval_operator("eq", False, "Off") is True
-    assert _eval_operator("eq", True, "0") is False
+    assert eval_operator("eq", True, "YES") is True
+    assert eval_operator("eq", False, "Off") is True
+    assert eval_operator("eq", True, "0") is False
 
 
 # ──── Teardown: stopping the plugin, and a deck that goes away ────
@@ -4646,7 +4647,7 @@ def test_the_virtual_models_offered_are_the_preset_table():
         "Stream Deck XL", "Stream Deck +", "Stream Deck Pedal",
     ]
     assert StreamDeckPlugin.SURFACE_LAYOUT["virtual_models"] == models
-    assert list(sd_module._VIRTUAL_MODELS) == models
+    assert list(VIRTUAL_MODELS) == models
 
 
 def test_deck_lists_that_are_not_lists_declare_no_deck():
