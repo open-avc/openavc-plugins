@@ -10,6 +10,9 @@ platform answers false for ``eq`` and ``ne`` when either side is None and
 compares two strings ignoring case, where this copy compares None like any
 other value and strings exactly. Changing either side changes what a deck
 shows.
+
+Also here: ``reads_as_on``, the simpler match a toggle key and a feedback
+key are read by.
 """
 
 import functools
@@ -175,3 +178,13 @@ async def eval_condition(cond, state_get, log):
     except ValueError:
         log(f"Ignoring unknown condition operator {cond.get('operator')!r}", level="debug")
         return False
+
+
+def reads_as_on(value, expected=None):
+    """Whether a toggle key or a feedback key reads as on: its value equals
+    ``expected`` as text, ignoring case, or is truthy when nothing is
+    expected. A key's ``toggle_value`` and a feedback ``condition.equals``
+    are read this way, not by the ``eq`` operator (no numbers, no yes/no)."""
+    if expected is None:
+        return bool(value)
+    return str(value).lower() == str(expected).lower()

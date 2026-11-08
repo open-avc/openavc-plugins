@@ -22,10 +22,11 @@ import json
 import os
 import platform as platform_mod
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from .conditions import coerce_numeric, eval_condition
+from .conditions import coerce_numeric, eval_condition, reads_as_on
 from .config_check import config_problems, unwrap_binding
 from .declared_decks import network_deck_entries, virtual_deck_entries
 from .key_entries import action_list, assignment_for, global_buttons, press_actions
@@ -158,6 +159,18 @@ class _DeckSession:
         for handle in self.macro_clear_handles.values():
             handle.cancel()
         self.macro_clear_handles.clear()
+
+
+@dataclass
+class _KeyLook:
+    """What a key shows before its marks (``_key_look``)."""
+
+    label: str
+    icon: object
+    bg_color: str
+    text_color: str
+    value_text: str
+    meter: object
 
 
 class StreamDeckPlugin:
@@ -1518,39 +1531,21 @@ class StreamDeckPlugin:
     # ──── Key Handling ────
 
     async def _on_key_change(self, session, deck, key_index, pressed):
-        """Handle a physical button press/release with mode support."""
+        """Handle a physical key press or release.
+
+        In order: the release ends the press, an overlay swallows the input,
+        the press is echoed and announced, then the key's entry runs in its
+        press mode (``_KEY_MODES``; tap when the mode is anything else).
+        """
         await self._note_input(session)
-
-        # A release ALWAYS ends the press — no matter what changed between
-        # press and release (page flipped, buttons edited or deleted,
-        # overlay appeared, visibility changed). Skipping this is how keys
-        # get stuck visually pressed and how a hold-repeat task leaks and
-        # fires its action forever. Runs before every early return below.
         if not pressed:
-            task_id = session.hold_tasks.pop(key_index, None)
-            if task_id:
-                self.api.cancel_task(task_id)
-            was_pressed = key_index in session.pressed_keys
-            session.pressed_keys.discard(key_index)
-            if was_pressed and session.deck and session.deck.is_visual():
-                try:
-                    await self._render_button(session, key_index)
-                except Exception:
-                    pass
+            await self._end_press(session, key_index)
 
-        # A show_message overlay is dismissed by the first press, which is
-        # swallowed (it must not fire the key's own action). The matching
-        # release is swallowed too (cleanup above already ran).
-        if session.overlay_active:
-            if pressed:
-                await self._clear_overlay(session)
+        if await self._overlay_swallows_key(session, pressed):
             return
-
         if pressed:
             await self._publish_input_echo(session, "key", key_index)
-
         page = session.current_page
-
         event_type = "press" if pressed else "release"
         await self.api.event_emit(
             f"button.{event_type}",
@@ -1560,109 +1555,143 @@ class StreamDeckPlugin:
         assignment = self._get_button_assignment(session, page, key_index)
         if not assignment:
             return
-
-        # A hidden button (visible_when false) is inert: fire no action. Also
-        # clear any in-flight hold/tap-hold state so a button that became
-        # hidden mid-press can't leak a periodic task or fire a stale action.
+        # A hidden button (visible_when false) is inert, and one that became
+        # hidden mid-press must not leak a hold task or fire a stale action.
         if not await self._is_button_visible(assignment):
-            task_id = session.hold_tasks.pop(key_index, None)
-            if task_id:
-                self.api.cancel_task(task_id)
-            session.press_times.pop(key_index, None)
-            session.pressed_keys.discard(key_index)  # don't leak a press highlight
+            self._drop_press(session, key_index)
             return
-
-        # Momentary press highlight: mark the key as held and redraw. The mark
-        # lives in the render path so a feedback/toggle re-render keeps the
-        # highlight rather than fighting it; the redraw is a no-op without a
-        # visual deck. (Release-side bookkeeping already ran above.)
         if pressed:
-            session.pressed_keys.add(key_index)
-            if session.deck and session.deck.is_visual():
+            await self._hold_highlight(session, key_index)
+
+        actions = press_actions(assignment.get("bindings", {}))
+        if not actions or not actions[0]:
+            return
+        handler = self._key_mode_handler(actions[0].get("mode", "tap"))
+        await getattr(self, handler)(session, key_index, pressed, actions)
+
+    # What a key's press does, by the first action's mode.
+    _KEY_MODES = (
+        ("hold_repeat", "_press_hold_repeat"),
+        ("toggle", "_press_toggle"),
+        ("tap_hold", "_press_tap_hold"),
+    )
+
+    @classmethod
+    def _key_mode_handler(cls, mode):
+        """The method that runs a key in ``mode``; a tap for any other."""
+        return next((name for each, name in cls._KEY_MODES if each == mode), "_press_tap")
+
+    async def _overlay_swallows_key(self, session, pressed):
+        """True while a show_message overlay is up. The first press dismisses
+        it and is swallowed (it must not fire the key's own action), and so is
+        the matching release (its press already ended)."""
+        if not session.overlay_active:
+            return False
+        if pressed:
+            await self._clear_overlay(session)
+        return True
+
+    async def _end_press(self, session, key_index):
+        """End a key's press at its release, whatever changed in between (page
+        flipped, buttons edited or deleted, overlay appeared, visibility
+        changed). Skipping this is how keys get stuck drawn pressed and how a
+        hold-repeat task leaks and fires its action forever."""
+        self._cancel_hold(session, key_index)
+        was_pressed = key_index in session.pressed_keys
+        session.pressed_keys.discard(key_index)
+        if was_pressed and session.deck and session.deck.is_visual():
+            try:
                 await self._render_button(session, key_index)
+            except Exception:
+                pass
 
-        # Get press binding. The UI stores press as an array of actions; mode
-        # and toggle/hold config live on the first entry, while a default tap
-        # button fires every entry in order.
-        bindings = assignment.get("bindings", {})
-        actions = press_actions(bindings)
-        press = actions[0] if actions else None
+    def _cancel_hold(self, session, key_index):
+        """Stop a key's hold-repeat task, if it has one."""
+        task_id = session.hold_tasks.pop(key_index, None)
+        if task_id:
+            self.api.cancel_task(task_id)
 
-        if not press or not isinstance(press, dict):
-            return
+    def _drop_press(self, session, key_index):
+        """Forget everything a key's press has under way: its hold task, its
+        tap_hold start time and its press highlight."""
+        self._cancel_hold(session, key_index)
+        session.press_times.pop(key_index, None)
+        session.pressed_keys.discard(key_index)
 
-        mode = press.get("mode", "tap")
+    async def _hold_highlight(self, session, key_index):
+        """Mark a key held and redraw it. The mark lives in the render path,
+        so a feedback or toggle redraw keeps the highlight rather than
+        fighting it."""
+        session.pressed_keys.add(key_index)
+        if session.deck and session.deck.is_visual():
+            await self._render_button(session, key_index)
 
-        if mode == "hold_repeat":
-            if pressed:
-                # Cancel any existing hold task for this key first
-                old_task = session.hold_tasks.pop(key_index, None)
-                if old_task:
-                    self.api.cancel_task(old_task)
-                # Store task ID synchronously BEFORE any await to prevent
-                # race condition where release fires during _execute_action
-                # and can't find the task to cancel.  The periodic task's
-                # first iteration fires the action almost immediately.
-                interval = press.get("hold_repeat_ms", 200) / 1000.0
-                session.hold_tasks[key_index] = self.api.create_periodic_task(
-                    lambda: self._execute_action(session, press, f"key {key_index}"),
-                    interval_seconds=interval,
-                    name=f"hold_repeat_{session.serial}_{key_index}",
-                )
-            # Release: the unconditional cleanup at the top already
-            # cancelled the task.
-            return
-
-        if mode == "toggle":
-            if not pressed:
-                return
-            # Toggle: read toggle_key state to determine on/off
-            off_action = press.get("off_action")
-            toggle_key = press.get("toggle_key", "")
-            toggle_value = press.get("toggle_value")
-            is_active = False
-            if toggle_key:
-                value = await self.api.state_get(toggle_key)
-                if toggle_value is not None:
-                    is_active = str(value).lower() == str(toggle_value).lower()
-                else:
-                    is_active = bool(value)
-
-            if is_active and off_action and isinstance(off_action, dict):
-                await self._execute_action(session, off_action, f"key {key_index}")
-            else:
-                await self._execute_action(session, press, f"key {key_index}")
-
-            # Update button label if on_label/off_label configured
-            on_label = press.get("on_label", "")
-            off_label = press.get("off_label", "")
-            if on_label or off_label:
-                # Re-render after action (state may have changed)
-                await asyncio.sleep(0.1)
-                await self._render_button(session, key_index)
-            return
-
-        if mode == "tap_hold":
-            threshold = press.get("hold_threshold_ms", 500) / 1000.0
-            hold_action = press.get("hold_action")
-            if pressed:
-                session.press_times[key_index] = asyncio.get_event_loop().time()
-            else:
-                if key_index not in session.press_times:
-                    # Release with no recorded press (e.g. the press was
-                    # suppressed while the button was hidden) — fire nothing.
-                    return
-                press_time = session.press_times.pop(key_index)
-                held = asyncio.get_event_loop().time() - press_time
-                if held >= threshold and hold_action and isinstance(hold_action, dict):
-                    await self._execute_action(session, hold_action, f"key {key_index}")
-                else:
-                    await self._execute_action(session, press, f"key {key_index}")
-            return
-
-        # Default: tap mode — fire every configured action in order, on press
+    async def _press_tap(self, session, key_index, pressed, actions):
+        """Tap: every action in order, on the press."""
         if pressed:
             await self._execute_actions(session, actions, f"key {key_index}")
+
+    async def _press_hold_repeat(self, session, key_index, pressed, actions):
+        """Hold-repeat: the first action every ``hold_repeat_ms`` (200) while
+        held. The release's ``_end_press`` stops it."""
+        if not pressed:
+            return
+        press = actions[0]
+        self._cancel_hold(session, key_index)
+        # The task id is stored before any await, so a release that arrives
+        # while the first action runs finds the task to cancel. The periodic
+        # task fires the action almost at once.
+        interval = press.get("hold_repeat_ms", 200) / 1000.0
+        session.hold_tasks[key_index] = self.api.create_periodic_task(
+            lambda: self._execute_action(session, press, f"key {key_index}"),
+            interval_seconds=interval,
+            name=f"hold_repeat_{session.serial}_{key_index}",
+        )
+
+    async def _press_toggle(self, session, key_index, pressed, actions):
+        """Toggle: on the press, the ``off_action`` while the toggle key reads
+        on, else the first action; a key with on/off labels redraws a tenth of
+        a second later, once the state has had time to change."""
+        if not pressed:
+            return
+        press = actions[0]
+        off_action = press.get("off_action")
+        is_on = await self._toggle_is_on(press)
+        if is_on and off_action and isinstance(off_action, dict):
+            await self._execute_action(session, off_action, f"key {key_index}")
+        else:
+            await self._execute_action(session, press, f"key {key_index}")
+        if press.get("on_label", "") or press.get("off_label", ""):
+            await asyncio.sleep(0.1)
+            await self._render_button(session, key_index)
+
+    async def _press_tap_hold(self, session, key_index, pressed, actions):
+        """Tap or hold: at the release, the ``hold_action`` when the key was
+        held ``hold_threshold_ms`` (500) or longer, else the first action."""
+        press = actions[0]
+        threshold = press.get("hold_threshold_ms", 500) / 1000.0
+        if pressed:
+            session.press_times[key_index] = asyncio.get_event_loop().time()
+            return
+        if key_index not in session.press_times:
+            # A release with no recorded press (the press was swallowed
+            # while the button was hidden) fires nothing.
+            return
+        held = asyncio.get_event_loop().time() - session.press_times.pop(key_index)
+        hold_action = press.get("hold_action")
+        if held >= threshold and hold_action and isinstance(hold_action, dict):
+            await self._execute_action(session, hold_action, f"key {key_index}")
+        else:
+            await self._execute_action(session, press, f"key {key_index}")
+
+    async def _toggle_is_on(self, press):
+        """Whether a toggle key's ``toggle_key`` reads as on (never, without
+        one)."""
+        toggle_key = press.get("toggle_key", "")
+        if not toggle_key:
+            return False
+        value = await self.api.state_get(toggle_key)
+        return reads_as_on(value, press.get("toggle_value"))
 
     async def _execute_actions(self, session, actions, source):
         """Execute a list of action bindings sequentially, in order."""
@@ -2187,10 +2216,7 @@ class StreamDeckPlugin:
         style_active = feedback.get("style_active", {})
         style_inactive = feedback.get("style_inactive", {})
         expected = condition.get("equals") if isinstance(condition, dict) else None
-        is_active = (
-            (str(value).lower() == str(expected).lower())
-            if expected is not None else bool(value)
-        )
+        is_active = reads_as_on(value, expected)
         if is_active and isinstance(style_active, dict):
             bg_color = style_active.get("bg_color", bg_color) or bg_color
             text_color = style_active.get("text_color", text_color) or text_color
@@ -2798,7 +2824,8 @@ class StreamDeckPlugin:
         return key_count <= key_index < key_count + session.deck.touch_key_count()
 
     async def _render_button(self, session, key_index):
-        """Render a single button image based on its assignment and state."""
+        """Draw one key from its entry and the state it reads: an LCD key's
+        image, or a touch key's color."""
         if not session.deck or not session.deck.is_visual():
             return
         if session.overlay_active:
@@ -2808,117 +2835,132 @@ class StreamDeckPlugin:
         assignment = self._get_button_assignment(
             session, session.current_page, key_index
         )
-
-        # Touch keys have no LCD — an unassigned one just goes dark.
+        # Touch keys have no LCD: an unassigned one just goes dark.
         if is_touch_key and not assignment:
             self._apply_key_color(session, key_index, "#000000")
             return
+        # Hidden by visible_when: a blank black key, nothing else.
+        if assignment and not await self._is_button_visible(assignment):
+            self._blank_key(session, key_index, is_touch_key)
+            return
 
-        global_bg = self._deck_setting(session, "button_color", "#1a1a2e")
-        global_text = self._deck_setting(session, "text_color", "#e0e0e0")
-        label = ""
-        icon = None
-        bg_color = global_bg
-        text_color = global_text
-        value_text = ""
-        meter = None
+        look = await self._key_look(session, assignment)
+        macro_mark = self._macro_mark_showing(session, key_index)
+        nav_active = self._navigates_here(session, assignment)
+        held = key_index in session.pressed_keys
 
-        if assignment:
-            # Hidden by visible_when → blank black key; render nothing else.
-            bindings = assignment.get("bindings", {})
-            visible_when = bindings.get("visible_when") if isinstance(bindings, dict) else None
-            if visible_when is not None and not await self._eval_condition(visible_when):
-                if is_touch_key:
-                    self._apply_key_color(session, key_index, "#000000")
-                else:
-                    self._apply_key_image(
-                        session, key_index,
-                        self._create_button_image(session, "", "#000000", "#000000"),
-                    )
-                return
+        if is_touch_key:
+            color = self._touch_key_color(look.bg_color, macro_mark, nav_active, held)
+            self._apply_key_color(session, key_index, color)
+            return
+        image = self._create_button_image(
+            session, look.label, look.bg_color, look.text_color, look.icon,
+            value_text=look.value_text, meter=look.meter,
+        )
+        self._apply_key_image(
+            session, key_index, self._marked_image(image, nav_active, held, macro_mark)
+        )
 
-            label = assignment.get("label", "")
-            icon = assignment.get("icon") or None
-
-            # Live label / live value lines (display-element fields)
-            if assignment.get("label_source"):
-                live_label = await self.api.state_get(assignment["label_source"])
-                if live_label is not None:
-                    label = str(live_label)
-            raw_value = None
-            if assignment.get("value_source"):
-                raw_value = await self.api.state_get(assignment["value_source"])
-                if raw_value is not None:
-                    value_text = str(raw_value)
-                    unit = str(assignment.get("unit") or "")
-                    if unit:
-                        value_text += unit if unit == "%" else f" {unit}"
-            # Keys have no surrounding adjust, so a key meter renders only
-            # when explicitly enabled (bounds default to 0..100).
-            meter = self._resolve_meter(assignment.get("meter"), raw_value)
-
-            # Per-button default colors (override global defaults)
-            bg_color = assignment.get("bg_color") or global_bg
-            text_color = assignment.get("text_color") or global_text
-
-            # Toggle mode: on_label/off_label override static label
-            press_binding = unwrap_binding(bindings.get("press")) if isinstance(bindings, dict) else None
-            if press_binding and isinstance(press_binding, dict) and press_binding.get("mode") == "toggle":
-                tk = press_binding.get("toggle_key", "")
-                tv = press_binding.get("toggle_value")
-                if tk:
-                    tval = await self.api.state_get(tk)
-                    t_active = (str(tval).lower() == str(tv).lower()) if tv is not None else bool(tval)
-                    on_lbl = press_binding.get("on_label", "")
-                    off_lbl = press_binding.get("off_label", "")
-                    if t_active and on_lbl:
-                        label = on_lbl
-                    elif not t_active and off_lbl:
-                        label = off_lbl
-
-            # Conditional feedback styling (shared resolver)
-            feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
-            label, icon, bg_color, text_color = await self._apply_feedback_styles(
-                feedback, label, icon, bg_color, text_color
-            )
-
-        # Locked keys store their macro mark under page None (lit on every
-        # page); page keys under their page.
-        macro_mark = (
+    @staticmethod
+    def _macro_mark_showing(session, key_index):
+        """The macro mark a key shows on the page showing. A locked key's
+        mark is stored under page None (lit on every page) and wins."""
+        return (
             session.macro_marks.get((None, key_index))
             or session.macro_marks.get((session.current_page, key_index))
         )
-        # A key that navigates to the page currently showing gets a "you are
-        # here" treatment automatically — page-switcher rows read as tabs.
-        nav_target = self._nav_target_page(assignment) if assignment else None
-        nav_active = nav_target is not None and nav_target == session.current_page
 
-        # Touch keys show color only (no LCD): the effective background color
-        # after feedback/toggle evaluation, brightened while held; a macro
-        # run/result mark overrides the color outright.
+    def _navigates_here(self, session, assignment):
+        """True for a key whose press navigates to the page showing: its
+        "you are here" treatment makes page-switcher rows read as tabs."""
+        target = self._nav_target_page(assignment) if assignment else None
+        return target is not None and target == session.current_page
+
+    def _blank_key(self, session, key_index, is_touch_key):
+        """A hidden key: a dark touch key, or a black LCD key."""
         if is_touch_key:
-            color = self._MACRO_MARK_COLORS.get(macro_mark, bg_color)
-            if nav_active and macro_mark is None:
-                color = self._lighten_hex(color, 0.2)
-            if key_index in session.pressed_keys:
-                color = self._lighten_hex(color, 0.25)
-            self._apply_key_color(session, key_index, color)
-            return
+            self._apply_key_color(session, key_index, "#000000")
+        else:
+            self._apply_key_image(
+                session, key_index,
+                self._create_button_image(session, "", "#000000", "#000000"),
+            )
 
-        # Generate the button image and set it on the deck. While the key is
-        # physically held, draw the momentary-press highlight on top; a macro
-        # run/result mark draws a colored border (+ loader glyph).
-        image = self._create_button_image(
-            session, label, bg_color, text_color, icon,
-            value_text=value_text, meter=meter,
+    async def _key_look(self, session, assignment):
+        """What a key shows before any mark: its label, icon and colors, then
+        the live label and value, the toggle label and the feedback style, read
+        in that order. An unassigned key shows the deck's colors."""
+        bg_color = self._deck_setting(session, "button_color", "#1a1a2e")
+        text_color = self._deck_setting(session, "text_color", "#e0e0e0")
+        if not assignment:
+            return _KeyLook("", None, bg_color, text_color, "", None)
+        label = assignment.get("label", "")
+        icon = assignment.get("icon") or None
+        if assignment.get("label_source"):
+            live_label = await self.api.state_get(assignment["label_source"])
+            if live_label is not None:
+                label = str(live_label)
+        raw_value, value_text = await self._key_value(assignment)
+        # Keys have no surrounding adjust, so a key meter draws only when
+        # enabled (bounds default to 0..100).
+        meter = self._resolve_meter(assignment.get("meter"), raw_value)
+        bg_color = assignment.get("bg_color") or bg_color
+        text_color = assignment.get("text_color") or text_color
+        bindings = assignment.get("bindings", {})
+        if not isinstance(bindings, dict):
+            return _KeyLook(label, icon, bg_color, text_color, value_text, meter)
+        label = await self._toggle_label(bindings, label)
+        label, icon, bg_color, text_color = await self._apply_feedback_styles(
+            bindings.get("feedback"), label, icon, bg_color, text_color
         )
+        return _KeyLook(label, icon, bg_color, text_color, value_text, meter)
+
+    async def _key_value(self, assignment):
+        """A key's live value and its value line (the unit after a space, but
+        a percent sign right after the number); nothing without one."""
+        if not assignment.get("value_source"):
+            return None, ""
+        raw_value = await self.api.state_get(assignment["value_source"])
+        if raw_value is None:
+            return None, ""
+        unit = str(assignment.get("unit") or "")
+        if not unit:
+            return raw_value, str(raw_value)
+        return raw_value, str(raw_value) + (unit if unit == "%" else f" {unit}")
+
+    async def _toggle_label(self, bindings, label):
+        """A toggle key's ``on_label`` while its toggle key reads on and its
+        ``off_label`` while it does not; ``label`` when the one for that state
+        is empty, or the key is no toggle with a toggle key."""
+        press = unwrap_binding(bindings.get("press"))
+        if not isinstance(press, dict) or press.get("mode") != "toggle":
+            return label
+        if not press.get("toggle_key", ""):
+            return label
+        if await self._toggle_is_on(press):
+            return press.get("on_label", "") or label
+        return press.get("off_label", "") or label
+
+    def _touch_key_color(self, bg_color, macro_mark, nav_active, held):
+        """A touch key's color: a macro mark's color outright, else the key's
+        own, lifted for "you are here" and again while held."""
+        color = self._MACRO_MARK_COLORS.get(macro_mark, bg_color)
+        if nav_active and macro_mark is None:
+            color = self._lighten_hex(color, 0.2)
+        if held:
+            color = self._lighten_hex(color, 0.25)
+        return color
+
+    def _marked_image(self, image, nav_active, held, macro_mark):
+        """An LCD key's image with its marks drawn over it in order: "you are
+        here", the press highlight, then a macro's run border."""
         if nav_active:
             image = self._apply_nav_active(image)
-        if key_index in session.pressed_keys:
+        if held:
             image = self._apply_press_highlight(image)
         if macro_mark:
             image = self._apply_macro_mark(image, macro_mark)
-        self._apply_key_image(session, key_index, image)
+        return image
 
     @staticmethod
     def _nav_target_page(assignment):
