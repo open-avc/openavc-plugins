@@ -1,8 +1,8 @@
 """
-Tests for the Stream Deck plugin's network-deck transport: the Cora framing,
-one TCP connection to a deck or dock (_NetDeckDevice), the link that keeps a
-configured entry connected (_DockLink), and the library device classes a
-network deck is driven by.
+Tests for the Stream Deck plugin's network decks: the Cora framing, one TCP
+connection to a deck or dock (NetDeckDevice) and the link that keeps a
+configured entry connected (DockLink), in net_deck.py; and the library device
+classes a network deck is driven by, in deck_classes.py.
 
 Everything here runs without a deck and without the network: sockets are
 stand-ins fed scripted bytes, and the link tests swap the connection class
@@ -28,7 +28,8 @@ _PLUGINS_ROOT = Path(__file__).resolve().parents[1]
 if str(_PLUGINS_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGINS_ROOT))
 
-import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
+import control_surfaces.streamdeck.deck_classes as deck_classes  # noqa: E402
+import control_surfaces.streamdeck.net_deck as net_deck  # noqa: E402
 
 KEEPALIVE = b"\x01\x0a\x00\x00\x00\x07"
 ACK_FOR_7 = bytes((0x03, 0x1A, 0x07)) + b"\x00" * 29
@@ -80,7 +81,7 @@ class _ScriptedSocket:
 
 
 def _device(mode=None, script=()):
-    dev = sd_module._NetDeckDevice("192.0.2.10", 5343)
+    dev = net_deck.NetDeckDevice("192.0.2.10", 5343)
     dev._sock = _ScriptedSocket(script)
     dev._dead = False
     dev._mode = mode
@@ -99,7 +100,7 @@ def _queued(dev):
 def _frames(raw_list):
     frames = []
     for raw in raw_list:
-        frames += sd_module._CoraStream().feed(raw)
+        frames += net_deck.CoraStream().feed(raw)
     return frames
 
 
@@ -107,29 +108,29 @@ def _frames(raw_list):
 
 
 def test_cora_stream_drops_bytes_before_the_magic_marker():
-    stream = sd_module._CoraStream()
-    frame = sd_module._cora_pack(0x8000, 0x02, 9, b"\x84\x01")
+    stream = net_deck.CoraStream()
+    frame = net_deck.cora_pack(0x8000, 0x02, 9, b"\x84\x01")
     assert stream.feed(b"\xff\xee" + frame) == [(0x8000, 0x02, 9, b"\x84\x01")]
 
 
 def test_cora_stream_keeps_a_marker_split_across_chunks():
-    stream = sd_module._CoraStream()
-    frame = sd_module._cora_pack(0, 0, 3, b"\x01\x02")
+    stream = net_deck.CoraStream()
+    frame = net_deck.cora_pack(0, 0, 3, b"\x01\x02")
     assert stream.feed(b"\x00\x00" + frame[:2]) == []
     assert stream.feed(frame[2:10]) == []
     assert stream.feed(frame[10:]) == [(0, 0, 3, b"\x01\x02")]
 
 
 def test_cora_pack_header_layout():
-    frame = sd_module._cora_pack(0x0200, 0x01, 0x01020304, b"\xaa")
+    frame = net_deck.cora_pack(0x0200, 0x01, 0x01020304, b"\xaa")
     assert frame[:4] == b"\x43\x93\x8a\x41"
     assert struct.unpack("<HBBII", frame[4:16]) == (0x0200, 0x01, 0, 0x01020304, 1)
     assert frame[16:] == b"\xaa"
 
 
 def test_parse_device2_status_other_than_ready_is_no_child():
-    assert sd_module._parse_device2(_device2(status=0x01)) is None
-    assert sd_module._parse_device2(_device2(serial=b"AB\x00CD")) == {
+    assert net_deck.parse_device2(_device2(status=0x01)) is None
+    assert net_deck.parse_device2(_device2(serial=b"AB\x00CD")) == {
         "vid": 0x0FD9, "pid": 0x0080, "serial": "AB", "port": 20001,
     }
 
@@ -139,19 +140,19 @@ def test_parse_device2_status_other_than_ready_is_no_child():
 
 def test_transport_error_is_the_librarys_when_it_is_loaded():
     transport = pytest.importorskip("StreamDeck.Transport.Transport")
-    assert sd_module._transport_error() is transport.TransportError
+    assert net_deck.transport_error() is transport.TransportError
 
 
 def test_transport_error_falls_back_to_oserror_without_the_library(monkeypatch):
     monkeypatch.setitem(sys.modules, "StreamDeck.Transport.Transport", None)
-    assert sd_module._transport_error() is OSError
+    assert net_deck.transport_error() is OSError
 
 
 # ──── The reader thread ────
 
 
 def test_read_loop_detects_cora_from_the_marker_and_acks_the_keepalive():
-    ka = sd_module._cora_pack(0x4000, 0x01, 99, KEEPALIVE)
+    ka = net_deck.cora_pack(0x4000, 0x01, 99, KEEPALIVE)
     dev = _device(script=[ka])
     dev._read_loop()
     assert dev._mode == "cora"
@@ -169,7 +170,7 @@ def test_read_loop_detects_legacy_from_a_keepalive_and_pads_the_ack():
 
 
 def test_read_loop_waits_for_enough_bytes_to_tell_the_framing():
-    ka = sd_module._cora_pack(0x4000, 0x01, 5, KEEPALIVE)
+    ka = net_deck.cora_pack(0x4000, 0x01, 5, KEEPALIVE)
     dev = _device(script=[ka[:1], ka[1:3], ka[3:]])
     dev._read_loop()
     assert dev._mode == "cora"
@@ -194,7 +195,7 @@ def test_read_loop_gives_up_on_bytes_that_are_no_deck_protocol():
 
 
 def test_read_loop_rides_out_timeouts_and_stops_on_a_socket_error():
-    ka = sd_module._cora_pack(0x4000, 0x01, 1, KEEPALIVE)
+    ka = net_deck.cora_pack(0x4000, 0x01, 1, KEEPALIVE)
     dev = _device(script=[socket.timeout(), ka, OSError("reset"), ka])
     dev._read_loop()
     assert dev._mode == "cora"
@@ -211,7 +212,7 @@ def test_read_loop_legacy_reassembles_packets_across_chunks():
 
 
 def test_read_loop_tells_cora_from_the_four_marker_bytes_alone():
-    ka = sd_module._cora_pack(0x4000, 0x01, 5, KEEPALIVE)
+    ka = net_deck.cora_pack(0x4000, 0x01, 5, KEEPALIVE)
     dev = _device(script=[ka[:4], ka[4:]])
     dev._read_loop()
     assert dev._mode == "cora"
@@ -235,7 +236,7 @@ def test_read_loop_legacy_handles_every_packet_in_one_chunk():
 
 
 def test_read_loop_marks_receive_time():
-    dev = _device(script=[sd_module._cora_pack(0, 0, 0, KEEPALIVE)])
+    dev = _device(script=[net_deck.cora_pack(0, 0, 0, KEEPALIVE)])
     dev._last_rx = 0.0
     before = time.monotonic()
     dev._read_loop()
@@ -342,6 +343,14 @@ def test_other_responses_are_keyed_on_their_first_byte():
     assert slots[0x06][1] == b"\x06\x00SERIAL"
 
 
+def test_legacy_bridge_response_is_keyed_on_its_second_byte():
+    dev = _device(mode="legacy")
+    slots = _pending(dev, 0x03, 0x80)
+    dev._handle_payload(b"\x03\x80\x01", None, None, None)
+    assert slots[0x80][1] == b"\x03\x80\x01"
+    assert slots[0x03][1] is None
+
+
 def test_a_response_nobody_waits_for_is_dropped():
     dev = _device(mode="cora")
     dev._handle_payload(b"\x06\x00", 0x8000, 2, 1)
@@ -424,9 +433,9 @@ def test_get_report_cora_frames_the_request():
 
 
 def test_get_report_times_out_with_the_transport_error(monkeypatch):
-    monkeypatch.setattr(sd_module, "_NET_GET_TIMEOUT", 0.05)
+    monkeypatch.setattr(net_deck, "NET_GET_TIMEOUT", 0.05)
     dev = _device(mode="cora")
-    with pytest.raises(sd_module._transport_error(), match="feature report read timed out"):
+    with pytest.raises(net_deck.transport_error(), match="feature report read timed out"):
         dev._get_report(b"\x06", 0x06, 0x8000)
     assert dev._pending == {}
 
@@ -434,7 +443,7 @@ def test_get_report_times_out_with_the_transport_error(monkeypatch):
 def test_get_report_woken_by_close_is_a_timeout(monkeypatch):
     dev = _device(mode="cora")
     dev._send_raw = lambda data: dev.close()
-    with pytest.raises(sd_module._transport_error(), match="feature report read timed out"):
+    with pytest.raises(net_deck.transport_error(), match="feature report read timed out"):
         dev._get_report(b"\x06", 0x06, 0x8000)
 
 
@@ -515,7 +524,7 @@ def test_probe_endpoint_legacy_sends_padded_probes():
 def test_probe_endpoint_with_no_answer_raises():
     dev, _sent = _probe_device("cora", {})
     started = time.monotonic()
-    with pytest.raises(sd_module._transport_error(), match="unit did not answer identification"):
+    with pytest.raises(net_deck.transport_error(), match="unit did not answer identification"):
         dev.probe_endpoint(timeout=0.3)
     assert time.monotonic() - started >= 0.3
     assert dev._pending == {}
@@ -525,7 +534,7 @@ def test_probe_endpoint_on_a_dead_link_raises_at_once():
     dev, _sent = _probe_device("cora", {})
     dev._send_raw = lambda data: setattr(dev, "_dead", True)
     started = time.monotonic()
-    with pytest.raises(sd_module._transport_error(), match="unit did not answer identification"):
+    with pytest.raises(net_deck.transport_error(), match="unit did not answer identification"):
         dev.probe_endpoint(timeout=5.0)
     assert time.monotonic() - started < 1.0
 
@@ -549,7 +558,7 @@ def test_open_on_a_closed_link_raises():
     dev = _device(mode="cora")
     assert dev.open() is None
     dev._dead = True
-    with pytest.raises(sd_module._transport_error(), match="network deck connection is closed"):
+    with pytest.raises(net_deck.transport_error(), match="network deck connection is closed"):
         dev.open()
 
 
@@ -561,7 +570,7 @@ def test_connected_needs_bytes_within_the_idle_window():
     dev = _device(mode="cora")
     dev._last_rx = time.monotonic()
     assert dev.connected() is True
-    dev._last_rx = time.monotonic() - sd_module._NET_IDLE_TIMEOUT - 0.5
+    dev._last_rx = time.monotonic() - net_deck.NET_IDLE_TIMEOUT - 0.5
     assert dev.connected() is False
     dev._last_rx = time.monotonic()
     dev._dead = True
@@ -586,7 +595,7 @@ def test_legacy_writes_are_padded(method):
 def test_writes_on_a_closed_link_raise_the_transport_error(method):
     dev = _device(mode="cora")
     dev._dead = True
-    with pytest.raises(sd_module._transport_error(), match="network deck connection is closed"):
+    with pytest.raises(net_deck.transport_error(), match="network deck connection is closed"):
         getattr(dev, method)(b"\x02")
 
 
@@ -603,7 +612,7 @@ def test_read_feature_pads_and_truncates(mode, flags):
 def test_read_feature_on_a_closed_link_raises():
     dev = _device(mode="cora")
     dev._dead = True
-    with pytest.raises(sd_module._transport_error(), match="network deck connection is closed"):
+    with pytest.raises(net_deck.transport_error(), match="network deck connection is closed"):
         dev.read_feature(0x06, 32)
 
 
@@ -615,12 +624,12 @@ def test_read_returns_one_queued_report_sized_to_the_request():
     assert dev.read(5) == b"\x01\x00\x01\x00\x00"
     assert dev.read(4) == b"\x01\x00\x01\x01"
     dev._dead = True
-    with pytest.raises(sd_module._transport_error(), match="network deck connection is closed"):
+    with pytest.raises(net_deck.transport_error(), match="network deck connection is closed"):
         dev.read(4)
 
 
 def test_ids_default_to_elgato_with_no_product():
-    dev = sd_module._NetDeckDevice("h", "5343")
+    dev = net_deck.NetDeckDevice("h", "5343")
     assert (dev.vendor_id(), dev.product_id()) == (0x0FD9, 0)
     assert dev.address == "h:5343"
     assert dev._port == 5343
@@ -654,12 +663,34 @@ def test_connect_to_something_that_is_not_a_deck_times_out_and_closes():
         conn.close()
 
     threading.Thread(target=speak_http, daemon=True).start()
-    dev = sd_module._NetDeckDevice("127.0.0.1", port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", port)
     started = time.monotonic()
     try:
         with pytest.raises(TimeoutError, match="device sent no keepalive after connect"):
             dev.connect(timeout=1.0)
         assert time.monotonic() - started < 2.5
+        assert dev._dead is True and dev._sock is None
+    finally:
+        server.close()
+
+
+def test_connect_to_a_deck_that_hangs_up_before_a_keepalive_fails():
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def frame_then_hang_up():
+        conn, _ = server.accept()
+        conn.sendall(net_deck.cora_pack(0x8000, 0x00, 0, b"\x01\x00\x00\x01"))
+        conn.close()
+
+    threading.Thread(target=frame_then_hang_up, daemon=True).start()
+    dev = net_deck.NetDeckDevice("127.0.0.1", port)
+    try:
+        with pytest.raises(TimeoutError, match="device sent no keepalive after connect"):
+            dev.connect(timeout=1.0)
+        assert dev._mode == "cora"
         assert dev._dead is True and dev._sock is None
     finally:
         server.close()
@@ -679,14 +710,14 @@ def test_connect_to_something_that_is_not_a_deck_times_out_and_closes():
     (RuntimeError(), "connection failed"),
 ])
 def test_classify_net_error(exc, text):
-    assert sd_module._classify_net_error(exc) == text
+    assert net_deck.classify_net_error(exc) == text
 
 
 # ──── The link: connecting one configured entry ────
 
 
 class _FakeEndpoint:
-    """Stands in for _NetDeckDevice in the link tests."""
+    """Stands in for NetDeckDevice in the link tests."""
 
     made = []
 
@@ -740,7 +771,7 @@ class _FakeEndpoint:
 def fake_endpoints(monkeypatch):
     _FakeEndpoint.made = []
     _FakeEndpoint.setup = None
-    monkeypatch.setattr(sd_module, "_NetDeckDevice", _FakeEndpoint)
+    monkeypatch.setattr(net_deck, "NetDeckDevice", _FakeEndpoint)
     yield _FakeEndpoint
     _FakeEndpoint.setup = None
 
@@ -755,7 +786,7 @@ def test_connect_a_deck_endpoint_from_its_device2(fake_endpoints):
         ep.device2 = {"vid": 0x0FD9, "pid": 0x0084, "serial": "ALIAS1", "port": 20001}
 
     fake_endpoints.setup = setup
-    link = sd_module._DockLink("192.0.2.4", 5343, _local_address)
+    link = net_deck.DockLink("192.0.2.4", 5343, _local_address)
     link._connect_blocking()
     (ep,) = fake_endpoints.made
     assert (ep.host, ep._port, ep.role, ep.local_address) == ("192.0.2.4", 5343, "primary", _local_address)
@@ -772,7 +803,7 @@ def test_connect_a_deck_endpoint_asks_for_device2_when_none_arrived(fake_endpoin
         ep.host_feature = _device2(pid=0x009A, serial=b"")
 
     fake_endpoints.setup = setup
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link.advertised_serial = "KEPT"
     link._connect_blocking()
     (ep,) = fake_endpoints.made
@@ -787,8 +818,8 @@ def test_connect_a_deck_endpoint_with_no_deck_raises_and_closes(fake_endpoints):
         ep.host_feature = _device2(status=0x00)
 
     fake_endpoints.setup = setup
-    link = sd_module._DockLink("192.0.2.4", 5343)
-    with pytest.raises(sd_module._transport_error(), match="no deck present at this address"):
+    link = net_deck.DockLink("192.0.2.4", 5343)
+    with pytest.raises(net_deck.transport_error(), match="no deck present at this address"):
         link._connect_blocking()
     (ep,) = fake_endpoints.made
     assert ep.closed is True
@@ -800,7 +831,7 @@ def test_connect_a_failed_probe_closes_the_endpoint(fake_endpoints):
         ep.probe_error = OSError("probe failed")
 
     fake_endpoints.setup = setup
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     with pytest.raises(OSError, match="probe failed"):
         link._connect_blocking()
     assert fake_endpoints.made[0].closed is True
@@ -815,7 +846,7 @@ def test_connect_a_bridge_dials_the_docked_deck(fake_endpoints):
             ep.device2 = {"vid": 0x0FD9, "pid": 0x0080, "serial": "DOCKED", "port": 20007}
 
     fake_endpoints.setup = setup
-    link = sd_module._DockLink("192.0.2.4", 5343, _local_address)
+    link = net_deck.DockLink("192.0.2.4", 5343, _local_address)
     link._connect_blocking()
     primary, child = fake_endpoints.made
     assert primary.host_feature_reads == [0x1C]
@@ -829,20 +860,20 @@ def test_connect_a_bridge_dials_the_docked_deck(fake_endpoints):
 
 
 def test_connect_a_bridge_with_nothing_docked(fake_endpoints):
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link._connect_blocking()
     assert len(fake_endpoints.made) == 1
     assert link.primary is fake_endpoints.made[0] and link.child is None
 
 
 def test_connect_child_without_a_primary_does_nothing(fake_endpoints):
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link._connect_child_blocking()
     assert fake_endpoints.made == [] and link.child is None
 
 
 def test_connect_child_keeps_the_alias_when_the_child_has_no_serial(fake_endpoints):
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link.primary = _FakeEndpoint("192.0.2.4", 5343)
     link.primary.device2 = {"vid": 1, "pid": 2, "serial": "", "port": 20009}
     link.advertised_serial = "KEPT"
@@ -851,14 +882,14 @@ def test_connect_child_keeps_the_alias_when_the_child_has_no_serial(fake_endpoin
 
 
 def test_link_names_its_state_key_from_the_address():
-    link = sd_module._DockLink("fe80::1%en0", "5343")
+    link = net_deck.DockLink("fe80::1%en0", "5343")
     assert link.key == "fe80::1%en0:5343"
     assert link.state_key == "fe80__1_en0_5343"
     assert link.port == 5343 and link.status == "connecting"
 
 
 def test_link_close_closes_both_connections():
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link.primary = _FakeEndpoint("h", 1)
     link.child = _FakeEndpoint("h", 2)
     primary, child = link.primary, link.child
@@ -868,7 +899,7 @@ def test_link_close_closes_both_connections():
 
 
 def test_live_transports_skip_the_dock_itself_and_dead_or_unknown_ones():
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link.primary = _FakeEndpoint("h", 1)
     link.child = _FakeEndpoint("h", 2)
     link.primary._pid, link.child._pid = 0xFFFF, 0x0080
@@ -898,7 +929,7 @@ def _run(coro):
 
 
 def test_ensure_while_a_connect_is_running_only_reports():
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link._connecting = True
     link.primary = _FakeEndpoint("h", 1)
     link.primary._pid = 0x0080
@@ -911,7 +942,7 @@ def test_ensure_while_a_connect_is_running_only_reports():
 
 
 def test_ensure_waits_out_the_backoff():
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     stale = _FakeEndpoint("h", 1)
     stale.up = False
     link.primary = stale
@@ -925,7 +956,7 @@ def test_ensure_waits_out_the_backoff():
 
 
 def test_ensure_reconnects_and_resets_the_failure_count():
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link.fail_count = 4
     link.status = "unreachable"
     link._resolve_attempted = True
@@ -945,7 +976,7 @@ def test_ensure_reconnects_and_resets_the_failure_count():
 
 
 def test_ensure_a_failed_connect_backs_off_and_says_why():
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     half = _FakeEndpoint("h", 1)
 
     def connect():
@@ -968,7 +999,7 @@ def test_ensure_a_failed_connect_backs_off_and_says_why():
 
 @pytest.mark.parametrize("fails_before, delay", [(1, 6.0), (2, 12.0), (3, 24.0), (4, 30.0), (9, 30.0)])
 def test_ensure_backoff_doubles_to_a_cap(fails_before, delay):
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link.fail_count = fails_before
 
     def connect():
@@ -985,7 +1016,7 @@ def test_ensure_backoff_doubles_to_a_cap(fails_before, delay):
 
 
 def _healthy_link(device2=None, child_port=None, child_up=True):
-    link = sd_module._DockLink("192.0.2.4", 5343)
+    link = net_deck.DockLink("192.0.2.4", 5343)
     link.primary = _FakeEndpoint("h", 5343)
     link.primary._pid = 0xFFFF
     link.primary.device2 = device2
@@ -1087,14 +1118,12 @@ def test_ensure_a_failed_child_dial_is_logged_and_the_link_stays_up():
 # ──── Library device classes for network decks ────
 
 
-def test_net_deck_class_needs_the_library(monkeypatch):
-    monkeypatch.setattr(sd_module, "StreamDeck", None)
-    assert sd_module._net_deck_class(0x0080) is None
+def test_net_deck_class_needs_the_library():
+    assert deck_classes.net_deck_class(0x0080, None) is None
 
 
-def test_net_deck_class_maps_each_product_id(monkeypatch):
+def test_net_deck_class_maps_each_product_id():
     dm = pytest.importorskip("StreamDeck.DeviceManager")
-    monkeypatch.setattr(sd_module, "StreamDeck", dm)
     ids = dm.USBProductIDs
     expected = {
         ids.USB_PID_STREAMDECK_ORIGINAL: dm.StreamDeckOriginal,
@@ -1113,10 +1142,10 @@ def test_net_deck_class_maps_each_product_id(monkeypatch):
         ids.USB_PID_STREAMDECK_PLUS: dm.StreamDeckPlus,
     }
     for pid, cls in expected.items():
-        assert sd_module._net_deck_class(pid) is cls, hex(pid)
-    assert sd_module._net_deck_class(0x00AA) is sd_module._studio_deck_class()
-    assert sd_module._net_deck_class(ids.USB_PID_STREAMDECK_PLUS_XL) is None
-    assert sd_module._net_deck_class(0x1234) is None
+        assert deck_classes.net_deck_class(pid, dm) is cls, hex(pid)
+    assert deck_classes.net_deck_class(0x00AA, dm) is deck_classes.studio_deck_class()
+    assert deck_classes.net_deck_class(ids.USB_PID_STREAMDECK_PLUS_XL, dm) is None
+    assert deck_classes.net_deck_class(0x1234, dm) is None
 
 
 class _ReportDevice:
@@ -1139,13 +1168,13 @@ class _ReportDevice:
 
 def _studio(device):
     pytest.importorskip("StreamDeck.Devices.StreamDeckOriginalV2")
-    return sd_module._studio_deck_class()(device)
+    return deck_classes.studio_deck_class()(device)
 
 
 def test_studio_class_is_built_once_on_the_v2_protocol():
     v2 = pytest.importorskip("StreamDeck.Devices.StreamDeckOriginalV2")
-    cls = sd_module._studio_deck_class()
-    assert cls is sd_module._studio_deck_class()
+    cls = deck_classes.studio_deck_class()
+    assert cls is deck_classes.studio_deck_class()
     assert issubclass(cls, v2.StreamDeckOriginalV2)
     assert (cls.KEY_COUNT, cls.KEY_COLS, cls.KEY_ROWS, cls.DIAL_COUNT, cls.TOUCH_KEY_COUNT) == (32, 16, 2, 2, 0)
     assert (cls.KEY_PIXEL_WIDTH, cls.KEY_PIXEL_HEIGHT, cls.KEY_IMAGE_FORMAT) == (80, 120, "JPEG")

@@ -46,6 +46,7 @@ from control_surfaces.streamdeck.streamdeck_plugin import (  # noqa: E402
     _eval_operator,
 )
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
+import control_surfaces.streamdeck.net_deck as net_deck  # noqa: E402
 
 try:
     from openavc.core.plugin_api import PluginAPI
@@ -3015,7 +3016,7 @@ def test_apply_nav_active_image_same_size(monkeypatch):
 
 
 def test_cora_pack_layout():
-    frame = sd_module._cora_pack(0x8000, 0x02, 0x123456, b"\x84")
+    frame = net_deck.cora_pack(0x8000, 0x02, 0x123456, b"\x84")
     assert frame[:4] == b"\x43\x93\x8a\x41"
     flags, op, res, mid, length = __import__("struct").unpack("<HBBII", frame[4:16])
     assert (flags, op, res, mid, length) == (0x8000, 0x02, 0, 0x123456, 1)
@@ -3023,9 +3024,9 @@ def test_cora_pack_layout():
 
 
 def test_cora_stream_parses_split_frames_and_resyncs():
-    stream = sd_module._CoraStream()
-    frame1 = sd_module._cora_pack(0x0000, 0x00, 7, b"\x01\x0a\x00\x00\x00\x05")
-    frame2 = sd_module._cora_pack(0x8000, 0x00, 0, b"\x01\x00\x00\x01" + b"\x00" * 8)
+    stream = net_deck.CoraStream()
+    frame1 = net_deck.cora_pack(0x0000, 0x00, 7, b"\x01\x0a\x00\x00\x00\x05")
+    frame2 = net_deck.cora_pack(0x8000, 0x00, 0, b"\x01\x00\x00\x01" + b"\x00" * 8)
     blob = b"\xde\xad\xbe\xef" + frame1 + frame2  # garbage prefix -> resync
     # Feed in awkward chunk sizes spanning frame boundaries
     frames = []
@@ -3045,11 +3046,11 @@ def test_parse_device2_layout():
     payload[28:30] = (0x0080).to_bytes(2, "little")
     payload[94:94 + 7] = b"ABC123\x00"
     payload[126:128] = (5344).to_bytes(2, "little")
-    info = sd_module._parse_device2(bytes(payload))
+    info = net_deck.parse_device2(bytes(payload))
     assert info == {"vid": 0x0FD9, "pid": 0x0080, "serial": "ABC123", "port": 5344}
     payload[4] = 0x00  # child gone
-    assert sd_module._parse_device2(bytes(payload)) is None
-    assert sd_module._parse_device2(b"\x01\x0b") is None
+    assert net_deck.parse_device2(bytes(payload)) is None
+    assert net_deck.parse_device2(b"\x01\x0b") is None
 
 
 # ──── Network decks: live TCP transport against a fake dock ────
@@ -3083,12 +3084,12 @@ class _FakeDock:
             return
         self.peer = addr[0]
         self.conn.settimeout(0.1)
-        stream = sd_module._CoraStream()
+        stream = net_deck.CoraStream()
         last_ka = 0.0
         while not self.stop:
             now = _time.monotonic()
             if self.keepalives and now - last_ka >= 0.4:
-                ka = sd_module._cora_pack(
+                ka = net_deck.cora_pack(
                     0x4000, 0x01, 99, b"\x01\x0a\x00\x00\x00\x07"
                 )
                 try:
@@ -3107,21 +3108,21 @@ class _FakeDock:
             for frame in stream.feed(data):
                 self.received.append(frame)
                 flags, op, mid, payload = frame
-                if op == sd_module._CORA_OP_GET_REPORT:
+                if op == net_deck.CORA_OP_GET_REPORT:
                     rid = payload[1] if payload[0] == 0x03 else payload[0]
                     resp = self.feature_responses.get(rid)
                     if resp is not None:
                         rflags = 0x8000 if not (payload[0] == 0x03) else 0x0100
                         try:
                             self.conn.sendall(
-                                sd_module._cora_pack(rflags, op, mid, resp)
+                                net_deck.cora_pack(rflags, op, mid, resp)
                             )
                         except OSError:
                             break
             _ = _struct  # quiet linters
 
     def send_frame(self, flags, op, mid, payload):
-        self.conn.sendall(sd_module._cora_pack(flags, op, mid, payload))
+        self.conn.sendall(net_deck.cora_pack(flags, op, mid, payload))
 
     def close(self):
         self.stop = True
@@ -3134,7 +3135,7 @@ class _FakeDock:
 
 def test_net_device_connects_acks_keepalives_and_reports_liveness():
     dock = _FakeDock()
-    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", dock.port)
     try:
         dev.connect(timeout=3.0)
         assert dev.is_open() and dev.connected()
@@ -3144,7 +3145,7 @@ def test_net_device_connects_acks_keepalives_and_reports_liveness():
         deadline = _time.monotonic() + 2.0
         acks = []
         while _time.monotonic() < deadline and not acks:
-            acks = [f for f in dock.received if f[0] & sd_module._CORA_FLAG_ACK_NAK]
+            acks = [f for f in dock.received if f[0] & net_deck.CORA_FLAG_ACK_NAK]
             _time.sleep(0.05)
         assert acks, "no keepalive ACK reached the dock"
         flags, op, mid, payload = acks[0]
@@ -3157,11 +3158,11 @@ def test_net_device_connects_acks_keepalives_and_reports_liveness():
 
 def test_net_device_liveness_decays_without_keepalives():
     dock = _FakeDock()
-    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", dock.port)
     try:
         dev.connect(timeout=3.0)
         dock.keepalives = False
-        dev._last_rx -= sd_module._NET_IDLE_TIMEOUT + 1  # simulate silence
+        dev._last_rx -= net_deck.NET_IDLE_TIMEOUT + 1  # simulate silence
         assert not dev.connected()
         assert dev.is_open()  # socket itself still up; watchdog reaps via connected()
     finally:
@@ -3171,7 +3172,7 @@ def test_net_device_liveness_decays_without_keepalives():
 
 def test_net_device_input_reports_and_nonblocking_read():
     dock = _FakeDock()
-    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", dock.port)
     try:
         dev.connect(timeout=3.0)
         assert dev.read(14) is None  # nothing queued -> non-blocking None
@@ -3197,7 +3198,7 @@ def test_net_device_feature_roundtrip_and_write_framing():
         b"\x03\x80" + b"\x00" * 10 + (0x0FD9).to_bytes(2, "little")
         + (0x00AA).to_bytes(2, "little") + b"\x00" * 16
     )
-    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", dock.port)
     try:
         dev.connect(timeout=3.0)
         # Verbatim (child/deck) feature read: payload [id], response keyed on it
@@ -3213,8 +3214,8 @@ def test_net_device_feature_roundtrip_and_write_framing():
         _time.sleep(0.3)
         writes = [
             f for f in dock.received
-            if f[1] == sd_module._CORA_OP_WRITE
-            and f[0] & sd_module._CORA_FLAG_VERBATIM
+            if f[1] == net_deck.CORA_OP_WRITE
+            and f[0] & net_deck.CORA_FLAG_VERBATIM
         ]
         assert writes and writes[0][3][:2] == b"\x02\x07"
     finally:
@@ -3254,7 +3255,7 @@ def test_net_device_legacy_mode_keepalive_and_padded_writes():
 
     thread = _threading.Thread(target=serve, daemon=True)
     thread.start()
-    dev = sd_module._NetDeckDevice("127.0.0.1", port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", port)
     try:
         dev.connect(timeout=3.0)
         assert dev._mode == "legacy"
@@ -3273,7 +3274,7 @@ def test_net_device_legacy_mode_keepalive_and_padded_writes():
 
 def test_net_device_hotplug_device2_updates():
     dock = _FakeDock()
-    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", dock.port)
     try:
         dev.connect(timeout=3.0)
         payload = bytearray(130)
@@ -3317,7 +3318,7 @@ def test_probe_endpoint_classifies_deck_port():
     # which ignores 0x80 and answers the gen2 0x08 verbatim query.
     dock = _FakeDock()
     dock.feature_responses[0x08] = b"\x08" + b"\x00" * 31
-    dev = sd_module._NetDeckDevice("127.0.0.1", dock.port)
+    dev = net_deck.NetDeckDevice("127.0.0.1", dock.port)
     try:
         dev.connect(timeout=3.0)
         assert dev.probe_endpoint(timeout=3.0) == "deck"
@@ -3332,7 +3333,7 @@ def test_dock_link_deck_endpoint_identity_from_device2():
     dock = _FakeDock()
     dock.feature_responses[0x08] = b"\x08" + b"\x00" * 31
     dock.feature_responses[0x1C] = _device2_payload(pid=0x0084, serial=b"PLUSSN9")
-    link = sd_module._DockLink("127.0.0.1", dock.port)
+    link = net_deck.DockLink("127.0.0.1", dock.port)
     try:
         link._connect_blocking()
         assert link.is_deck_endpoint is True
@@ -3377,12 +3378,12 @@ def test_network_deck_serial_alias_does_not_flap_or_double_card():
         self.status = "connected"
         return []
 
-    original = sd_module._DockLink.ensure
-    sd_module._DockLink.ensure = fake_ensure
+    original = net_deck.DockLink.ensure
+    net_deck.DockLink.ensure = fake_ensure
     try:
         loop.run_until_complete(plugin._reconcile_network_decks([]))
     finally:
-        sd_module._DockLink.ensure = original
+        net_deck.DockLink.ensure = original
         loop.close()
 
     # The entry's own serial is untouched; the alias persisted separately.
@@ -3415,7 +3416,7 @@ def test_network_deck_entries_validation():
 
 
 def test_dock_link_backoff_grows_and_caps(monkeypatch):
-    link = sd_module._DockLink("192.0.2.1", 5343)  # TEST-NET, never answers
+    link = net_deck.DockLink("192.0.2.1", 5343)  # TEST-NET, never answers
 
     def fail_connect():
         raise ConnectionRefusedError()
@@ -3457,8 +3458,8 @@ def test_reconcile_creates_links_publishes_status_and_drops_removed():
             self.status = "connecting"
             return []
 
-        original = sd_module._DockLink.ensure
-        sd_module._DockLink.ensure = fake_ensure
+        original = net_deck.DockLink.ensure
+        net_deck.DockLink.ensure = fake_ensure
         try:
             loop.run_until_complete(plugin._reconcile_network_decks([]))
             assert "192.0.2.7:5343" in plugin._dock_links
@@ -3473,7 +3474,7 @@ def test_reconcile_creates_links_publishes_status_and_drops_removed():
                 "plugin.streamdeck.net.192_0_2_7_5343.status"
             ) == "removed"
         finally:
-            sd_module._DockLink.ensure = original
+            net_deck.DockLink.ensure = original
     finally:
         loop.close()
 
@@ -3511,7 +3512,7 @@ def test_reconcile_opens_a_live_network_transport_as_its_library_deck(monkeypatc
     async def fake_ensure(self, _loop, _log):
         return [known, already_open, unknown]
 
-    monkeypatch.setattr(sd_module._DockLink, "ensure", fake_ensure)
+    monkeypatch.setattr(net_deck.DockLink, "ensure", fake_ensure)
     new_decks = []
     try:
         loop.run_until_complete(plugin._reconcile_network_decks(new_decks))
@@ -3532,7 +3533,7 @@ def test_persist_network_serials_records_observed_serial():
         plugin.api._update_config(config)
 
     plugin.api.save_config = fake_save
-    link = sd_module._DockLink("192.0.2.9", 5343)
+    link = net_deck.DockLink("192.0.2.9", 5343)
     link.observed_serial = "NETSN77"
     plugin._dock_links[link.key] = link
     loop = __import__("asyncio").new_event_loop()
@@ -3554,7 +3555,7 @@ def test_net_reresolve_follows_serial_to_new_host():
         plugin.api._update_config(config)
 
     async def fake_browse(service_types, duration=5.0):
-        assert service_types == [sd_module._NET_MDNS_SERVICE]
+        assert service_types == [net_deck.NET_MDNS_SERVICE]
         return [
             {"ip": "192.0.2.50", "port": 5343,
              "service_type": "_elg._tcp.local.", "txt": {"sn": "OTHER"}},
@@ -3730,7 +3731,7 @@ def test_a_network_deck_connects_from_the_chosen_adapter(pin):
     pin(PINNED)
     plugin, _state = _make_plugin({})
     dock = _deck_at(OWN)
-    link = sd_module._DockLink(OWN, dock.port, plugin.api.local_address)
+    link = net_deck.DockLink(OWN, dock.port, plugin.api.local_address)
     try:
         link._connect_blocking()
         assert link.primary.product_id() == 0x0084
@@ -3744,7 +3745,7 @@ def test_a_network_deck_connects_from_the_chosen_adapter(pin):
 def test_with_no_adapter_chosen_a_network_deck_is_not_bound(pin):
     plugin, _state = _make_plugin({})
     dock = _deck_at(OWN)
-    link = sd_module._DockLink(OWN, dock.port, plugin.api.local_address)
+    link = net_deck.DockLink(OWN, dock.port, plugin.api.local_address)
     try:
         link._connect_blocking()
     finally:
@@ -3758,7 +3759,7 @@ def test_the_docked_deck_connection_leaves_from_the_chosen_adapter_too(pin):
     pin(PINNED)
     plugin, _state = _make_plugin({})
     child = _deck_at(OWN)
-    link = sd_module._DockLink(OWN, 1, plugin.api.local_address)
+    link = net_deck.DockLink(OWN, 1, plugin.api.local_address)
     link.primary = type("Primary", (), {"device2": {
         "vid": 0x0FD9, "pid": 0x0084, "serial": "PLUSSN9", "port": child.port,
     }})()
