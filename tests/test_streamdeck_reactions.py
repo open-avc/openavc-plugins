@@ -33,6 +33,10 @@ if str(_PLUGINS_ROOT) not in sys.path:
 
 from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
+from control_surfaces.streamdeck.watch_keys import (  # noqa: E402
+    button_watches_key,
+    zone_watches_key,
+)
 
 try:
     from openavc.core.plugin_api import PluginAPI
@@ -311,7 +315,7 @@ async def test_setup_reads_the_decks_own_config_view():
 
 
 def test_zone_watches_key_reads_sources_feedback_and_drag():
-    watches = StreamDeckPlugin._zone_watches_key
+    watches = zone_watches_key
     zone = {"label_source": "a", "value_source": "b", "feedback": {"key": "c"},
             "drag_adjust": {"key": "d"}}
     assert [watches(zone, k) for k in "abcde"] == [True, True, True, True, False]
@@ -321,7 +325,7 @@ def test_zone_watches_key_reads_sources_feedback_and_drag():
 
 
 def test_button_watches_key_reads_sources_feedback_toggle_and_visibility():
-    watches = StreamDeckPlugin._button_watches_key
+    watches = button_watches_key
     btn = {
         "label_source": "a", "value_source": "b",
         "bindings": {
@@ -335,7 +339,9 @@ def test_button_watches_key_reads_sources_feedback_toggle_and_visibility():
     assert watches({"bindings": {"feedback": "c"}}, "c") is False
     assert watches({"bindings": {"press": ["d", {"toggle_key": "d"}]}}, "d") is False
     assert watches({"bindings": {"press": {"toggle_key": "d"}}}, "d") is True
-    assert watches({}, None) is True
+    # An absent field is never a watched key: only non-empty keys are
+    # subscribed, so a state change never asks about None.
+    assert watches({}, None) is False
 
 
 # ──── What a watched change does ────

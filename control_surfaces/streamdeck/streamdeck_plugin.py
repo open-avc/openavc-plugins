@@ -10,7 +10,9 @@ network the Network Dock and the Stream Deck Studio (net_deck.py).
 Beside this module: conditions.py (the rule visible_when, auto_page and
 auto_brightness are judged by), config_check.py (what validate_config
 reports), declared_decks.py (the virtual and network decks the config
-declares) and virtual_deck.py (a deck that exists only in software).
+declares), key_entries.py (which config entry a key runs, and the actions a
+binding holds), virtual_deck.py (a deck that exists only in software) and
+watch_keys.py (which state keys a deck reads, and what each one redraws).
 """
 
 import asyncio
@@ -23,12 +25,14 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from .conditions import coerce_numeric, condition_state_keys, eval_condition
+from .conditions import coerce_numeric, eval_condition
 from .config_check import config_problems, unwrap_binding
 from .declared_decks import network_deck_entries, virtual_deck_entries
+from .key_entries import action_list, assignment_for, global_buttons, press_actions
 from .deck_classes import net_deck_class
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
+from .watch_keys import deck_watch, keys_watching, zone_watches_key
 
 # A sentence raised as PluginRefusal from start() is the one the AI assistant
 # repeats to the integrator; on an older OpenAVC the card shows it either way.
@@ -1581,8 +1585,8 @@ class StreamDeckPlugin:
         # and toggle/hold config live on the first entry, while a default tap
         # button fires every entry in order.
         bindings = assignment.get("bindings", {})
-        press_actions = self._press_actions(bindings)
-        press = press_actions[0] if press_actions else None
+        actions = press_actions(bindings)
+        press = actions[0] if actions else None
 
         if not press or not isinstance(press, dict):
             return
@@ -1658,24 +1662,7 @@ class StreamDeckPlugin:
 
         # Default: tap mode — fire every configured action in order, on press
         if pressed:
-            await self._execute_actions(session, press_actions, f"key {key_index}")
-
-    @staticmethod
-    def _press_actions(bindings):
-        """Return the press binding as a list of action dicts.
-
-        The Surface Configurator stores ``press`` as an array of action
-        objects (mode/toggle/hold config lives on the first entry). A single
-        dict is wrapped; anything else yields an empty list.
-        """
-        if not isinstance(bindings, dict):
-            return []
-        press = bindings.get("press")
-        if isinstance(press, list):
-            return [a for a in press if isinstance(a, dict)]
-        if isinstance(press, dict):
-            return [press]
-        return []
+            await self._execute_actions(session, actions, f"key {key_index}")
 
     async def _execute_actions(self, session, actions, source):
         """Execute a list of action bindings sequentially, in order."""
@@ -1756,15 +1743,6 @@ class StreamDeckPlugin:
 
     # ──── Dials (decks with rotary encoders) ────
 
-    @staticmethod
-    def _action_list(value):
-        """Normalize an action binding (single dict or list of dicts) to a list."""
-        if isinstance(value, list):
-            return [a for a in value if isinstance(a, dict)]
-        if isinstance(value, dict):
-            return [value]
-        return []
-
     def _get_dial_config(self, session, index):
         """Look up the dial config entry for a dial index."""
         dials = self._deck_config(session).get("dials", [])
@@ -1786,20 +1764,20 @@ class StreamDeckPlugin:
         if not cfg:
             return False
         return bool(
-            cls._action_list(cfg.get("long_press"))
+            action_list(cfg.get("long_press"))
             or isinstance(cfg.get("pressed_adjust"), dict)
-            or cls._action_list(cfg.get("pressed_cw"))
-            or cls._action_list(cfg.get("pressed_ccw"))
+            or action_list(cfg.get("pressed_cw"))
+            or action_list(cfg.get("pressed_ccw"))
         )
 
     async def _execute_per_detent(self, session, actions, detents, source):
         """Run a turn's action list once per detent moved (capped at 8 per
         event) so a command-per-click mapping tracks fast spins."""
-        action_list = self._action_list(actions)
-        if not action_list:
+        turn = action_list(actions)
+        if not turn:
             return
         for _ in range(min(abs(int(detents)), 8)):
-            await self._execute_actions(session, action_list, source)
+            await self._execute_actions(session, turn, source)
 
     async def _on_dial_event(self, session, deck, dial, event, value):
         """Handle a dial turn or push.
@@ -1833,7 +1811,7 @@ class StreamDeckPlugin:
                 if not deferred:
                     if cfg:
                         await self._execute_actions(
-                            session, self._action_list(cfg.get("press")),
+                            session, action_list(cfg.get("press")),
                             f"dial {dial}",
                         )
                     return
@@ -1851,12 +1829,12 @@ class StreamDeckPlugin:
             held = asyncio.get_running_loop().time() - press_time
             threshold = coerce_numeric(cfg.get("hold_threshold_ms"))
             threshold = (threshold if threshold and threshold > 0 else 500) / 1000.0
-            long_actions = self._action_list(cfg.get("long_press"))
+            long_actions = action_list(cfg.get("long_press"))
             if held >= threshold and long_actions:
                 await self._execute_actions(session, long_actions, f"dial {dial}")
             else:
                 await self._execute_actions(
-                    session, self._action_list(cfg.get("press")), f"dial {dial}"
+                    session, action_list(cfg.get("press")), f"dial {dial}"
                 )
             return
 
@@ -1884,8 +1862,8 @@ class StreamDeckPlugin:
                 )
                 if (
                     isinstance(pressed_adjust, dict) and pressed_adjust.get("key")
-                ) or self._action_list(cfg.get("pressed_cw")) \
-                        or self._action_list(cfg.get("pressed_ccw")):
+                ) or action_list(cfg.get("pressed_cw")) \
+                        or action_list(cfg.get("pressed_ccw")):
                     if isinstance(pressed_adjust, dict) and pressed_adjust.get("key"):
                         await self._apply_dial_adjust(pressed_adjust, detents)
                     await self._execute_per_detent(
@@ -2112,7 +2090,7 @@ class StreamDeckPlugin:
             if not actions:
                 actions = zone.get("touch")
             await self._execute_actions(
-                session, self._action_list(actions), "touchscreen"
+                session, action_list(actions), "touchscreen"
             )
 
     # ──── Display elements (shared by zones, info items, and keys) ────
@@ -2737,7 +2715,7 @@ class StreamDeckPlugin:
                 highest = idx
 
         def scan_actions(value):
-            for action in self._action_list(value):
+            for action in action_list(value):
                 if action.get("action") == "navigate":
                     note(action.get("page"))
                 for nested in ("off_action", "hold_action"):
@@ -2753,7 +2731,7 @@ class StreamDeckPlugin:
             bindings = btn.get("bindings", {})
             if isinstance(bindings, dict):
                 scan_actions(bindings.get("press"))
-        for btn in self._global_buttons(cfg):
+        for btn in global_buttons(cfg):
             bindings = btn.get("bindings", {})
             if isinstance(bindings, dict):
                 scan_actions(bindings.get("press"))
@@ -3362,221 +3340,62 @@ class StreamDeckPlugin:
     # ──── State Subscriptions ────
 
     async def _setup_feedback_subscriptions(self, session):
-        """Subscribe to every state key that can change a deck's buttons,
-        displays, brightness, or page.
+        """Subscribe to every state key that can change a deck's keys, strips,
+        brightness or page, and note which keys show which macro's run.
 
-        Covers feedback keys, toggle keys, visible_when condition keys, and
-        auto_page rule keys. Auto_page keys are also tracked separately so that
-        only an auto_page-watched change can drive automatic paging. Each deck
-        subscribes independently against its own config view.
+        Each deck subscribes against its own config view; what the view reads
+        is watch_keys.py.
         """
         cfg = self._deck_config(session)
-        buttons = cfg.get("buttons", [])
-        page_buttons = (
-            [b for b in buttons if isinstance(b, dict)]
-            if isinstance(buttons, list) else []
-        )
-        global_buttons = self._global_buttons(cfg)
-        locked = self._locked_indexes(cfg)
-        # A page entry shadowed by a locked key never renders or fires, so
-        # its watch keys and macro references are inert too.
-        page_buttons = [b for b in page_buttons if b.get("index") not in locked]
-        watch_keys = set()
-        session.auto_page_keys = set()
-
-        for btn in page_buttons + global_buttons:
-            # Live display sources (entry level, like label/icon)
-            for field in ("label_source", "value_source"):
-                if btn.get(field):
-                    watch_keys.add(btn[field])
-            bindings = btn.get("bindings", {})
-            if isinstance(bindings, dict):
-                # Feedback key
-                feedback = bindings.get("feedback", {})
-                if isinstance(feedback, dict) and feedback.get("key"):
-                    watch_keys.add(feedback["key"])
-                # Toggle key (for label/icon updates on toggle state change)
-                press = unwrap_binding(bindings.get("press"))
-                if isinstance(press, dict) and press.get("toggle_key"):
-                    watch_keys.add(press["toggle_key"])
-                # Visibility condition keys
-                watch_keys.update(condition_state_keys(bindings.get("visible_when")))
-
-        # Auto-page rule keys (tracked separately — only these drive paging)
-        auto_page = cfg.get("auto_page", [])
-        if isinstance(auto_page, list):
-            for rule in auto_page:
-                if isinstance(rule, dict):
-                    session.auto_page_keys.update(condition_state_keys(rule.get("when")))
-        watch_keys |= session.auto_page_keys
-
-        # Touchscreen strip keys (tracked separately — a change re-renders the
-        # strip): explicit zone label/value sources, plus every dial adjust key
-        # since the default zones display those values.
-        session.touch_strip_keys = set()
-        touchscreen = cfg.get("touchscreen", {})
-        zones = touchscreen.get("zones") if isinstance(touchscreen, dict) else None
-        if isinstance(zones, list):
-            for zone in zones:
-                if isinstance(zone, dict):
-                    for field in ("label_source", "value_source"):
-                        if zone.get(field):
-                            session.touch_strip_keys.add(zone[field])
-                    zone_fb = zone.get("feedback")
-                    if isinstance(zone_fb, dict) and zone_fb.get("key"):
-                        session.touch_strip_keys.add(zone_fb["key"])
-        dials = cfg.get("dials", [])
-        if isinstance(dials, list):
-            for dial in dials:
-                if isinstance(dial, dict):
-                    adjust = dial.get("adjust")
-                    if isinstance(adjust, dict) and adjust.get("key"):
-                        session.touch_strip_keys.add(adjust["key"])
-        watch_keys |= session.touch_strip_keys
-
-        # Info-strip keys (tracked separately — a change re-renders the strip)
-        session.info_strip_keys = set()
-        info_strip = cfg.get("info_strip")
-        for element in self._info_strip_items(info_strip, 0):
-            for field in ("label_source", "value_source"):
-                if element.get(field):
-                    session.info_strip_keys.add(element[field])
-            item_fb = element.get("feedback")
-            if isinstance(item_fb, dict) and item_fb.get("key"):
-                session.info_strip_keys.add(item_fb["key"])
-        watch_keys |= session.info_strip_keys
-
-        # Auto-brightness rule keys (tracked separately — a change re-applies
-        # the brightness level)
-        session.brightness_keys = set()
-        auto_brightness = cfg.get("auto_brightness", [])
-        if isinstance(auto_brightness, list):
-            for rule in auto_brightness:
-                if isinstance(rule, dict):
-                    session.brightness_keys.update(condition_state_keys(rule.get("when")))
-        watch_keys |= session.brightness_keys
-
-        # Macro feedback map: which (page, key) bindings reference which
-        # macro, so macro.started/completed/error events can mark those keys.
-        # Only keys have a display to mark — dial/zone macro actions aren't
-        # mapped.
-        session.macro_keys = {}
-
-        def _note_macro(action, page, index):
-            if (
-                isinstance(action, dict)
-                and action.get("action") == "macro"
-                and action.get("macro")
-            ):
-                session.macro_keys.setdefault(str(action["macro"]), set()).add(
-                    (page, index)
-                )
-
-        # Locked keys are marked with page None: their macro runs light the
-        # key on whatever page is showing.
-        entries = [(btn, btn.get("page", 0)) for btn in page_buttons]
-        entries += [(btn, None) for btn in global_buttons]
-        for btn, page in entries:
-            index = btn.get("index")
-            if index is None:
-                continue
-            bindings = btn.get("bindings", {})
-            if not isinstance(bindings, dict):
-                continue
-            for action in self._press_actions(bindings):
-                _note_macro(action, page, index)
-                _note_macro(action.get("off_action"), page, index)
-                _note_macro(action.get("hold_action"), page, index)
-
+        watch = deck_watch(cfg, self._info_strip_items(cfg.get("info_strip"), 0))
+        session.auto_page_keys = watch.auto_page
+        session.touch_strip_keys = watch.touch_strip
+        session.info_strip_keys = watch.info_strip
+        session.brightness_keys = watch.brightness
+        session.macro_keys = watch.macro_keys
         callback = functools.partial(self._on_state_change, session)
-        for key in watch_keys:
+        for key in watch.keys:
             sub_id = await self.api.state_subscribe(key, callback)
             session.feedback_subs.append(sub_id)
 
     async def _on_state_change(self, session, key, value, old_value):
-        """React to a watched state change: auto-page switch and/or re-render."""
+        """Redraw what a watched state change touches, in order: an automatic
+        page switch (which redraws the whole page and ends here), the strip
+        zones, the info strip, the brightness, then the keys."""
         if not session.deck or not session.deck.is_visual():
             return
-
-        # Auto-page: re-evaluate only when an auto_page-watched key changes, so
-        # an ordinary feedback/visibility change never overrides manual paging.
-        if key in session.auto_page_keys:
-            target = await self._evaluate_auto_page(session)
-            if target is not None and target != session.current_page:
-                await self._change_page(session, target)
-                return  # _change_page re-rendered the whole new page
-
-        # Touchscreen strip shows live values — schedule a debounced redraw
-        # of just the zones that watch this key (partial-region update).
+        # Only an auto_page key can page, so an ordinary feedback or
+        # visibility change never overrides paging by hand.
+        if key in session.auto_page_keys and await self._follow_auto_page(session):
+            return
         if key in session.touch_strip_keys:
-            zones = [
-                i for i, z in enumerate(self._touch_zones(session))
-                if self._zone_watches_key(z, key)
-            ]
-            self._schedule_strip_render(session, zones or None)
-
-        # Info strip shows a live value — re-render it on change
+            # No zone reads the key (a dial's adjust under explicit zones):
+            # the whole strip redraws.
+            self._schedule_strip_render(session, self._zones_watching(session, key) or None)
         if key in session.info_strip_keys:
             await self._render_info_strip(session)
-
-        # Auto-brightness rules — re-apply unless the deck is idle-dimmed
-        # (waking on input restores the rule level anyway)
+        # An idle-dimmed deck keeps its dim level; waking on input applies
+        # the rule level anyway.
         if key in session.brightness_keys and not session.idle_dimmed:
             await self._apply_active_brightness(session)
-
-        # Re-render keys that depend on this state key: locked keys on any
-        # page, plus the current page's buttons (entries shadowed by a lock
-        # are inert and skipped).
         cfg = self._deck_config(session)
-        locked = self._locked_indexes(cfg)
-        to_render = list(self._global_buttons(cfg))
-        buttons = cfg.get("buttons", [])
-        for btn in buttons if isinstance(buttons, list) else []:
-            if not isinstance(btn, dict):
-                continue
-            if btn.get("page", 0) != session.current_page:
-                continue
-            if btn.get("index") in locked:
-                continue
-            to_render.append(btn)
+        for key_index in keys_watching(cfg, session.current_page, key):
+            await self._render_button(session, key_index)
 
-        for btn in to_render:
-            if self._button_watches_key(btn, key):
-                key_index = btn.get("index")
-                if key_index is not None:
-                    await self._render_button(session, key_index)
+    def _zones_watching(self, session, key):
+        """Indexes of the strip zones whose drawing reads a state key."""
+        return [
+            i for i, zone in enumerate(self._touch_zones(session))
+            if zone_watches_key(zone, key)
+        ]
 
-    @staticmethod
-    def _zone_watches_key(zone, key):
-        """True when a zone's rendering depends on a state key."""
-        if key in (zone.get("label_source"), zone.get("value_source")):
-            return True
-        feedback = zone.get("feedback")
-        if isinstance(feedback, dict) and feedback.get("key") == key:
-            return True
-        drag = zone.get("drag_adjust")
-        return isinstance(drag, dict) and drag.get("key") == key
-
-    @classmethod
-    def _button_watches_key(cls, btn, key):
-        """True when a button entry's rendering depends on a state key
-        (entry-level live sources or its binding's watch keys)."""
-        if key in (btn.get("label_source"), btn.get("value_source")):
-            return True
-        return cls._binding_watches_key(btn.get("bindings", {}), key)
-
-    @staticmethod
-    def _binding_watches_key(bindings, key):
-        """True when a key binding's rendering depends on a state key."""
-        if not isinstance(bindings, dict):
+    async def _follow_auto_page(self, session):
+        """Switch to the page the auto_page rules choose; True when it did."""
+        target = await self._evaluate_auto_page(session)
+        if target is None or target == session.current_page:
             return False
-        feedback = bindings.get("feedback", {})
-        if isinstance(feedback, dict) and feedback.get("key") == key:
-            return True
-        press = unwrap_binding(bindings.get("press"))
-        if isinstance(press, dict) and press.get("toggle_key") == key:
-            return True
-        return key in condition_state_keys(bindings.get("visible_when"))
+        await self._change_page(session, target)
+        return True
 
     # ──── Macro run feedback ────
 
@@ -3743,44 +3562,9 @@ class StreamDeckPlugin:
 
     # ──── Helpers ────
 
-    @staticmethod
-    def _global_buttons(cfg):
-        """Validated ``global_buttons`` entries from a config view.
-
-        Same entry shape as ``buttons`` but with no ``page`` field: a locked
-        key keeps one assignment on every page (page switchers, mute-all).
-        """
-        entries = cfg.get("global_buttons", []) if isinstance(cfg, dict) else []
-        if not isinstance(entries, list):
-            return []
-        return [b for b in entries if isinstance(b, dict)]
-
-    def _locked_indexes(self, cfg):
-        """Key indexes reserved deck-wide by ``global_buttons`` entries."""
-        return {
-            b.get("index") for b in self._global_buttons(cfg)
-            if b.get("index") is not None
-        }
-
     def _get_button_assignment(self, session, page, key_index):
-        """Look up the key assignment for a page/key index.
-
-        A ``global_buttons`` entry for the index wins on every page — a
-        locked key is reserved deck-wide, and a per-page entry at the same
-        index never renders or fires while the lock exists. Page-scoped
-        ``buttons`` entries fill the rest.
-        """
-        cfg = self._deck_config(session)
-        for btn in self._global_buttons(cfg):
-            if btn.get("index") == key_index:
-                return btn
-        buttons = cfg.get("buttons", [])
-        for btn in buttons if isinstance(buttons, list) else []:
-            if not isinstance(btn, dict):
-                continue
-            if btn.get("index") == key_index and btn.get("page", 0) == page:
-                return btn
-        return None
+        """The entry a key runs on a page of this deck (key_entries.py)."""
+        return assignment_for(self._deck_config(session), page, key_index)
 
     @staticmethod
     def _hidapi_error_message() -> str:

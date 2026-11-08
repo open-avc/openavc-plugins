@@ -46,6 +46,8 @@ from control_surfaces.streamdeck.conditions import (  # noqa: E402
     eval_operator,
 )
 from control_surfaces.streamdeck.virtual_deck import VIRTUAL_MODELS  # noqa: E402
+from control_surfaces.streamdeck.key_entries import press_actions  # noqa: E402
+from control_surfaces.streamdeck.watch_keys import button_watches_key  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 import control_surfaces.streamdeck.net_deck as net_deck  # noqa: E402
 
@@ -392,27 +394,27 @@ async def test_subscriptions_empty_config():
     assert session.feedback_subs == []
 
 
-# ──── _press_actions normalization ────
+# ──── press_actions normalization ────
 
 
 def test_press_actions_list():
-    assert StreamDeckPlugin._press_actions(
+    assert press_actions(
         {"press": [{"action": "macro", "macro": "a"}, {"action": "macro", "macro": "b"}]}
     ) == [{"action": "macro", "macro": "a"}, {"action": "macro", "macro": "b"}]
 
 
 def test_press_actions_single_dict_wrapped():
-    assert StreamDeckPlugin._press_actions({"press": {"action": "macro", "macro": "a"}}) == [
+    assert press_actions({"press": {"action": "macro", "macro": "a"}}) == [
         {"action": "macro", "macro": "a"}
     ]
 
 
 def test_press_actions_absent_or_invalid():
-    assert StreamDeckPlugin._press_actions({}) == []
-    assert StreamDeckPlugin._press_actions({"press": None}) == []
-    assert StreamDeckPlugin._press_actions("not a dict") == []
+    assert press_actions({}) == []
+    assert press_actions({"press": None}) == []
+    assert press_actions("not a dict") == []
     # Non-dict entries inside the array are dropped.
-    assert StreamDeckPlugin._press_actions({"press": ["x", {"action": "macro", "macro": "a"}]}) == [
+    assert press_actions({"press": ["x", {"action": "macro", "macro": "a"}]}) == [
         {"action": "macro", "macro": "a"}
     ]
 
@@ -1277,9 +1279,9 @@ async def test_key_live_sources_watched_and_rendered():
     session = _session_for(plugin)
     await plugin._setup_feedback_subscriptions(session)
     btn = config["buttons"][0]
-    assert plugin._button_watches_key(btn, "var.mic_name")
-    assert plugin._button_watches_key(btn, "var.mic_level")
-    assert not plugin._button_watches_key(btn, "var.other")
+    assert button_watches_key(btn, "var.mic_name")
+    assert button_watches_key(btn, "var.mic_level")
+    assert not button_watches_key(btn, "var.other")
     # Both live sources are subscribed for re-render.
     assert len(session.feedback_subs) == 2
 
