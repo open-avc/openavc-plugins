@@ -609,11 +609,11 @@ def _start_harness(tmp_path, monkeypatch, displays=None, ready=True, deps=("medi
     plugin = PresentPlugin()
     api = _RecordingApi(log, {"displays": [dict(d) for d in (displays or [])]})
     api.data_dir = tmp_path
-    plugin._detect_local_ip = lambda: "192.0.2.10"
-    plugin._http_port = lambda: 8080
-    plugin._port80_active = lambda: False
-    plugin._tls_state = lambda: (False, 0)
-    plugin._redirect_http_enabled = lambda: False
+    plugin._join_address.detect_local_ip = lambda: "192.0.2.10"
+    plugin._join_address.http_port = lambda: 8080
+    plugin._join_address.port80_active = lambda: False
+    plugin._join_address.tls_state = lambda: (False, 0)
+    plugin._join_address.redirect_http_enabled = lambda: False
     monkeypatch.setattr(
         PresentPlugin, "_resolve_dep",
         staticmethod(lambda name: (tmp_path / name) if name in deps else None),
@@ -900,27 +900,27 @@ def test_platform_readers_read_the_system_config(monkeypatch):
         "tls": {"enabled": True, "port": "", "redirect_http": 1},
     }, port80=1)
     p = _fresh_plugin()
-    assert p._http_port() == 9090
-    assert p._tls_state() == (True, 8443)
-    assert p._redirect_http_enabled() is True
-    assert p._port80_active() is True
+    assert p._join_address.http_port() == 9090
+    assert p._join_address.tls_state() == (True, 8443)
+    assert p._join_address.redirect_http_enabled() is True
+    assert p._join_address.port80_active() is True
     _fake_openavc(monkeypatch, {"tls": {"enabled": True, "port": "7443"}})
-    assert p._tls_state() == (True, 7443)
+    assert p._join_address.tls_state() == (True, 7443)
     _fake_openavc(monkeypatch, {"tls": {"enabled": True, "port": "x"}})
-    assert p._tls_state() == (False, 0)
+    assert p._join_address.tls_state() == (False, 0)
     _fake_openavc(monkeypatch, {"tls": {"enabled": 0, "port": "7443"}})
-    assert p._tls_state() == (False, 0)
+    assert p._join_address.tls_state() == (False, 0)
 
 
 def test_platform_readers_fall_back(monkeypatch):
     _fake_openavc(monkeypatch, raise_config=True)
     p = _fresh_plugin()
-    assert p._http_port() == 8080
-    assert p._tls_state() == (False, 0)
-    assert p._redirect_http_enabled() is False
-    assert p._port80_active() is False  # the flag is missing
+    assert p._join_address.http_port() == 8080
+    assert p._join_address.tls_state() == (False, 0)
+    assert p._join_address.redirect_http_enabled() is False
+    assert p._join_address.port80_active() is False  # the flag is missing
     _fake_openavc(monkeypatch, {"network": {"http_port": None}})
-    assert p._http_port() == 8080
+    assert p._join_address.http_port() == 8080
 
 
 def test_detect_local_ip_caches_and_falls_back(monkeypatch):
@@ -944,12 +944,12 @@ def test_detect_local_ip_caches_and_falls_back(monkeypatch):
 
     monkeypatch.setattr(socket, "socket", FakeSocket)
     p = _fresh_plugin()
-    assert p._detect_local_ip() == "10.1.2.3"
-    assert p._detect_local_ip() == "10.1.2.3"
+    assert p._join_address.detect_local_ip() == "10.1.2.3"
+    assert p._join_address.detect_local_ip() == "10.1.2.3"
     assert opened == [(socket.AF_INET, socket.SOCK_DGRAM), "closed"]
     # Older than the cache window: resolved again.
-    p._detected_ip = ("10.1.2.3", time.monotonic() - 61)
-    p._detect_local_ip()
+    p._join_address._detected = ("10.1.2.3", time.monotonic() - 61)
+    p._join_address.detect_local_ip()
     assert len(opened) == 4
 
     class NoNetwork(FakeSocket):
@@ -957,30 +957,29 @@ def test_detect_local_ip_caches_and_falls_back(monkeypatch):
             raise OSError("unreachable")
 
     monkeypatch.setattr(socket, "socket", NoNetwork)
-    p._detected_ip = ("", 0.0)
-    assert p._detect_local_ip() == "127.0.0.1"
-    assert p._detected_ip[0] == "127.0.0.1"
+    p._join_address._detected = ("", 0.0)
+    assert p._join_address.detect_local_ip() == "127.0.0.1"
+    assert p._join_address._detected[0] == "127.0.0.1"
 
 
 def test_advertised_ips_edges(monkeypatch):
     p = _fresh_plugin()
-    p._detect_local_ip = lambda: "192.0.2.10"
+    p._join_address.detect_local_ip = lambda: "192.0.2.10"
     monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, family: [])
-    assert p._advertised_ips("empty.example") == ["192.0.2.10"]
-    p.api = None
-    assert p._advertised_ips("empty.example") == ["192.0.2.10"]
-    assert p._advertised_ips("2001:db8::1") == ["2001:db8::1"]
+    assert p._join_address.advertised_ips("empty.example", p.api.log) == ["192.0.2.10"]
+    assert p._join_address.advertised_ips("empty.example", None) == ["192.0.2.10"]
+    assert p._join_address.advertised_ips("2001:db8::1") == ["2001:db8::1"]
     monkeypatch.setattr(
         socket, "getaddrinfo",
         lambda host, port, family: [(0, 0, 0, "", ("10.0.0.2", 0)), (0, 0, 0, "", ("10.0.0.1", 0)),
                                     (0, 0, 0, "", ("10.0.0.2", 0))],
     )
-    assert p._advertised_ips("multi.example") == ["10.0.0.2", "10.0.0.1"]
+    assert p._join_address.advertised_ips("multi.example") == ["10.0.0.2", "10.0.0.1"]
 
 
 def test_join_host_without_an_api():
     p = PresentPlugin()
-    p._detect_local_ip = lambda: "198.51.100.4"
+    p._join_address.detect_local_ip = lambda: "198.51.100.4"
     assert p._join_host() == "198.51.100.4"
     p.api = _FakeApi({"join_address": "  "})
     assert p._join_host() == "198.51.100.4"
@@ -1000,17 +999,17 @@ async def test_join_url_reads_the_cert_only_with_tls():
     p.api.state_get = state_get
     assert await p._join_url() == "192.0.2.10:8080/present"
     assert reads == []
-    p._tls_state = lambda: (True, 443)
+    p._join_address.tls_state = lambda: (True, 443)
     assert await p._join_url() == "https://192.0.2.10/present"
     assert reads == ["system.cloud.cert_status"]
-    p._redirect_http_enabled = lambda: True
-    p._http_port = lambda: 8081
+    p._join_address.redirect_http_enabled = lambda: True
+    p._join_address.http_port = lambda: 8081
     assert await p._join_url() == "http://192.0.2.10:8081/present"
 
 
 def test_local_display_url_with_tls_on_443():
     p = _plugin(displays=[_LOCAL])
-    p._tls_state = lambda: (True, 443)
+    p._join_address.tls_state = lambda: (True, 443)
     assert p._local_display_url(_LOCAL) == "https://127.0.0.1:443/present/display/lobby?key=lk"
 
 

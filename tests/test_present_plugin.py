@@ -151,11 +151,11 @@ def _plugin(displays=None, auth_pass="sidecarpass", state=None, config=None):
     plugin._rotate_code()
     # Pin the join-address inputs so join_url is deterministic regardless of
     # the test host's NICs or whether the openavc package is importable.
-    plugin._detect_local_ip = lambda: "192.0.2.10"
-    plugin._http_port = lambda: 8080
-    plugin._port80_active = lambda: False
-    plugin._tls_state = lambda: (False, 0)
-    plugin._redirect_http_enabled = lambda: False
+    plugin._join_address.detect_local_ip = lambda: "192.0.2.10"
+    plugin._join_address.http_port = lambda: 8080
+    plugin._join_address.port80_active = lambda: False
+    plugin._join_address.tls_state = lambda: (False, 0)
+    plugin._join_address.redirect_http_enabled = lambda: False
     # As if the sidecar config had been rendered at start with that address,
     # so the poll's join-host-change check starts from a stable baseline.
     plugin._rendered_join_host = plugin._join_host()
@@ -267,7 +267,7 @@ def test_matrix_verbs_are_declared():
 def test_render_config_is_valid_and_locked_down():
     plugin = PresentPlugin()
     plugin._auth_pass = "a1b2c3d4e5f6"
-    plugin._detect_local_ip = lambda: "192.0.2.10"
+    plugin._join_address.detect_local_ip = lambda: "192.0.2.10"
     cfg = yaml.safe_load(plugin._render_config())
 
     # Distinct ports from the video_panel plugin so both can run side by side.
@@ -814,7 +814,7 @@ async def test_join_url_configured_address_and_port_handling():
     plugin = _plugin(config={"join_address": "av.example.edu"})
     assert await plugin._join_url() == "av.example.edu:8080/present"
     # Port 80 is implicit in what a human types.
-    plugin._http_port = lambda: 80
+    plugin._join_address.http_port = lambda: 80
     assert await plugin._join_url() == "av.example.edu/present"
     # Blank config falls back to the (pinned) auto-detected LAN address.
     plugin2 = _plugin()
@@ -1050,7 +1050,7 @@ async def test_poll_restarts_sidecar_when_the_join_host_moves(tmp_path, monkeypa
 
     # The address moves: config rewritten, sidecar bounced, poll yields
     # (presence rebuilds against the fresh sidecar on the next tick).
-    plugin._detect_local_ip = lambda: "203.0.113.7"
+    plugin._join_address.detect_local_ip = lambda: "203.0.113.7"
     await plugin._poll()
     assert plugin._supervisor.restarts == 1
     assert "'203.0.113.7'" in plugin._config_path.read_text(encoding="utf-8")
@@ -1075,7 +1075,7 @@ async def test_poll_ignores_ip_moves_under_an_explicit_join_address(monkeypatch)
         return set()
 
     monkeypatch.setattr(plugin, "_scan_presenters", fake_scan)
-    plugin._detect_local_ip = lambda: "203.0.113.7"
+    plugin._join_address.detect_local_ip = lambda: "203.0.113.7"
     await plugin._poll()
     assert plugin._supervisor.restarts == 0
 
@@ -1284,7 +1284,7 @@ async def test_join_url_plain_http():
     plugin = _plugin()
     assert await plugin._join_url() == "192.0.2.10:8080/present"
     # Port 80 drops from the short form.
-    plugin._http_port = lambda: 80
+    plugin._join_address.http_port = lambda: 80
     assert await plugin._join_url() == "192.0.2.10/present"
 
 
@@ -1296,17 +1296,17 @@ async def test_join_url_https_is_scheme_qualified():
     host:8443 defaults to http against the TLS listener. Only the explicit
     https form works everywhere."""
     plugin = _plugin()
-    plugin._tls_state = lambda: (True, 8443)
+    plugin._join_address.tls_state = lambda: (True, 8443)
     assert await plugin._join_url() == "https://192.0.2.10:8443/present"
     # Port 443 drops (the https default).
-    plugin._tls_state = lambda: (True, 443)
+    plugin._join_address.tls_state = lambda: (True, 443)
     assert await plugin._join_url() == "https://192.0.2.10/present"
 
 
 @pytest.mark.asyncio
 async def test_join_url_honors_configured_join_address_with_tls():
     plugin = _plugin(config={"join_address": "present.example.org"})
-    plugin._tls_state = lambda: (True, 8443)
+    plugin._join_address.tls_state = lambda: (True, 8443)
     assert await plugin._join_url() == "https://present.example.org:8443/present"
 
 
@@ -1318,19 +1318,19 @@ async def test_join_url_trusted_cert_rides_the_redirect():
     browser warning). The direct https form would serve the self-signed
     cert and bring the interstitial back."""
     plugin = _plugin(state={"system.cloud.cert_status": "installed"})
-    plugin._tls_state = lambda: (True, 8443)
-    plugin._redirect_http_enabled = lambda: True
+    plugin._join_address.tls_state = lambda: (True, 8443)
+    plugin._join_address.redirect_http_enabled = lambda: True
     assert await plugin._join_url() == "http://192.0.2.10:8080/present"
     # Port 80 drops (the http default).
-    plugin._http_port = lambda: 80
+    plugin._join_address.http_port = lambda: 80
     assert await plugin._join_url() == "http://192.0.2.10/present"
     # A configured join address rides the redirect the same way.
     plugin2 = _plugin(
         state={"system.cloud.cert_status": "installed"},
         config={"join_address": "av.example.edu"},
     )
-    plugin2._tls_state = lambda: (True, 8443)
-    plugin2._redirect_http_enabled = lambda: True
+    plugin2._join_address.tls_state = lambda: (True, 8443)
+    plugin2._join_address.redirect_http_enabled = lambda: True
     assert await plugin2._join_url() == "http://av.example.edu:8080/present"
 
 
@@ -1339,12 +1339,12 @@ async def test_join_url_drops_the_port_when_port_80_answers():
     """The platform's port-80 listener lets either http form drop the port;
     the direct https form keeps its own."""
     plugin = _plugin()
-    plugin._port80_active = lambda: True
+    plugin._join_address.port80_active = lambda: True
     assert await plugin._join_url() == "192.0.2.10/present"
-    plugin._tls_state = lambda: (True, 8443)
+    plugin._join_address.tls_state = lambda: (True, 8443)
     assert await plugin._join_url() == "https://192.0.2.10:8443/present"
     plugin.api = _FakeApi({"displays": []}, state={"system.cloud.cert_status": "installed"})
-    plugin._redirect_http_enabled = lambda: True
+    plugin._join_address.redirect_http_enabled = lambda: True
     assert await plugin._join_url() == "http://192.0.2.10/present"
 
 
@@ -1353,21 +1353,21 @@ async def test_join_url_trusted_cert_needs_redirect_and_installed():
     # Cert installed but the redirect is off: an http address would dead-end
     # on the plain listener, so the https form stays.
     plugin = _plugin(state={"system.cloud.cert_status": "installed"})
-    plugin._tls_state = lambda: (True, 8443)
+    plugin._join_address.tls_state = lambda: (True, 8443)
     assert await plugin._join_url() == "https://192.0.2.10:8443/present"
     # Redirect on but no installed cert (absent or mid-issuance): the
     # redirect would land on the self-signed cert, so the https form stays.
     plugin = _plugin()
-    plugin._tls_state = lambda: (True, 8443)
-    plugin._redirect_http_enabled = lambda: True
+    plugin._join_address.tls_state = lambda: (True, 8443)
+    plugin._join_address.redirect_http_enabled = lambda: True
     assert await plugin._join_url() == "https://192.0.2.10:8443/present"
     plugin = _plugin(state={"system.cloud.cert_status": "issuing"})
-    plugin._tls_state = lambda: (True, 8443)
-    plugin._redirect_http_enabled = lambda: True
+    plugin._join_address.tls_state = lambda: (True, 8443)
+    plugin._join_address.redirect_http_enabled = lambda: True
     assert await plugin._join_url() == "https://192.0.2.10:8443/present"
     # TLS off: the short form is untouched by cert state.
     plugin = _plugin(state={"system.cloud.cert_status": "installed"})
-    plugin._redirect_http_enabled = lambda: True
+    plugin._join_address.redirect_http_enabled = lambda: True
     assert await plugin._join_url() == "192.0.2.10:8080/present"
 
 
@@ -1512,7 +1512,7 @@ def test_local_display_url_follows_tls_state():
     display = plugin._displays[0]
     url = plugin._local_display_url(display)
     assert url == "http://127.0.0.1:8080/present/display/main?key=k3y-k3y-k3y"
-    plugin._tls_state = lambda: (True, 8443)
+    plugin._join_address.tls_state = lambda: (True, 8443)
     url = plugin._local_display_url(display)
     assert url == "https://127.0.0.1:8443/present/display/main?key=k3y-k3y-k3y"
 
