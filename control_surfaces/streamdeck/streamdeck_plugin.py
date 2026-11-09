@@ -16,7 +16,8 @@ a key runs, and the actions a binding holds), looks.py (what a key, a strip
 zone or an info item shows: the value line, the meter, the feedback style),
 context_actions.py (what a context action or a simulated input asks for),
 deck_answers.py (what a network deck's discovery answer says),
-virtual_deck.py (a deck that exists only in software) and watch_keys.py (which
+deck_profile.py (what a deck says about itself when it opens: its transport,
+serial, model and geometry), virtual_deck.py (a deck that exists only in software) and watch_keys.py (which
 state keys a deck reads, and what each one redraws).
 """
 
@@ -281,7 +282,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.38.6",
+        "version": "1.38.7",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
