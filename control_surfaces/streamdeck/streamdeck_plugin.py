@@ -840,7 +840,9 @@ class StreamDeckPlugin:
 
         Every deck gets ``plugin.streamdeck.<serial>.*`` keys; the un-prefixed
         singleton keys mirror the primary deck so the status card and simple
-        automations keep working unchanged with one deck.
+        automations keep working unchanged with one deck. Both say the same
+        things about a deck (``_deck_facts``): the primary adds its serial,
+        each deck its name and address.
         """
         sessions = list(self._sessions.values())
         await self.api.state_set("deck_count", len(sessions))
@@ -850,28 +852,32 @@ class StreamDeckPlugin:
         if primary is None:
             await self.api.state_set("connected", False)
         else:
-            await self.api.state_set("connected", True)
-            await self.api.state_set("model", primary.model)
-            await self.api.state_set("serial", primary.serial)
-            for key, value in primary.geometry.items():
-                await self.api.state_set(key, value)
-            await self.api.state_set("current_page", primary.current_page)
+            await self._publish("", self._deck_facts(primary, [("serial", primary.serial)]))
 
         deck_names = self.api.config.get("deck_names")
         deck_names = deck_names if isinstance(deck_names, dict) else {}
         for session in sessions:
-            prefix = session.serial
-            await self.api.state_set(f"{prefix}.connected", True)
-            await self.api.state_set(f"{prefix}.model", session.model)
-            await self.api.state_set(
-                f"{prefix}.name", str(deck_names.get(session.serial, ""))
-            )
-            await self.api.state_set(
-                f"{prefix}.address", getattr(session, "address", "")
-            )
-            for key, value in session.geometry.items():
-                await self.api.state_set(f"{prefix}.{key}", value)
-            await self.api.state_set(f"{prefix}.current_page", session.current_page)
+            own = [
+                ("name", str(deck_names.get(session.serial, ""))),
+                ("address", getattr(session, "address", "")),
+            ]
+            await self._publish(f"{session.serial}.", self._deck_facts(session, own))
+
+    async def _publish(self, prefix, facts):
+        """Write each (key, value) of ``facts`` as state, under ``prefix``."""
+        for key, value in facts:
+            await self.api.state_set(prefix + key, value)
+
+    @staticmethod
+    def _deck_facts(session, own):
+        """What a deck says about itself, in the order it is published:
+        connected, its model, the ``own`` (key, value) pairs, its geometry,
+        then the page showing. Each value is read as it is reached."""
+        yield "connected", True
+        yield "model", session.model
+        yield from own
+        yield from session.geometry.items()
+        yield "current_page", session.current_page
 
     async def _open_deck(self, deck):
         """Open a deck, configure it, and set up its callbacks."""
@@ -2187,18 +2193,27 @@ class StreamDeckPlugin:
         )
 
     async def _flush_strip_render(self, session):
+        """The debounced redraw: after each pause, whatever is pending, round
+        after round while more arrives; the strip is free for the next
+        redraw however this ends."""
         try:
             while session.strip_dirty:
                 await asyncio.sleep(0.04)
                 dirty = session.strip_dirty
                 session.strip_dirty = None
-                if dirty == "all" or session.strip_image is None:
-                    await self._render_touchscreen(session)
-                else:
-                    for index in sorted(dirty):
-                        await self._render_strip_zone(session, index)
+                await self._redraw_strip(session, dirty)
         finally:
             session.strip_render_task = None
+
+    async def _redraw_strip(self, session, dirty):
+        """One round of the debounced redraw: the whole strip for ``"all"``
+        or with no strip image to draw into, else each dirty zone in index
+        order."""
+        if dirty == "all" or session.strip_image is None:
+            await self._render_touchscreen(session)
+            return
+        for index in sorted(dirty):
+            await self._render_strip_zone(session, index)
 
     async def _render_strip_zone(self, session, zone_index):
         """Redraw one zone into the cached strip image and ship only that
@@ -2677,23 +2692,21 @@ class StreamDeckPlugin:
             )
 
     def _text_font(self, size):
-        """Return a cached text font at ``size`` (bundled font, then fallbacks)."""
+        """The label font at ``size``, opened once (``_open_text_font``)."""
         font = self._font_cache.get(size)
-        if font is not None:
-            return font
-        font = None
-        if self._text_font_path:
-            try:
-                font = ImageFont.truetype(self._text_font_path, size)
-            except (IOError, OSError):
-                font = None
         if font is None:
-            try:
-                font = ImageFont.truetype("arial.ttf", size)
-            except (IOError, OSError):
-                font = ImageFont.load_default()
-        self._font_cache[size] = font
+            font = self._font_cache[size] = self._open_text_font(size)
         return font
+
+    def _open_text_font(self, size):
+        """The bundled font at ``size``, else arial.ttf, else Pillow's
+        built-in default; a font file that will not open is passed over."""
+        for path in [p for p in (self._text_font_path, "arial.ttf") if p]:
+            try:
+                return ImageFont.truetype(path, size)
+            except (IOError, OSError):
+                continue
+        return ImageFont.load_default()
 
     @staticmethod
     def _wrap_greedy(draw, text, font, max_width):
