@@ -17,7 +17,8 @@ status card needs it before a deck attaches, one in UNCONNECTED_GEOMETRY.
 
 A deck's keys are numbered LCD keys first, then its touch keys (a Neo's eight
 LCD keys are 0-7 and its two touch keys 8 and 9); ``key_total``,
-``touch_key_indexes`` and ``is_touch_key`` read that numbering from the deck.
+``lcd_key_indexes``, ``touch_key_indexes`` and ``is_touch_key`` read that
+numbering from the deck.
 
 The identity is read before the geometry, and a deck that fails mid-read
 raises out of the open: a network deck's link is told the serial it reported
@@ -127,6 +128,11 @@ def deck_geometry(deck, identity):
 def key_total(deck):
     """How many keys a deck has: its LCD keys and its touch keys."""
     return deck.key_count() + deck.touch_key_count()
+
+
+def lcd_key_indexes(deck):
+    """The indexes of a deck's LCD keys, numbered from 0."""
+    return range(deck.key_count())
 
 
 def touch_key_indexes(deck):

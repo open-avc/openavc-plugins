@@ -374,9 +374,8 @@ def _touchscreen_problems(ts, path):
     problems = []
     idle = ts.get("idle")
     if idle is not None and idle not in IDLE_MODES:
-        problems.append(
-            f"{path}.idle {_shown(idle)} is not \"clock\" or \"blank\", so the strip shows the clock."
-        )
+        words = " or ".join(f'"{word}"' for word in IDLE_MODES)
+        problems.append(f"{path}.idle {_shown(idle)} is not {words}, so the strip shows the clock.")
     zones = ts.get("zones")
     if zones is None:
         return problems

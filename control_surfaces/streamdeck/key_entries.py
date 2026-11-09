@@ -16,7 +16,9 @@ check reports any other type. ``write_door`` is what a state.set action, a dial
 adjust or a zone fader may write; the plugin writes through it and the config
 check reports a key it refuses. A toggle's ``off_action`` and a tap-hold's
 ``hold_action`` run in place of the press only as an object with something in
-it (``alternate_action``); anything else runs the press itself.
+it (``alternate_action``); anything else runs the press itself. The page walk
+(pages.py), the macro marks (watch_keys.py) and the config check read any
+object there, an empty one included, which none of them can tell apart.
 """
 
 # The action types a deck runs, in the order the config check lists them.

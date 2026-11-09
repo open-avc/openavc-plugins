@@ -65,6 +65,7 @@ from .deck_profile import (
     deck_identity,
     is_touch_key,
     key_total,
+    lcd_key_indexes,
     tell_link_serial,
     touch_key_indexes,
 )
@@ -872,8 +873,9 @@ class StreamDeckPlugin:
     @staticmethod
     def _deck_facts(session, own):
         """What a deck says about itself, in the order it is published:
-        connected, its model, the ``own`` (key, value) pairs, its geometry,
-        then the page showing. Each value is read as it is reached."""
+        connected, its model, the ``own`` (key, value) pairs the caller has
+        read, its geometry, then the page showing; the model, the geometry
+        and the page are read as each is reached."""
         yield "connected", True
         yield "model", session.model
         yield from own
@@ -1474,7 +1476,7 @@ class StreamDeckPlugin:
         self._paste_label(
             canvas, overlay_keys_slot(text, (rows, cols), (key_w, key_h)), "#ffffff"
         )
-        for index in range(deck.key_count()):
+        for index in lcd_key_indexes(deck):
             row, col = divmod(index, cols)
             tile = canvas.crop(
                 (col * key_w, row * key_h, (col + 1) * key_w, (row + 1) * key_h)
@@ -2437,17 +2439,17 @@ class StreamDeckPlugin:
         if session.overlay_active:
             return  # a show_message overlay owns the display right now
 
-        is_touch_key = self._is_touch_key(session, key_index)
+        touch_key = self._is_touch_key(session, key_index)
         assignment = self._get_button_assignment(
             session, session.current_page, key_index
         )
         # Touch keys have no LCD: an unassigned one just goes dark.
-        if is_touch_key and not assignment:
+        if touch_key and not assignment:
             self._apply_key_color(session, key_index, "#000000")
             return
         # Hidden by visible_when: a blank black key, nothing else.
         if assignment and not await self._is_button_visible(assignment):
-            self._blank_key(session, key_index, is_touch_key)
+            self._blank_key(session, key_index, touch_key)
             return
 
         look = await self._key_look(session, assignment)
@@ -2455,7 +2457,7 @@ class StreamDeckPlugin:
         nav_active = self._navigates_here(session, assignment)
         held = key_index in session.pressed_keys
 
-        if is_touch_key:
+        if touch_key:
             color = self._touch_key_color(look.bg_color, macro_mark, nav_active, held)
             self._apply_key_color(session, key_index, color)
             return
@@ -3091,7 +3093,7 @@ class StreamDeckPlugin:
         self.api.log(
             f"Identifying Stream Deck {session.serial} (flashing all buttons)"
         )
-        key_count = deck.key_count()
+        lcd_keys = lcd_key_indexes(deck)
         touch_keys = touch_key_indexes(deck)
 
         # Flash white
@@ -3100,14 +3102,14 @@ class StreamDeckPlugin:
 
         for flash in range(3):
             with deck:
-                for k in range(key_count):
+                for k in lcd_keys:
                     deck.set_key_image(k, native_white)
             for k in touch_keys:
                 self._apply_key_color(session, k, "#ffffff")
             await asyncio.sleep(0.3)
 
             with deck:
-                for k in range(key_count):
+                for k in lcd_keys:
                     deck.set_key_image(k, b"\x00" * len(native_white))
             for k in touch_keys:
                 self._apply_key_color(session, k, "#000000")

@@ -13,8 +13,10 @@ Two rules worth knowing before changing this:
 - The info screen is idle unless its config names something to draw: an
   ``items`` entry that is an object, or one of ``_INFO_CONTENT_FIELDS``. A
   ``source`` of "clock" or "blank" wins over both. The touch strip is idle
-  unless it declares a zone or a dial is worth a zone (dials.shows_on_strip),
-  and only ``touchscreen.idle: "blank"`` keeps an idle strip blank.
+  unless it declares a zone or a dial is worth a zone (dials.shows_on_strip).
+  Either screen, when idle, shows the idle word its config names
+  (``touchscreen.idle``, the info screen's ``source``) if it is one of
+  ``IDLE_MODES``, else the clock.
 - ``info_items`` reads a config the same way whether or not the screen is idle,
   so a deck watches the keys an idle screen's config names (watch_keys.py).
 """
@@ -41,8 +43,8 @@ def strip_idle_mode(cfg):
     if declared_zones(cfg) or any(map(shows_on_strip, objects(cfg.get("dials", [])))):
         return None
     ts = cfg.get("touchscreen", {})
-    ts = ts if isinstance(ts, dict) else {}
-    return BLANK if ts.get("idle") == BLANK else CLOCK
+    idle = ts.get("idle") if isinstance(ts, dict) else None
+    return idle if idle in IDLE_MODES else CLOCK
 
 
 def info_idle_mode(info):
