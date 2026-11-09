@@ -10,6 +10,18 @@ Usage:
     python validate.py integrations/mqtt              # Validate specific plugin(s)
     python validate.py --check-index                  # Also validate index.json
     python validate.py --verbose                      # Show passing checks too
+
+A plugin folder is reported in this order: its *_plugin.py (PLUGIN_INFO, what
+its text shows, then CONFIG_SCHEMA, CONFIG_SECRETS, EXTENSIONS and
+validate_config), its plugin.json as a manifest and against PLUGIN_INFO, its
+README, and its category against its folder. The module is read, never
+imported (PluginSource), so a plugin's dependencies need not be installed.
+
+The tables below copy OpenAVC's own plugin rules, because this runs without
+OpenAVC installed; each names the OpenAVC module holding the original.
+tests/test_validate_matches_platform.py compares them with an OpenAVC checkout
+beside this repository. This repository's CI does not run pytest, so that
+comparison runs wherever the tests are run by hand.
 """
 
 import argparse
@@ -19,8 +31,10 @@ import re
 import sys
 from pathlib import Path
 
+# openavc/core/plugin_manifest.py: REQUIRED_MANIFEST_FIELDS
 REQUIRED_MANIFEST_FIELDS = {"id", "name", "version", "author", "description", "category", "license"}
 
+# openavc/core/plugin_manifest.py: VALID_CAPABILITIES
 VALID_CAPABILITIES = {
     "state_read", "state_write", "variable_write",
     "event_emit", "event_subscribe",
@@ -28,18 +42,51 @@ VALID_CAPABILITIES = {
     "http_endpoints", "guest_endpoints",
 }
 
+# openavc/core/plugin_manifest.py: VALID_CATEGORIES
 VALID_CATEGORIES = {"control_surface", "integration", "sensor", "utility"}
 
+# openavc/core/plugin_manifest.py: MIT_COMPATIBLE_LICENSES
 MIT_COMPATIBLE_LICENSES = {
     "mit", "bsd-2-clause", "bsd-3-clause", "apache-2.0", "isc",
     "psf", "unlicense", "0bsd", "cc0-1.0",
 }
 
+# Top-level path segments a guest_alias may not shadow, and the shape the whole
+# alias must have. openavc/core/plugin_manifest.py: RESERVED_GUEST_ALIASES and
+# GUEST_ALIAS_RE.
+RESERVED_GUEST_ALIASES = {
+    "api", "panel", "programmer", "pair", "setup", "ws", "isc",
+    "docs", "redoc", "openapi.json", "assets", "themes", "health",
+    "favicon.ico", "static", "simulator",
+}
+GUEST_ALIAS_PATTERN = r"[a-z][a-z0-9_-]{0,31}"
+
+# The EXTENSIONS types the panel and the Programmer understand, and the field
+# that identifies an entry within each type (panel_elements are keyed by
+# `type`, every other type by `id`). openavc/core/plugin_extensions.py:
+# EXTENSION_ID_FIELD.
+EXTENSION_ID_FIELD = {
+    "views": "id",
+    "device_panels": "id",
+    "status_cards": "id",
+    "context_actions": "id",
+    "panel_elements": "type",
+}
+VALID_EXTENSION_TYPES = set(EXTENSION_ID_FIELD)
+
+# The keys a CONFIG_SECRETS entry may have. openavc/core/plugin_secrets.py:
+# _LIST_DECLARATION_KEYS
+_CONFIG_SECRETS_KEYS = {"id", "fields", "generated"}
+
+# The two tables below have no OpenAVC table to compare with, so they are
+# checked by eye. The settings field types the Programmer's plugin settings
+# form draws:
 VALID_CONFIG_TYPES = {
     "string", "text", "integer", "float", "boolean", "select", "color",
     "state_key", "macro_ref", "device_ref", "command_ref", "group", "mapping_list",
 }
 
+# "all", and the ids get_platform_id() in openavc/core/plugin_loader.py returns:
 VALID_PLATFORMS = {"all", "win_x64", "linux_x64", "linux_arm64"}
 
 # The list fields a manifest may carry: the field, what one value is called in
@@ -48,31 +95,6 @@ _LISTED_FIELDS = (
     ("capabilities", "capability", VALID_CAPABILITIES),
     ("platforms", "platform", VALID_PLATFORMS),
 )
-
-# Top-level path segments a guest_alias may not shadow. Mirrors
-# openavc/core/plugin_loader.py RESERVED_GUEST_ALIASES.
-RESERVED_GUEST_ALIASES = {
-    "api", "panel", "programmer", "pair", "setup", "ws", "isc",
-    "docs", "redoc", "openapi.json", "assets", "themes", "health",
-    "favicon.ico", "static", "simulator",
-}
-
-# What a guest_alias must look like, the whole of it: one lowercase URL segment.
-GUEST_ALIAS_PATTERN = r"[a-z][a-z0-9_-]{0,31}"
-
-# EXTENSIONS types the panel/IDE understand, and the field that uniquely
-# identifies an entry within each type (panel_elements are keyed by `type`,
-# every other type by `id`). Mirrors openavc/core/plugin_loader.py.
-VALID_EXTENSION_TYPES = {
-    "views", "device_panels", "status_cards", "context_actions", "panel_elements",
-}
-EXTENSION_ID_FIELD = {
-    "views": "id",
-    "device_panels": "id",
-    "status_cards": "id",
-    "context_actions": "id",
-    "panel_elements": "type",
-}
 
 # The folder each category's plugins live in, in the order they are checked.
 CATEGORY_DIRS = {
@@ -108,8 +130,9 @@ def is_safe_requirement(req):
     ('--index-url=...'), a 'git+'/URL install, or a 'name @ url' reference
     could run install-time code from an attacker-chosen index/repo. Flag them
     here so contributors learn at PR time. Extras ('pkg[extra]'), version
-    specifiers, and environment markers are allowed. Mirrors
-    openavc/core/plugin_installer.py:_is_safe_requirement.
+    specifiers, and environment markers are allowed. A copy of
+    openavc/core/plugin_wheels.py's _is_safe_requirement (and _VCS_PREFIXES),
+    kept line for line with it so the two can be compared.
     """
     s = str(req).strip()
     if not s or s[0] in "-./\\":
@@ -121,6 +144,9 @@ def is_safe_requirement(req):
 
 
 class ValidationResult:
+    """One plugin folder's (or index.json's) errors and warnings, in the order
+    found. It passes when it has no errors."""
+
     def __init__(self, plugin_path):
         self.plugin_path = plugin_path
         self.errors = []
@@ -513,9 +539,6 @@ _TYPE_CHECKS = {
 }
 
 
-_CONFIG_SECRETS_KEYS = {"id", "fields", "generated"}
-
-
 def validate_config_secrets(config_secrets, config_schema, result):
     """Validate a CONFIG_SECRETS dict: the config lists whose items hold a
     login, keyed by the list's config key."""
@@ -528,8 +551,7 @@ def validate_config_secrets(config_secrets, config_schema, result):
 
 
 def _check_secret_list(list_key, entry, schema_keys, result):
-    """One declared list: its config key, then its entry's keys, id, fields
-    and generated flag."""
+    """One declared list: its config key, then its entry."""
     where = f"CONFIG_SECRETS['{list_key}']"
     if not isinstance(list_key, str) or not list_key:
         result.error(f"CONFIG_SECRETS has a key that is not a non-empty string: {list_key!r}")
@@ -539,6 +561,12 @@ def _check_secret_list(list_key, entry, schema_keys, result):
             f"{where}: '{list_key}' is also a CONFIG_SCHEMA field. Mark a schema field "
             "with 'secret': True instead."
         )
+    _check_secret_entry(entry, where, result)
+
+
+def _check_secret_entry(entry, where, result):
+    """A list's declaration: a dict of known keys, with the id key, the login
+    fields and, optionally, whether the plugin makes the logins itself."""
     if not isinstance(entry, dict):
         result.error(f"{where} must be a dict with 'id' and 'fields'")
         return
@@ -574,7 +602,7 @@ def _is_name(value):
 
 
 def validate_extensions_schema(extensions, result):
-    """Validate an EXTENSIONS dict (mirrors the runtime plugin loader).
+    """Validate an EXTENSIONS dict (the rules of openavc/core/plugin_extensions.py).
 
     Each type must be a known key holding a list of dicts, and every entry needs
     its identifier field (``id``, or ``type`` for panel_elements) unique within
@@ -968,18 +996,27 @@ def _relative(path, repo_root):
 
 
 def _print_result(result, rel_path, verbose):
-    """A failed result's FAIL line and errors; a passed one's PASS line only
-    when verbose. Then its warnings; a passed result's each get a WARN line
-    above them when not verbose."""
-    if result.passed:
-        if verbose:
-            print(f"  PASS  {rel_path}")
-    else:
+    _print_outcome(result, rel_path, verbose)
+    _print_warnings(result, rel_path, verbose)
+
+
+def _print_outcome(result, rel_path, verbose):
+    """A failed result's FAIL line and its errors; a passed one's PASS line,
+    only when verbose."""
+    if not result.passed:
         print(f"  FAIL  {rel_path}")
         for err in result.errors:
             print(f"        ERROR: {err}")
+    elif verbose:
+        print(f"  PASS  {rel_path}")
+
+
+def _print_warnings(result, rel_path, verbose):
+    """Each warning. A passed result printed no line of its own when not
+    verbose, so each of its warnings gets a WARN line naming the plugin."""
+    headed = result.passed and not verbose
     for warn in result.warnings:
-        if result.passed and not verbose:
+        if headed:
             print(f"  WARN  {rel_path}")
         print(f"        WARNING: {warn}")
 

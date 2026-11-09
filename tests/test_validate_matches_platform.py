@@ -49,6 +49,10 @@ def test_manifest_tables(name):
     assert getattr(validate, name) == getattr(plugin_manifest, name)
 
 
+def test_guest_alias_pattern():
+    assert validate.GUEST_ALIAS_PATTERN == plugin_manifest.GUEST_ALIAS_RE.pattern
+
+
 def test_extension_types_and_their_id_field():
     assert validate.EXTENSION_ID_FIELD == plugin_extensions.EXTENSION_ID_FIELD
     assert validate.VALID_EXTENSION_TYPES == plugin_extensions.VALID_EXTENSION_TYPES
