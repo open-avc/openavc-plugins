@@ -33,10 +33,21 @@ from .key_entries import (
     action_list,
     assignment_for,
     global_buttons,
+    objects,
     press_actions,
     unwrap_binding,
 )
 from .deck_classes import net_deck_class
+from .dials import (
+    declared_zones,
+    dial_entry,
+    lay_out_zones,
+    live_adjust,
+    push_deferred,
+    release_actions,
+    shows_on_strip,
+    turn_route,
+)
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
 from .watch_keys import deck_watch, keys_watching, zone_watches_key
@@ -1778,33 +1789,6 @@ class StreamDeckPlugin:
 
     # ──── Dials (decks with rotary encoders) ────
 
-    def _get_dial_config(self, session, index):
-        """Look up the dial config entry for a dial index."""
-        dials = self._deck_config(session).get("dials", [])
-        if not isinstance(dials, list):
-            return None
-        for dial in dials:
-            if isinstance(dial, dict) and dial.get("index") == index:
-                return dial
-        return None
-
-    @classmethod
-    def _dial_push_deferred(cls, cfg):
-        """True when a dial's push must wait for the release.
-
-        Configuring ``long_press`` or any ``pressed_*`` (push-and-turn)
-        field defers the click to the release so the gesture can be told
-        apart; a plain ``press``-only dial keeps firing on push-down.
-        """
-        if not cfg:
-            return False
-        return bool(
-            action_list(cfg.get("long_press"))
-            or isinstance(cfg.get("pressed_adjust"), dict)
-            or action_list(cfg.get("pressed_cw"))
-            or action_list(cfg.get("pressed_ccw"))
-        )
-
     async def _execute_per_detent(self, session, actions, detents, source):
         """Run a turn's action list once per detent moved (capped at 8 per
         event) so a command-per-click mapping tracks fast spins."""
@@ -1815,14 +1799,12 @@ class StreamDeckPlugin:
             await self._execute_actions(session, turn, source)
 
     async def _on_dial_event(self, session, deck, dial, event, value):
-        """Handle a dial turn or push.
+        """Handle a dial turn or push (dials.py says what each one runs).
 
-        Push semantics: a ``press``-only dial fires on push-down (snappy).
-        With ``long_press`` or push-and-turn (``pressed_adjust`` /
-        ``pressed_cw`` / ``pressed_ccw``) configured, the click defers to
-        the release — a quick release fires ``press``, a held release fires
-        ``long_press``, and a push during which the dial turned fires
-        neither (it was a grip, not a click).
+        A ``press``-only dial fires on the push. One with a ``long_press`` or
+        a push-and-turn binding waits for the release: a quick release runs
+        ``press``, a held one ``long_press``, and a push during which the dial
+        turned runs neither (it was a grip, not a click).
 
         Event kinds are matched by enum name (``TURN``/``PUSH``) so this
         module never needs the StreamDeck enums at import time (they only
@@ -1833,83 +1815,59 @@ class StreamDeckPlugin:
             await self._clear_overlay(session)
             return  # the input that dismisses an overlay never fires actions
         kind = getattr(event, "name", None)
-        if kind == "TURN" or (kind == "PUSH" and value):
-            await self._publish_input_echo(session, "dial", dial)
-        cfg = self._get_dial_config(session, dial)
-
+        entry = dial_entry(self._deck_config(session), dial)
         if kind == "PUSH":
-            deferred = self._dial_push_deferred(cfg)
-            if value:
-                await self.api.event_emit(
-                    "dial.press", {"dial": dial, "serial": session.serial}
-                )
-                if not deferred:
-                    if cfg:
-                        await self._execute_actions(
-                            session, action_list(cfg.get("press")),
-                            f"dial {dial}",
-                        )
-                    return
-                session.dial_press_times[dial] = asyncio.get_running_loop().time()
-                session.dial_turned.discard(dial)
-                return
-            # Release
-            press_time = session.dial_press_times.pop(dial, None)
-            turned = dial in session.dial_turned
-            session.dial_turned.discard(dial)
-            if press_time is None or not deferred:
-                return
-            if turned:
-                return  # push-and-turn was a grip, not a click
-            held = asyncio.get_running_loop().time() - press_time
-            threshold = coerce_numeric(cfg.get("hold_threshold_ms"))
-            threshold = (threshold if threshold and threshold > 0 else 500) / 1000.0
-            long_actions = action_list(cfg.get("long_press"))
-            if held >= threshold and long_actions:
-                await self._execute_actions(session, long_actions, f"dial {dial}")
-            else:
-                await self._execute_actions(
-                    session, action_list(cfg.get("press")), f"dial {dial}"
-                )
-            return
+            handler = self._dial_pushed if value else self._dial_released
+            await handler(session, dial, entry)
+        elif kind == "TURN":
+            await self._dial_turned(session, dial, entry, value)
 
-        if kind == "TURN":
-            try:
-                detents = int(value)
-            except (TypeError, ValueError):
-                return
-            if detents == 0:
-                return
-            await self.api.event_emit(
-                "dial.turn",
-                {"dial": dial, "amount": detents, "serial": session.serial},
+    async def _dial_pushed(self, session, dial, entry):
+        """The push: echoed and announced, then ``press`` at once, or the
+        push's start noted for its release."""
+        await self._publish_input_echo(session, "dial", dial)
+        await self.api.event_emit("dial.press", {"dial": dial, "serial": session.serial})
+        if push_deferred(entry):
+            session.dial_press_times[dial] = asyncio.get_running_loop().time()
+            session.dial_turned.discard(dial)
+        elif entry:
+            await self._execute_actions(
+                session, action_list(entry.get("press")), f"dial {dial}"
             )
-            if not cfg:
-                return
-            if dial in session.dial_press_times:
-                # Turning while held: chord. Suppress the click, and route
-                # to the pressed_* config when any is set (fine adjust /
-                # alternate function); otherwise the turn acts normally.
-                session.dial_turned.add(dial)
-                pressed_adjust = cfg.get("pressed_adjust")
-                pressed_actions = (
-                    cfg.get("pressed_cw") if detents > 0 else cfg.get("pressed_ccw")
-                )
-                if (
-                    isinstance(pressed_adjust, dict) and pressed_adjust.get("key")
-                ) or action_list(cfg.get("pressed_cw")) \
-                        or action_list(cfg.get("pressed_ccw")):
-                    if isinstance(pressed_adjust, dict) and pressed_adjust.get("key"):
-                        await self._apply_dial_adjust(pressed_adjust, detents)
-                    await self._execute_per_detent(
-                        session, pressed_actions, detents, f"dial {dial}"
-                    )
-                    return
-            adjust = cfg.get("adjust")
-            if isinstance(adjust, dict) and adjust.get("key"):
-                await self._apply_dial_adjust(adjust, detents)
-            actions = cfg.get("cw") if detents > 0 else cfg.get("ccw")
-            await self._execute_per_detent(session, actions, detents, f"dial {dial}")
+
+    async def _dial_released(self, session, dial, entry):
+        """The release of a deferred push that did not turn: its click."""
+        press_time = session.dial_press_times.pop(dial, None)
+        turned = dial in session.dial_turned
+        session.dial_turned.discard(dial)
+        if press_time is None or not push_deferred(entry) or turned:
+            return
+        held = asyncio.get_running_loop().time() - press_time
+        await self._execute_actions(session, release_actions(entry, held), f"dial {dial}")
+
+    async def _dial_turned(self, session, dial, entry, value):
+        """A turn of ``value`` detents: echoed whatever the value, announced,
+        then its adjust and its turn binding, once per detent. A turn while
+        held marks the push a grip."""
+        await self._publish_input_echo(session, "dial", dial)
+        try:
+            detents = int(value)
+        except (TypeError, ValueError):
+            return
+        if detents == 0:
+            return
+        await self.api.event_emit(
+            "dial.turn", {"dial": dial, "amount": detents, "serial": session.serial}
+        )
+        if not entry:
+            return
+        held = dial in session.dial_press_times
+        if held:
+            session.dial_turned.add(dial)
+        adjust, actions = turn_route(entry, detents, held)
+        if adjust:
+            await self._apply_dial_adjust(adjust, detents)
+        await self._execute_per_detent(session, actions, detents, f"dial {dial}")
 
     async def _apply_dial_adjust(self, adjust, detents):
         """Increment a numeric state value by ``step * detents``, clamped.
@@ -1942,64 +1900,17 @@ class StreamDeckPlugin:
     # ──── Touchscreen strip (decks with a touch strip) ────
 
     def _touch_zones(self, session):
-        """Return the effective touchscreen zones with resolved pixel bounds.
-
-        Explicit ``touchscreen.zones`` config wins; zones missing ``x``/``w``
-        are laid out by splitting the strip evenly. With no zones configured,
-        one zone is created per dial (aligned under it) showing the dial's
-        label and its adjust value — so a configured dial gets a live readout
-        with zero extra config.
-        """
+        """The strip's zones with their pixel bounds (dials.lay_out_zones):
+        the declared ``touchscreen.zones``, else one under each dial that
+        shows its label and adjust value, so a configured dial gets a live
+        readout with no more config."""
         if not session.deck:
             return []
         try:
             width = session.deck.touchscreen_image_format()["size"][0]
         except Exception:
             width = 800
-
-        ts = self._deck_config(session).get("touchscreen", {})
-        zones = ts.get("zones") if isinstance(ts, dict) else None
-        zones = [z for z in zones if isinstance(z, dict)] if isinstance(zones, list) else []
-
-        if not zones:
-            for i in range(session.deck.dial_count()):
-                cfg = self._get_dial_config(session, i) or {}
-                adjust = cfg.get("adjust")
-                adjust = adjust if isinstance(adjust, dict) else {}
-                drag = None
-                if adjust.get("key"):
-                    drag = dict(adjust)
-                    if cfg.get("fader"):
-                        drag["fader"] = True
-                zones.append({
-                    "label": cfg.get("label", ""),
-                    "icon": cfg.get("icon"),
-                    "unit": cfg.get("unit"),
-                    "meter": cfg.get("meter"),
-                    "value_source": adjust.get("key", ""),
-                    # The zone is the dial's touch surface: tapping it presses
-                    # the dial unless the dial declares its own touch actions.
-                    "touch": cfg.get("touch") if cfg.get("touch") is not None
-                    else cfg.get("press"),
-                    "long_touch": cfg.get("long_touch")
-                    if cfg.get("long_touch") is not None
-                    else cfg.get("long_press"),
-                    # Swiping under a dial does what turning it does.
-                    "drag_adjust": drag,
-                })
-
-        if not zones:
-            return []
-
-        slot = width // len(zones)
-        resolved = []
-        for i, zone in enumerate(zones):
-            x = zone.get("x")
-            w = zone.get("w")
-            x = int(x) if isinstance(x, (int, float)) else i * slot
-            w = int(w) if isinstance(w, (int, float)) else slot
-            resolved.append({**zone, "x": x, "w": w, "index": i})
-        return resolved
+        return lay_out_zones(self._deck_config(session), session.deck.dial_count(), width)
 
     def _zone_at(self, session, x):
         """Return the touchscreen zone containing pixel ``x``, or None."""
@@ -2072,61 +1983,55 @@ class StreamDeckPlugin:
             await self._clear_overlay(session)
             return  # the input that dismisses an overlay never fires actions
         kind = getattr(event, "name", None)
-        if kind in ("SHORT", "LONG", "DRAG") and isinstance(value, dict):
-            touch_x = value.get("x")
-            if isinstance(touch_x, (int, float)):
-                await self._publish_input_echo(session, "touch", int(touch_x))
-
+        if kind not in ("SHORT", "LONG", "DRAG") or not isinstance(value, dict):
+            return
+        touch_x = value.get("x")
+        if isinstance(touch_x, (int, float)):
+            await self._publish_input_echo(session, "touch", int(touch_x))
         if kind == "DRAG":
-            if not isinstance(value, dict):
-                return
-            x = value.get("x")
-            x_out = value.get("x_out")
-            if not isinstance(x, (int, float)) or not isinstance(x_out, (int, float)):
-                return
-            zone = self._zone_at(session, int(x))
-            if zone:
-                await self._flash_touch_zone(session, zone["index"])
-            drag = zone.get("drag_adjust") if zone else None
-            if isinstance(drag, dict) and drag.get("key"):
-                applied = False
-                if drag.get("fader"):
-                    # Fader zones: the swipe end position sets the value.
-                    applied = await self._apply_touch_fader(drag, zone, int(x_out))
-                if not applied:
-                    detents = int((x_out - x) / 8)  # truncate toward zero
-                    if detents:
-                        await self._apply_dial_adjust(drag, detents)
-            return
+            await self._touch_dragged(session, value)
+        elif isinstance(touch_x, (int, float)):
+            await self._touch_tapped(session, kind, int(touch_x))
 
-        if kind not in ("SHORT", "LONG"):
+    async def _touch_dragged(self, session, value):
+        """A swipe from ``x`` to ``x_out``: the zone it starts in flashes and
+        its live ``drag_adjust`` moves, set from where the swipe ends on a
+        fader zone, else one step per 8 px of travel."""
+        x = value.get("x")
+        x_out = value.get("x_out")
+        if not isinstance(x, (int, float)) or not isinstance(x_out, (int, float)):
             return
-        x = value.get("x") if isinstance(value, dict) else None
-        if not isinstance(x, (int, float)):
-            return
-        await self.api.event_emit(
-            "touchscreen.touch", {"x": int(x), "serial": session.serial}
-        )
         zone = self._zone_at(session, int(x))
-        if zone:
-            await self._flash_touch_zone(session, zone["index"])
-            drag = zone.get("drag_adjust")
-            if (
-                kind == "SHORT"
-                and isinstance(drag, dict)
-                and drag.get("key")
-                and drag.get("fader")
-            ):
-                # Fader zones: a tap jumps the value to the tapped position
-                # (replaces the tap action for this zone).
-                if await self._apply_touch_fader(drag, zone, int(x)):
-                    return
-            actions = zone.get("long_touch") if kind == "LONG" else None
-            if not actions:
-                actions = zone.get("touch")
-            await self._execute_actions(
-                session, action_list(actions), "touchscreen"
-            )
+        if zone is None:
+            return
+        await self._flash_touch_zone(session, zone["index"])
+        drag = live_adjust(zone.get("drag_adjust"))
+        if drag is None:
+            return
+        if drag.get("fader") and await self._apply_touch_fader(drag, zone, int(x_out)):
+            return
+        detents = int((x_out - x) / 8)  # truncate toward zero
+        if detents:
+            await self._apply_dial_adjust(drag, detents)
+
+    async def _touch_tapped(self, session, kind, x):
+        """A tap (SHORT) or long touch (LONG) at ``x``: announced, then the
+        zone there flashes and runs ``long_touch`` (LONG, when it has one) or
+        ``touch``. A tap on a fader zone sets its value from the touch
+        position instead."""
+        await self.api.event_emit("touchscreen.touch", {"x": x, "serial": session.serial})
+        zone = self._zone_at(session, x)
+        if zone is None:
+            return
+        await self._flash_touch_zone(session, zone["index"])
+        drag = live_adjust(zone.get("drag_adjust"))
+        if kind == "SHORT" and drag and drag.get("fader"):
+            if await self._apply_touch_fader(drag, zone, x):
+                return
+        actions = zone.get("long_touch") if kind == "LONG" else None
+        if not actions:
+            actions = zone.get("touch")
+        await self._execute_actions(session, action_list(actions), "touchscreen")
 
     # ──── Display elements (shared by zones, info items, and keys) ────
 
@@ -2380,24 +2285,12 @@ class StreamDeckPlugin:
 
     def _strip_idle_mode(self, session):
         """``"clock"``/``"blank"`` when nothing is configured for the touch
-        strip (no custom zones, no dial worth a readout), else None."""
+        strip (no declared zones, no dial worth a zone), else None."""
         cfg = self._deck_config(session)
+        if declared_zones(cfg) or any(map(shows_on_strip, objects(cfg.get("dials", [])))):
+            return None
         ts = cfg.get("touchscreen", {})
         ts = ts if isinstance(ts, dict) else {}
-        zones = ts.get("zones")
-        if isinstance(zones, list) and any(isinstance(z, dict) for z in zones):
-            return None
-        dials = cfg.get("dials", [])
-        if isinstance(dials, list):
-            for dial in dials:
-                if isinstance(dial, dict) and any(
-                    dial.get(field) for field in (
-                        "label", "icon", "adjust", "press", "long_press",
-                        "cw", "ccw", "touch", "long_touch",
-                        "pressed_adjust", "pressed_cw", "pressed_ccw",
-                    )
-                ):
-                    return None
         return "blank" if ts.get("idle") == "blank" else "clock"
 
     def _info_idle_mode(self, session):

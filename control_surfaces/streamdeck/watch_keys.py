@@ -25,6 +25,7 @@ Two rules worth knowing before changing this:
 from dataclasses import dataclass
 
 from .conditions import condition_state_keys
+from .dials import declared_zones, live_adjust
 from .key_entries import (
     entries_on_page,
     global_buttons,
@@ -117,23 +118,16 @@ def _rule_keys(rules):
     return keys
 
 
-def _dial_adjust_key(dial):
-    adjust = dial.get("adjust")
-    if isinstance(adjust, dict) and adjust.get("key"):
-        return [adjust["key"]]
-    return []
-
-
 def _strip_keys(cfg):
-    """The touch strip's keys: each explicit zone's display keys, and every
-    dial's adjust key (the default zones show those values)."""
-    touchscreen = cfg.get("touchscreen", {})
-    zones = touchscreen.get("zones") if isinstance(touchscreen, dict) else None
+    """The touch strip's keys: each declared zone's display keys, and every
+    dial's live adjust key (the zones under the dials show those values)."""
     keys = set()
-    for zone in objects(zones):
+    for zone in declared_zones(cfg):
         keys.update(_display_keys(zone))
     for dial in objects(cfg.get("dials", [])):
-        keys.update(_dial_adjust_key(dial))
+        adjust = live_adjust(dial.get("adjust"))
+        if adjust is not None:
+            keys.add(adjust["key"])
     return keys
 
 
