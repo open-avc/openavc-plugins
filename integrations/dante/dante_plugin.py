@@ -12,9 +12,10 @@ import asyncio
 import logging
 
 try:
-    from . import channel_keys
+    from . import channel_keys, routing
 except ImportError:  # loaded by a loader that is not a package one
     import channel_keys
+    import routing
 
 logger = logging.getLogger(__name__)
 
@@ -324,8 +325,7 @@ class DanteDDMPlugin:
         await api.state_set("domain_name", "")
         await api.state_set("device_count", 0)
         await api.state_set("subscription_count", 0)
-        await api.state_set("active_preset", "")
-        await api.state_set("preset_dirty", False)
+        await self._show_preset("")
 
         # Subscribe to context actions and programmatic route events
         await api.event_subscribe("plugin.dante.action.*", self._on_action)
@@ -707,7 +707,7 @@ class DanteDDMPlugin:
                 f"Routed {tx_device_name}/{tx_channel_name} -> "
                 f"{rx_device_name}/{rx_channel_index}"
             )
-            await self.api.state_set("preset_dirty", True)
+            await self._set_preset_dirty(True)
         else:
             await self.api.event_emit(
                 "route.failed",
@@ -756,42 +756,38 @@ class DanteDDMPlugin:
             self.api.log(
                 f"Unrouted {rx_device_name}/{rx_channel_index}"
             )
-            await self.api.state_set("preset_dirty", True)
+            await self._set_preset_dirty(True)
 
         return success
 
-    # ──── Preset Management ────
+    # ──── Presets ────
+    #
+    # Which preset is showing: active_preset names the preset the routing was
+    # last recalled from or saved as ("" for none), and preset_dirty turns true
+    # when a route changes after that. The matrix toolbar shows both.
+
+    async def _show_preset(self, name: str):
+        """Show this preset ("" for none) as the routing in force, unchanged."""
+        await self.api.state_set("active_preset", name)
+        await self._set_preset_dirty(False)
+
+    async def _set_preset_dirty(self, dirty: bool):
+        await self.api.state_set("preset_dirty", dirty)
 
     def _snapshot_current_routes(self) -> list[dict]:
-        """Capture all active subscriptions as a list of route dicts."""
-        routes = []
-        for device in self._devices.values():
-            for ch in device.get("rxChannels") or []:
-                sub_device = ch.get("subscribedDevice") or ""
-                sub_channel = ch.get("subscribedChannel") or ""
-                if sub_device:
-                    routes.append({
-                        "tx_device": sub_device,
-                        "tx_channel": sub_channel,
-                        "rx_device": device["name"],
-                        "rx_channel_index": ch["index"],
-                    })
-        return routes
-
-    # ──── Preset Recall ────
+        """The domain's routes now, as a preset holds them."""
+        return routing.snapshot(self._devices.values())
 
     def _parse_presets(self) -> dict[str, list[dict]]:
-        """Read presets from the managed _presets config key."""
-        presets = self.api.config.get("_presets", {})
-        if not isinstance(presets, dict):
-            return {}
-        return presets
+        """The presets saved in the config, by name."""
+        return routing.stored_presets(self.api.config)
 
     async def recall_preset(self, preset_name: str) -> bool:
         """Apply a named routing preset.
 
-        Clears all existing subscriptions first, then applies the preset routes.
-        This ensures the routing table matches the preset exactly.
+        Clears all existing subscriptions first, then applies the preset's
+        routes, so the routing matches the preset exactly. A preset with no
+        routes only clears, and is not shown as the preset in force.
         """
         presets = self._parse_presets()
         if preset_name not in presets:
@@ -800,7 +796,6 @@ class DanteDDMPlugin:
 
         routes = presets[preset_name]
 
-        # Always clear existing subscriptions first
         clear_ok = await self._clear_all_subscriptions()
         if not clear_ok:
             self.api.log(
@@ -809,23 +804,31 @@ class DanteDDMPlugin:
             )
 
         if not routes:
-            # Empty preset = clear only (already done)
             await self.api.event_emit(
                 "preset.recalled", {"preset_name": preset_name}
             )
             self.api.log(f"Recalled preset: {preset_name} (cleared all)")
             return clear_ok
 
-        # Group routes by Rx device for batch mutations
-        by_rx_device: dict[str, list[dict]] = {}
-        for r in routes:
-            rx_name = r.get("rx_device", "")
-            if rx_name not in by_rx_device:
-                by_rx_device[rx_name] = []
-            by_rx_device[rx_name].append(r)
+        if await self._send_preset_routes(routes):
+            await self.api.event_emit(
+                "preset.recalled", {"preset_name": preset_name}
+            )
+            await self._show_preset(preset_name)
+            self.api.log(f"Recalled preset: {preset_name}")
+            return True
 
+        await self.api.event_emit(
+            "route.failed",
+            {"reason": "preset_partial_failure", "preset_name": preset_name},
+        )
+        return False
+
+    async def _send_preset_routes(self, routes: list[dict]) -> bool:
+        """Send each receiving device its preset routes in one request. False
+        when a device is not in the domain or refuses; the rest are still sent."""
         all_ok = True
-        for rx_name, device_routes in by_rx_device.items():
+        for rx_name, device_routes in routing.by_receiver(routes).items():
             rx_device = self._find_device_by_name(rx_name)
             if not rx_device:
                 self.api.log(
@@ -834,66 +837,74 @@ class DanteDDMPlugin:
                 all_ok = False
                 continue
 
-            subs = []
-            for r in device_routes:
-                rx_idx = r.get("rx_channel_index", 0)
-                subs.append({
-                    "rxChannelIndex": int(rx_idx) if rx_idx else 0,
-                    "subscribedDevice": r.get("tx_device", ""),
-                    "subscribedChannel": r.get("tx_channel", ""),
-                })
-
-            ok = await self._set_subscriptions_batch(rx_device["id"], subs)
-            if not ok:
+            subs = routing.subscriptions(device_routes)
+            if not await self._set_subscriptions_batch(rx_device["id"], subs):
                 self.api.log(
                     f"Preset: Failed to set routes on {rx_name}",
                     level="error",
                 )
                 all_ok = False
-
-        if all_ok:
-            await self.api.event_emit(
-                "preset.recalled", {"preset_name": preset_name}
-            )
-            await self.api.state_set("active_preset", preset_name)
-            await self.api.state_set("preset_dirty", False)
-            self.api.log(f"Recalled preset: {preset_name}")
-        else:
-            await self.api.event_emit(
-                "route.failed",
-                {"reason": "preset_partial_failure", "preset_name": preset_name},
-            )
-
         return all_ok
 
     async def _clear_all_subscriptions(self) -> bool:
-        """Unsubscribe all Rx channels in the domain."""
+        """Unroute every routed receive channel in the domain, one request per
+        device. When every request succeeds, no preset is shown."""
         all_ok = True
-        for device in self._devices.values():
-            rx_channels = device.get("rxChannels") or []
-            if not rx_channels:
-                continue
-
-            # Only clear channels that have active subscriptions
-            subs = []
-            for ch in rx_channels:
-                if ch.get("subscribedDevice"):
-                    subs.append({
-                        "rxChannelIndex": ch["index"],
-                        "subscribedDevice": "",
-                        "subscribedChannel": "",
-                    })
-
-            if subs:
-                ok = await self._set_subscriptions_batch(device["id"], subs)
-                if not ok:
-                    all_ok = False
+        for device_id, subs in routing.clear_requests(self._devices.values()):
+            if not await self._set_subscriptions_batch(device_id, subs):
+                all_ok = False
 
         if all_ok:
-            await self.api.state_set("active_preset", "")
-            await self.api.state_set("preset_dirty", False)
+            await self._show_preset("")
             self.api.log("Cleared all subscriptions")
         return all_ok
+
+    async def _handle_save_preset(self, payload: dict):
+        """Save the routing now as a new preset, and show it."""
+        name, presets = self._preset_to_edit(payload, "Save", must_exist=False)
+        if presets is None:
+            return
+        routes = self._snapshot_current_routes()
+        presets[name] = routes
+        await self._save_presets(presets)
+        await self._show_preset(name)
+        self.api.log(f"Saved preset: {name} ({len(routes)} routes)")
+
+    async def _handle_update_preset(self, payload: dict):
+        """Replace a preset's routes with the routing now."""
+        name, presets = self._preset_to_edit(payload, "Update", must_exist=True)
+        if presets is None:
+            return
+        routes = self._snapshot_current_routes()
+        presets[name] = routes
+        await self._save_presets(presets)
+        await self._set_preset_dirty(False)
+        self.api.log(f"Updated preset: {name} ({len(routes)} routes)")
+
+    async def _handle_delete_preset(self, payload: dict):
+        """Delete a preset, and show none."""
+        name, presets = self._preset_to_edit(payload, "Delete", must_exist=True)
+        if presets is None:
+            return
+        del presets[name]
+        await self._save_presets(presets)
+        await self._show_preset("")
+        self.api.log(f"Deleted preset: {name}")
+
+    def _preset_to_edit(
+        self, payload: dict, verb: str, must_exist: bool
+    ) -> tuple[str, dict | None]:
+        """The preset a save, update or delete names and a copy of the presets
+        to change; (name, None), the refusal logged, when it cannot be done."""
+        presets = dict(self._parse_presets())
+        name, refusal = routing.checked_name(payload, presets, verb, must_exist)
+        if refusal:
+            self.api.log(refusal, level="error")
+            return name, None
+        return name, presets
+
+    async def _save_presets(self, presets: dict):
+        await self.api.save_config(routing.with_presets(self.api.config, presets))
 
     # ──── Event Handlers ────
 
@@ -943,61 +954,6 @@ class DanteDDMPlugin:
             return
         for d in domains:
             self.api.log(f"Domain: {d['name']} (ID: {d['id']})")
-
-    async def _handle_save_preset(self, payload: dict):
-        """Save current routing state as a new named preset."""
-        name = (payload.get("name") or "").strip()
-        if not name:
-            self.api.log("Save preset: name is required", level="error")
-            return
-        presets = dict(self._parse_presets())
-        if name in presets:
-            self.api.log(f"Preset '{name}' already exists", level="error")
-            return
-        routes = self._snapshot_current_routes()
-        presets[name] = routes
-        config = dict(self.api.config)
-        config["_presets"] = presets
-        await self.api.save_config(config)
-        await self.api.state_set("active_preset", name)
-        await self.api.state_set("preset_dirty", False)
-        self.api.log(f"Saved preset: {name} ({len(routes)} routes)")
-
-    async def _handle_update_preset(self, payload: dict):
-        """Update an existing preset with the current routing state."""
-        name = (payload.get("name") or "").strip()
-        if not name:
-            self.api.log("Update preset: name is required", level="error")
-            return
-        presets = dict(self._parse_presets())
-        if name not in presets:
-            self.api.log(f"Preset '{name}' does not exist", level="error")
-            return
-        routes = self._snapshot_current_routes()
-        presets[name] = routes
-        config = dict(self.api.config)
-        config["_presets"] = presets
-        await self.api.save_config(config)
-        await self.api.state_set("preset_dirty", False)
-        self.api.log(f"Updated preset: {name} ({len(routes)} routes)")
-
-    async def _handle_delete_preset(self, payload: dict):
-        """Delete a saved preset."""
-        name = (payload.get("name") or "").strip()
-        if not name:
-            self.api.log("Delete preset: name is required", level="error")
-            return
-        presets = dict(self._parse_presets())
-        if name not in presets:
-            self.api.log(f"Preset '{name}' does not exist", level="error")
-            return
-        del presets[name]
-        config = dict(self.api.config)
-        config["_presets"] = presets
-        await self.api.save_config(config)
-        await self.api.state_set("active_preset", "")
-        await self.api.state_set("preset_dirty", False)
-        self.api.log(f"Deleted preset: {name}")
 
     async def _handle_route_action(self, payload: dict):
         """Handle a route request from either matrix click or programmatic event.
