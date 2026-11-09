@@ -468,7 +468,7 @@ async def test_a_deck_watches_its_info_elements_keys():
     session = _session(plugin)
     await plugin._setup_feedback_subscriptions(session)
     # The screen fits two items: the third is neither drawn nor watched.
-    assert session.info_strip_keys == {"var.legacy", "var.fb"}
+    assert session.watch.info_strip == {"var.legacy", "var.fb"}
 
 
 @pytest.mark.asyncio
@@ -476,7 +476,7 @@ async def test_an_idle_info_screen_still_watches_the_keys_it_names():
     plugin, _state, _logs = _plugin({"info_strip": {"source": "clock", "key": "var.t"}})
     session = _session(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert session.info_strip_keys == {"var.t"}
+    assert session.watch.info_strip == {"var.t"}
 
 
 @pytest.mark.asyncio
@@ -484,7 +484,7 @@ async def test_no_info_strip_watches_nothing_for_the_screen():
     plugin, _state, _logs = _plugin({})
     session = _session(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert session.info_strip_keys == set()
+    assert session.watch.info_strip == set()
 
 
 # ──── The idle clock's tick ────

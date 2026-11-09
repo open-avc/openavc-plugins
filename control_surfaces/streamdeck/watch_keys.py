@@ -7,7 +7,9 @@ changes, asks the same readers which parts read it: a key entry through
 four named sets for the parts that redraw as a whole (automatic paging, the
 touch strip, the info strip, automatic brightness). A new field a key draws
 from is added to ``button_keys`` alone, and the subscription and the redraw
-follow it.
+follow it. The deck session holds its ``DeckWatch`` as it is (``watch``), so a
+new part of a deck that redraws on its own keys is one set here and its
+reaction in the plugin's ``_on_state_change``.
 
 Two rules worth knowing before changing this:
 
@@ -22,7 +24,7 @@ Two rules worth knowing before changing this:
   locked key (lit on whatever page is showing).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .conditions import condition_state_keys
 from .dials import declared_zones, live_adjust
@@ -44,14 +46,16 @@ _SOURCE_FIELDS = ("label_source", "value_source")
 @dataclass
 class DeckWatch:
     """What one deck's config view reads. ``keys`` is everything to subscribe;
-    the named sets are the keys that redraw that part of the deck."""
+    the named sets are the keys that redraw that part of the deck, and
+    ``macro_keys`` the keys each macro's run marks. Empty until a deck's
+    config has been read."""
 
-    keys: set
-    auto_page: set
-    touch_strip: set
-    info_strip: set
-    brightness: set
-    macro_keys: dict
+    keys: set = field(default_factory=set)
+    auto_page: set = field(default_factory=set)
+    touch_strip: set = field(default_factory=set)
+    info_strip: set = field(default_factory=set)
+    brightness: set = field(default_factory=set)
+    macro_keys: dict = field(default_factory=dict)
 
 
 def _feedback_key(element):

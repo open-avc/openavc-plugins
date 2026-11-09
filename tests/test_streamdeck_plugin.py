@@ -385,7 +385,7 @@ async def test_subscriptions_collect_all_key_sources():
     await plugin._setup_feedback_subscriptions(session)
 
     # Auto-page keys tracked separately
-    assert session.auto_page_keys == {"device.b.power", "device.c.power"}
+    assert session.watch.auto_page == {"device.b.power", "device.c.power"}
 
     # One subscription per unique watched key:
     # feedback, toggle_key, visible_when, second feedback, 2 auto_page keys = 6
@@ -397,7 +397,7 @@ async def test_subscriptions_empty_config():
     plugin, _ = _make_plugin({})
     session = _session_for(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert session.auto_page_keys == set()
+    assert session.watch.auto_page == set()
     assert session.feedback_subs == []
 
 
@@ -1301,7 +1301,7 @@ async def test_zone_feedback_key_watched():
     plugin, _state = _make_plugin(config)
     session = _session_for(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert "device.amp.clip" in session.touch_strip_keys
+    assert "device.amp.clip" in session.watch.touch_strip
 
 
 @pytest.mark.asyncio
@@ -1315,7 +1315,7 @@ async def test_subscriptions_include_touch_strip_keys():
     plugin, _state = _make_plugin(config)
     session = _session_for(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert session.touch_strip_keys == {"var.volume", "var.zone_label", "var.mic_gain"}
+    assert session.watch.touch_strip == {"var.volume", "var.zone_label", "var.mic_gain"}
     assert len(session.feedback_subs) == 3
 
 
@@ -1554,7 +1554,7 @@ async def test_info_items_subscriptions_collected():
     plugin, _state = _make_plugin(config)
     session = _session_for(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert session.info_strip_keys == {"var.temp", "var.room", "var.alert"}
+    assert session.watch.info_strip == {"var.temp", "var.room", "var.alert"}
 
 
 # ──── Neo: touch keys (color-only) + info strip ────
@@ -1770,14 +1770,14 @@ async def test_info_strip_state_key_is_watched():
     plugin, _state = _make_plugin(config)
     session = _session_for(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert session.info_strip_keys == {"var.temp"}
+    assert session.watch.info_strip == {"var.temp"}
     assert len(session.feedback_subs) == 1
 
     # A static-text strip watches nothing.
     plugin2, _s2 = _make_plugin({"info_strip": {"source": "text", "text": "Room A"}})
     session2 = _session_for(plugin2)
     await plugin2._setup_feedback_subscriptions(session2)
-    assert session2.info_strip_keys == set()
+    assert session2.watch.info_strip == set()
     assert session2.feedback_subs == []
 
 
@@ -1825,7 +1825,7 @@ async def test_brightness_rule_keys_watched_and_applied():
     plugin, state, _m, _d = _make_plugin_with_recorders(config)
     session = _session_for(plugin, _FakeNeoDeck())
     await plugin._setup_feedback_subscriptions(session)
-    assert session.brightness_keys == {"var.movie"}
+    assert session.watch.brightness == {"var.movie"}
 
     state.set("var.movie", "1", source="test")
     await plugin._on_state_change(session, "var.movie", "1", None)
@@ -2607,7 +2607,7 @@ async def test_macro_key_map_built_from_all_binding_slots():
     plugin, _state = _make_plugin(config)
     session = _session_for(plugin)
     await plugin._setup_feedback_subscriptions(session)
-    assert session.macro_keys == {
+    assert session.watch.macro_keys == {
         "m1": {(0, 0), (1, 3)},
         "m2": {(0, 0)},
         "m_off": {(1, 3)},
@@ -2901,7 +2901,7 @@ async def test_locked_key_watch_keys_replace_shadowed_entry_keys():
     await plugin._setup_feedback_subscriptions(session)
     # Only the locked key's feedback is watched; the shadowed entry is inert.
     assert len(session.feedback_subs) == 1
-    assert session.macro_keys == {}
+    assert session.watch.macro_keys == {}
 
 
 @pytest.mark.asyncio
@@ -2913,7 +2913,7 @@ async def test_locked_key_macro_marks_on_any_page(monkeypatch):
     plugin._load_text_font()
     session = _session_for(plugin, _FakeNeoDeck())
     await plugin._setup_feedback_subscriptions(session)
-    assert session.macro_keys == {"mute_all": {(None, 0)}}
+    assert session.watch.macro_keys == {"mute_all": {(None, 0)}}
 
     session.current_page = 3  # not page 0 — the mark still lands and renders
     await plugin._on_macro_event("macro.started.mute_all", {})
@@ -2947,13 +2947,13 @@ async def test_hot_apply_rebuilds_locked_key_map(monkeypatch):
     plugin._load_text_font()
     session = _session_for(plugin, _FakeNeoDeck())
     await plugin._setup_feedback_subscriptions(session)
-    assert session.macro_keys == {}
+    assert session.watch.macro_keys == {}
 
     new_config = {"global_buttons": [{"index": 1, "bindings": {"press": [
         {"action": "macro", "macro": "help"}]}}]}
     plugin.api._update_config(new_config)
     assert await plugin.on_config_changed(new_config) is True
-    assert session.macro_keys == {"help": {(None, 1)}}
+    assert session.watch.macro_keys == {"help": {(None, 1)}}
 
 
 @pytest.mark.asyncio

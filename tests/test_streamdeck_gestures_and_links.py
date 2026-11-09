@@ -780,7 +780,7 @@ def _mark_rig(config, page=0):
     plugin, _, _ = _plugin(config)
     session = _session(plugin, _Deck())
     session.current_page = page
-    session.macro_keys = {"m": {(0, 1), (1, 2), (None, 3)}}
+    session.watch.macro_keys = {"m": {(0, 1), (1, 2), (None, 3)}}
     renders = []
     _record(plugin, renders, "_render_button")
     return plugin, session, renders
@@ -830,7 +830,7 @@ async def test_a_new_mark_cancels_the_pending_clear():
 async def test_a_mark_reaches_every_deck_that_shows_the_macro():
     plugin, session, renders = _mark_rig({})
     other = _session(plugin, _Deck(), serial="SN2")
-    other.macro_keys = {}
+    other.watch.macro_keys = {}
     await plugin._apply_macro_mark_event("m", "running")
     await plugin._apply_macro_mark_event("unknown", "running")
     assert other.macro_marks == {}

@@ -93,7 +93,7 @@ from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net
 from .pages import key_target_page, page_count, page_number, page_step
 from .screens import CLOCK, info_idle_mode, info_items, strip_idle_mode
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
-from .watch_keys import deck_watch, keys_watching, zone_watches_key
+from .watch_keys import DeckWatch, deck_watch, keys_watching, zone_watches_key
 
 # A sentence raised as PluginRefusal from start() is the one the AI assistant
 # repeats to the integrator; on an older OpenAVC the card shows it either way.
@@ -190,10 +190,7 @@ class _DeckSession:
         self.dial_press_times = {} # dial index -> push timestamp (deferred click)
         self.dial_turned = set()   # dials that turned while held (chord, no click)
         self.feedback_subs = []    # state subscription IDs for this deck
-        self.auto_page_keys = set()
-        self.touch_strip_keys = set()
-        self.info_strip_keys = set()
-        self.brightness_keys = set()
+        self.watch = DeckWatch()   # the state keys its config reads (watch_keys.py)
         self.last_input = 0.0      # loop time of the last key/dial/touch input
         self.idle_dimmed = False   # True while idle_dim has lowered brightness
         self.is_virtual = False
@@ -207,7 +204,6 @@ class _DeckSession:
         self.strip_dirty = None         # zone indexes pending redraw, or "all"
         self.flash_zones = {}           # zone index -> clear timer (touch flash)
         self.clock_minute = -1          # last minute an idle clock rendered
-        self.macro_keys = {}            # macro_id -> {(page, key_index), ...}
         self.macro_marks = {}           # (page, key_index) -> running|done|error
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
         self.input_seq = 0              # monotonic counter for the input echo
@@ -2908,51 +2904,54 @@ class StreamDeckPlugin:
         """Subscribe to every state key that can change a deck's keys, strips,
         brightness or page, and note which keys show which macro's run.
 
-        Each deck subscribes against its own config view; what the view reads
-        is watch_keys.py.
+        Each deck subscribes against its own config view; what the view reads,
+        and which part of the deck each key redraws, is the session's
+        ``watch`` (watch_keys.py).
         """
-        cfg = self._deck_config(session)
-        watch = deck_watch(cfg)
-        session.auto_page_keys = watch.auto_page
-        session.touch_strip_keys = watch.touch_strip
-        session.info_strip_keys = watch.info_strip
-        session.brightness_keys = watch.brightness
-        session.macro_keys = watch.macro_keys
+        session.watch = deck_watch(self._deck_config(session))
         callback = functools.partial(self._on_state_change, session)
-        for key in watch.keys:
+        for key in session.watch.keys:
             sub_id = await self.api.state_subscribe(key, callback)
             session.feedback_subs.append(sub_id)
 
     async def _on_state_change(self, session, key, value, old_value):
-        """Redraw what a watched state change touches, in order: an automatic
-        page switch (which redraws the whole page and ends here), the strip
-        zones, the info strip, the brightness, then the keys."""
+        """Redraw what a watched state change touches (the session's
+        ``watch``), in order: an automatic page switch (which redraws the
+        whole page and ends here), the strip zones, the info strip, the
+        brightness, then the keys."""
         if not session.drawable:
             return
+        watch = session.watch
         # Only an auto_page key can page, so an ordinary feedback or
         # visibility change never overrides paging by hand.
-        if key in session.auto_page_keys and await self._follow_auto_page(session):
+        if key in watch.auto_page and await self._follow_auto_page(session):
             return
-        if key in session.touch_strip_keys:
-            # No zone reads the key (a dial's adjust under explicit zones):
-            # the whole strip redraws.
-            self._schedule_strip_render(session, self._zones_watching(session, key) or None)
-        if key in session.info_strip_keys:
+        if key in watch.touch_strip:
+            self._schedule_strip_render(session, self._zones_watching(session, key))
+        if key in watch.info_strip:
             await self._render_info_strip(session)
-        # An idle-dimmed deck keeps its dim level; waking on input applies
-        # the rule level anyway.
-        if key in session.brightness_keys and not session.idle_dimmed:
-            await self._apply_active_brightness(session)
+        if key in watch.brightness:
+            await self._follow_auto_brightness(session)
         cfg = self._deck_config(session)
         for key_index in keys_watching(cfg, session.current_page, key):
             await self._render_button(session, key_index)
 
     def _zones_watching(self, session, key):
-        """Indexes of the strip zones whose drawing reads a state key."""
-        return [
+        """Indexes of the strip zones whose drawing reads a state key; None,
+        the whole strip, when no zone does (a dial's adjust under explicit
+        zones)."""
+        zones = [
             i for i, zone in enumerate(self._touch_zones(session))
             if zone_watches_key(zone, key)
         ]
+        return zones or None
+
+    async def _follow_auto_brightness(self, session):
+        """An ``auto_brightness`` key changed: the deck takes its rule-or-base
+        level, unless idle dim has lowered it (an input that wakes the deck
+        applies the level then)."""
+        if not session.idle_dimmed:
+            await self._apply_active_brightness(session)
 
     async def _follow_auto_page(self, session):
         """Switch to the page the auto_page rules choose; True when it did."""
@@ -2990,7 +2989,7 @@ class StreamDeckPlugin:
         seconds = self._MACRO_FLASH_SECONDS.get(mark)
         for session in list(self._sessions.values()):
             flash_ended = functools.partial(self._end_macro_flash, session)
-            for page, key_index in session.macro_keys.get(macro_id) or ():
+            for page, key_index in session.watch.macro_keys.get(macro_id) or ():
                 session.mark_macro_run((page, key_index), mark)
                 if seconds is not None:
                     session.flash_macro_mark((page, key_index), seconds, flash_ended)

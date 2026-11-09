@@ -219,14 +219,14 @@ async def test_setup_collects_each_watch_set_exactly():
     plugin.api.state_subscribe = _subscribe
     await plugin._setup_feedback_subscriptions(session)
 
-    assert session.auto_page_keys == {"var.ap"}
+    assert session.watch.auto_page == {"var.ap"}
     # Explicit zones' sources and feedback, plus every dial's adjust key; an
     # explicit zone's drag_adjust key is not subscribed.
-    assert session.touch_strip_keys == {"var.zl", "var.zv", "var.zfb", "var.dial0"}
+    assert session.watch.touch_strip == {"var.zl", "var.zv", "var.zfb", "var.dial0"}
     # Two info items at most; a legacy ``key`` becomes the value source.
-    assert session.info_strip_keys == {"var.il", "var.iv", "var.ifb", "var.legacy"}
-    assert session.brightness_keys == {"var.b1", "var.b2"}
-    assert session.macro_keys == {
+    assert session.watch.info_strip == {"var.il", "var.iv", "var.ifb", "var.legacy"}
+    assert session.watch.brightness == {"var.b1", "var.b2"}
+    assert session.watch.macro_keys == {
         "m_on": {(0, 0)}, "m_off": {(0, 0)},
         "m1": {(1, 1)}, "m_hold": {(1, 1)}, "m1b": {(1, 1)},
         "m_global": {(None, 2)},
@@ -263,11 +263,11 @@ async def test_setup_replaces_the_sets_and_keeps_appending_subscription_ids():
     first = len(session.feedback_subs)
     plugin.api._update_config({"buttons": [{"index": 0, "label_source": "var.only"}]})
     await plugin._setup_feedback_subscriptions(session)
-    assert session.auto_page_keys == set()
-    assert session.touch_strip_keys == set()
-    assert session.info_strip_keys == set()
-    assert session.brightness_keys == set()
-    assert session.macro_keys == {}
+    assert session.watch.auto_page == set()
+    assert session.watch.touch_strip == set()
+    assert session.watch.info_strip == set()
+    assert session.watch.brightness == set()
+    assert session.watch.macro_keys == {}
     assert len(session.feedback_subs) == first + 1
 
 
@@ -289,7 +289,7 @@ async def test_setup_tolerates_every_section_in_the_wrong_shape():
     plugin.api.state_subscribe = _subscribe
     await plugin._setup_feedback_subscriptions(session)
     assert keys == []
-    assert session.macro_keys == {}
+    assert session.watch.macro_keys == {}
 
 
 @pytest.mark.asyncio
@@ -365,7 +365,7 @@ async def test_state_change_does_nothing_without_a_visual_deck():
         plugin, _, session, calls = _reaction_rig({"buttons": [
             {"index": 0, "label_source": "var.k"}]})
         session.deck = deck
-        session.auto_page_keys = {"var.k"}
+        session.watch.auto_page = {"var.k"}
         await plugin._on_state_change(session, "var.k", 1, 0)
         assert calls == []
 
@@ -379,8 +379,8 @@ async def test_auto_page_switch_returns_before_any_render():
                     {"index": 0, "page": 1}],
     }
     plugin, state, session, calls = _reaction_rig(config)
-    session.auto_page_keys = {"var.mode"}
-    session.info_strip_keys = {"var.mode"}
+    session.watch.auto_page = {"var.mode"}
+    session.watch.info_strip = {"var.mode"}
     state.set("var.mode", "b", source="test")
     await plugin._on_state_change(session, "var.mode", "b", None)
     assert calls == [("_change_page", session, 1)]
@@ -395,7 +395,7 @@ async def test_auto_page_on_the_showing_page_or_no_match_falls_through():
                     {"index": 2, "page": 1, "label_source": "var.mode"}],
     }
     plugin, state, session, calls = _reaction_rig(config)
-    session.auto_page_keys = {"var.mode"}
+    session.watch.auto_page = {"var.mode"}
     # No rule matches: the current page's watcher re-renders.
     await plugin._on_state_change(session, "var.mode", "a", None)
     assert calls == [("_render_button", session, 0)]
@@ -414,7 +414,7 @@ async def test_strip_change_redraws_the_watching_zones_or_the_whole_strip():
         {"feedback": {"key": "var.a"}},
     ]}}
     plugin, _, session, calls = _reaction_rig(config)
-    session.touch_strip_keys = {"var.a", "var.b", "var.none"}
+    session.watch.touch_strip = {"var.a", "var.b", "var.none"}
     await plugin._on_state_change(session, "var.a", 1, 0)
     await plugin._on_state_change(session, "var.b", 1, 0)
     await plugin._on_state_change(session, "var.none", 1, 0)
@@ -430,7 +430,7 @@ async def test_strip_change_redraws_the_watching_zones_or_the_whole_strip():
 async def test_default_zones_follow_their_dials_adjust_key():
     config = {"dials": [{"index": 1, "adjust": {"key": "var.vol"}}]}
     plugin, _, session, calls = _reaction_rig(config)
-    session.touch_strip_keys = {"var.vol"}
+    session.watch.touch_strip = {"var.vol"}
     await plugin._on_state_change(session, "var.vol", 3, 2)
     assert calls == [("_schedule_strip_render", session, [1])]
 
@@ -438,8 +438,8 @@ async def test_default_zones_follow_their_dials_adjust_key():
 @pytest.mark.asyncio
 async def test_info_and_brightness_react_and_dim_holds_brightness():
     plugin, _, session, calls = _reaction_rig({})
-    session.info_strip_keys = {"var.k"}
-    session.brightness_keys = {"var.k"}
+    session.watch.info_strip = {"var.k"}
+    session.watch.brightness = {"var.k"}
     await plugin._on_state_change(session, "var.k", 1, 0)
     assert calls == [("_render_info_strip", session),
                      ("_apply_active_brightness", session)]
@@ -456,10 +456,10 @@ async def test_reactions_run_in_order_strip_info_brightness_keys():
         "buttons": [{"index": 1, "label_source": "var.k"}],
     }
     plugin, _, session, calls = _reaction_rig(config)
-    session.auto_page_keys = {"var.k"}
-    session.touch_strip_keys = {"var.k"}
-    session.info_strip_keys = {"var.k"}
-    session.brightness_keys = {"var.k"}
+    session.watch.auto_page = {"var.k"}
+    session.watch.touch_strip = {"var.k"}
+    session.watch.info_strip = {"var.k"}
+    session.watch.brightness = {"var.k"}
     await plugin._on_state_change(session, "var.k", 1, 0)
     assert [c[0] for c in calls] == [
         "_schedule_strip_render", "_render_info_strip",
