@@ -865,8 +865,7 @@ def test_the_mark_a_key_shows_is_its_locked_mark_first():
     session.current_page = 2
     session.macro_marks = {(None, 1): "error", (2, 1): "running", (2, 4): "done",
                            (0, 4): "running"}
-    showing = StreamDeckPlugin._macro_mark_showing
-    assert [showing(session, k) for k in (1, 4, 5)] == ["error", "done", None]
+    assert [session.macro_mark_showing(k) for k in (1, 4, 5)] == ["error", "done", None]
 
 
 # ──── Only a deck with a screen is drawn on ────

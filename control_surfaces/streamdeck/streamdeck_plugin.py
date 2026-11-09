@@ -120,6 +120,10 @@ def _patch_hidapi_search():
     LibUSBHIDAPI.Library._load_hidapi_library = _extended_load
 
 
+# How long a macro's result shows on its keys before they draw as usual.
+_MACRO_FLASH_SECONDS = {"done": 0.8, "error": 1.2}
+
+
 class _DeckSession:
     """Per-deck runtime state for one connected Stream Deck.
 
@@ -162,6 +166,43 @@ class _DeckSession:
         self.macro_marks = {}           # (page, key_index) -> running|done|error
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
         self.input_seq = 0              # monotonic counter for the input echo
+
+    @property
+    def drawable(self):
+        """True for an attached deck with a screen to draw on (a Pedal has
+        none). Every path that draws asks this first."""
+        return bool(self.deck) and bool(self.deck.is_visual())
+
+    def shows(self, page):
+        """True when a key stored under ``page`` is on the page showing; page
+        None is a locked key, on every page."""
+        return page is None or page == self.current_page
+
+    def macro_mark_showing(self, key_index):
+        """The macro mark a key shows on the page showing. A locked key's
+        mark is stored under page None (lit on every page) and wins."""
+        return (
+            self.macro_marks.get((None, key_index))
+            or self.macro_marks.get((self.current_page, key_index))
+        )
+
+    def mark_macro_run(self, page, key_index, mark, flash_ended):
+        """Set a key's macro run mark, or drop it for None. A result mark
+        (done, error) is a flash: ``flash_ended(page, key_index)`` is called
+        when it is over. A newer mark cancels the flash's end."""
+        spot = (page, key_index)
+        handle = self.macro_clear_handles.pop(spot, None)
+        if handle is not None:
+            handle.cancel()
+        if mark is None:
+            self.macro_marks.pop(spot, None)
+            return
+        self.macro_marks[spot] = mark
+        seconds = _MACRO_FLASH_SECONDS.get(mark)
+        if seconds is not None:
+            self.macro_clear_handles[spot] = asyncio.get_event_loop().call_later(
+                seconds, flash_ended, page, key_index
+            )
 
     def cancel_timers(self):
         """Cancel every timer and debounced task the deck has running: the
@@ -1406,7 +1447,7 @@ class StreamDeckPlugin:
     async def _flash_key(self, session, index, times):
         """Flash one key white to draw attention to it."""
         deck = session.deck
-        if not deck or not deck.is_visual() or session.overlay_active:
+        if not session.drawable or session.overlay_active:
             return
         if not 0 <= index < deck.key_count() + deck.touch_key_count():
             return
@@ -1455,7 +1496,7 @@ class StreamDeckPlugin:
         """Render ``text`` wrapped across the key grid (and strips) as one
         canvas split into key tiles."""
         deck = session.deck
-        if not deck or not deck.is_visual() or Image is None:
+        if not session.drawable or Image is None:
             return
         key_format = deck.key_image_format()
         key_w, key_h = key_format["size"]
@@ -1590,7 +1631,7 @@ class StreamDeckPlugin:
         self._cancel_hold(session, key_index)
         was_pressed = key_index in session.pressed_keys
         session.pressed_keys.discard(key_index)
-        if was_pressed and session.deck and session.deck.is_visual():
+        if was_pressed and session.drawable:
             try:
                 await self._render_button(session, key_index)
             except Exception:
@@ -1614,7 +1655,7 @@ class StreamDeckPlugin:
         so a feedback or toggle redraw keeps the highlight rather than
         fighting it."""
         session.pressed_keys.add(key_index)
-        if session.deck and session.deck.is_visual():
+        if session.drawable:
             await self._render_button(session, key_index)
 
     async def _press_tap(self, session, key_index, pressed, actions):
@@ -1929,7 +1970,7 @@ class StreamDeckPlugin:
         The glass always acknowledges a touch, configured or not — the same
         role the momentary press highlight plays on keys.
         """
-        if not session.deck or not session.deck.is_visual():
+        if not session.drawable:
             return
         old = session.flash_zones.pop(zone_index, None)
         if old is not None:
@@ -2297,7 +2338,7 @@ class StreamDeckPlugin:
         if minute == session.clock_minute:
             return
         session.clock_minute = minute
-        if not session.deck or not session.deck.is_visual():
+        if not session.drawable:
             return
         if session.deck.is_touch() and self._strip_idle_mode(session) == "clock":
             await self._render_touchscreen(session)
@@ -2314,7 +2355,7 @@ class StreamDeckPlugin:
         redraw partially.
         """
         deck = session.deck
-        if not deck or not deck.is_visual() or not deck.is_touch():
+        if not session.drawable or not deck.is_touch():
             return
         if session.overlay_active:
             return  # a show_message overlay owns the display right now
@@ -2382,7 +2423,7 @@ class StreamDeckPlugin:
         """Redraw one zone into the cached strip image and ship only that
         region to the deck (the hardware accepts partial-region updates)."""
         deck = session.deck
-        if not deck or not deck.is_visual() or not deck.is_touch():
+        if not session.drawable or not deck.is_touch():
             return
         if session.overlay_active or session.strip_image is None:
             return
@@ -2470,7 +2511,7 @@ class StreamDeckPlugin:
         watched key changes.
         """
         deck = session.deck
-        if not deck or not deck.is_visual():
+        if not session.drawable:
             return
         if session.overlay_active:
             return  # a show_message overlay owns the display right now
@@ -2681,7 +2722,7 @@ class StreamDeckPlugin:
 
     async def _render_all_buttons(self, session):
         """Render every key for a deck's current page (LCD keys + touch keys)."""
-        if not session.deck or not session.deck.is_visual():
+        if not session.drawable:
             return
 
         key_count = session.deck.key_count() + session.deck.touch_key_count()
@@ -2699,7 +2740,7 @@ class StreamDeckPlugin:
     async def _render_button(self, session, key_index):
         """Draw one key from its entry and the state it reads: an LCD key's
         image, or a touch key's color."""
-        if not session.deck or not session.deck.is_visual():
+        if not session.drawable:
             return
         if session.overlay_active:
             return  # a show_message overlay owns the display right now
@@ -2718,7 +2759,7 @@ class StreamDeckPlugin:
             return
 
         look = await self._key_look(session, assignment)
-        macro_mark = self._macro_mark_showing(session, key_index)
+        macro_mark = session.macro_mark_showing(key_index)
         nav_active = self._navigates_here(session, assignment)
         held = key_index in session.pressed_keys
 
@@ -2732,15 +2773,6 @@ class StreamDeckPlugin:
         )
         self._apply_key_image(
             session, key_index, self._marked_image(image, nav_active, held, macro_mark)
-        )
-
-    @staticmethod
-    def _macro_mark_showing(session, key_index):
-        """The macro mark a key shows on the page showing. A locked key's
-        mark is stored under page None (lit on every page) and wins."""
-        return (
-            session.macro_marks.get((None, key_index))
-            or session.macro_marks.get((session.current_page, key_index))
         )
 
     def _navigates_here(self, session, assignment):
@@ -3277,7 +3309,7 @@ class StreamDeckPlugin:
         """Redraw what a watched state change touches, in order: an automatic
         page switch (which redraws the whole page and ends here), the strip
         zones, the info strip, the brightness, then the keys."""
-        if not session.deck or not session.deck.is_visual():
+        if not session.drawable:
             return
         # Only an auto_page key can page, so an ordinary feedback or
         # visibility change never overrides paging by hand.
@@ -3333,40 +3365,25 @@ class StreamDeckPlugin:
                 return
 
     async def _apply_macro_mark_event(self, macro_id, mark):
+        """Mark every key whose press runs ``macro_id``, on every deck, and
+        redraw the ones showing."""
         for session in list(self._sessions.values()):
-            targets = session.macro_keys.get(macro_id)
-            if not targets:
-                continue
-            for page, key_index in targets:
-                handle = session.macro_clear_handles.pop((page, key_index), None)
-                if handle is not None:
-                    handle.cancel()
-                if mark is None:
-                    session.macro_marks.pop((page, key_index), None)
-                else:
-                    session.macro_marks[(page, key_index)] = mark
-                    if mark in ("done", "error"):
-                        # Brief result flash, then back to the normal render.
-                        delay = 0.8 if mark == "done" else 1.2
-                        session.macro_clear_handles[(page, key_index)] = (
-                            asyncio.get_event_loop().call_later(
-                                delay,
-                                lambda s=session, p=page, k=key_index:
-                                    asyncio.ensure_future(self._clear_macro_mark(s, p, k)),
-                            )
-                        )
-                # Page None = a locked key; it shows on every page.
-                if page is None or page == session.current_page:
+            flash_ended = functools.partial(self._end_macro_flash, session)
+            for page, key_index in session.macro_keys.get(macro_id) or ():
+                session.mark_macro_run(page, key_index, mark, flash_ended)
+                if session.shows(page):
                     await self._render_button(session, key_index)
 
+    def _end_macro_flash(self, session, page, key_index):
+        asyncio.ensure_future(self._clear_macro_mark(session, page, key_index))
+
     async def _clear_macro_mark(self, session, page, key_index):
+        """A result flash is over: its key draws as usual again, unless the
+        deck has gone."""
         session.macro_clear_handles.pop((page, key_index), None)
         if session.device_id not in self._sessions:
             return
-        if (
-            session.macro_marks.pop((page, key_index), None) is not None
-            and (page is None or page == session.current_page)
-        ):
+        if session.macro_marks.pop((page, key_index), None) is not None and session.shows(page):
             await self._render_button(session, key_index)
 
     def _apply_macro_mark(self, image, mark):
@@ -3430,7 +3447,7 @@ class StreamDeckPlugin:
             seconds = coerce_numeric(data.get("seconds"))
             seconds = float(seconds) if seconds is not None and seconds > 0 else 5.0
             for session in self._sessions_for(data.get("serial")):
-                if session.deck and session.deck.is_visual():
+                if session.drawable:
                     await self._show_message(session, text, seconds)
         elif "action.identify" in event_name:
             # A serial in the payload identifies one specific deck (the deck
@@ -3444,7 +3461,7 @@ class StreamDeckPlugin:
     async def _identify_deck(self, session):
         """Flash a deck's buttons to identify which physical deck it is."""
         deck = session.deck
-        if not deck or not deck.is_visual():
+        if not session.drawable:
             return
 
         self.api.log(
