@@ -605,6 +605,28 @@ class DockLink:
         self._connecting = False
         self._resolve_attempted = False
 
+    def remember_serials(self, serial, mdns_sn):
+        """Start from the serials the deck's config entry recorded on an
+        earlier connect, so discovery can find it before it answers."""
+        if serial:
+            self.observed_serial = serial
+        if mdns_sn:
+            self.advertised_serial = mdns_sn
+
+    def answers_to(self, *recorded):
+        """Every serial this deck answers to: its own, the one it advertises,
+        and any ``recorded`` on its config entry."""
+        return {s for s in (self.observed_serial, self.advertised_serial, *recorded) if s}
+
+    def claim_look_up(self):
+        """True once per outage, from the third failed connect in a row: the
+        caller then looks the deck up by serial. The next good connect allows
+        another."""
+        if self.fail_count < 3 or self._resolve_attempted:
+            return False
+        self._resolve_attempted = True
+        return True
+
     def close(self):
         for dev in (self.child, self.primary):
             if dev is not None:

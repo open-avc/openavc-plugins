@@ -6,6 +6,13 @@ The decks the config declares beyond the ones plugged in over USB: the
 The watchdog reads these lists to know which decks to run, and the config
 check (config_check.py) reads each entry the same way, through the helpers
 here, to say which ones the watchdog would skip.
+
+The plugin also writes ``network_decks`` entries, through ``edit_network_decks``:
+the serials a deck reported (``record_serials``) and the address discovery
+found it at. Those writers match an entry by ``entry_address``, which is not
+the watchdog's reading: it takes NET_DEFAULT_PORT for a port that is no whole
+number, where the watchdog skips the entry, so a skipped entry at the same
+host is written alongside the deck on the default port.
 """
 
 import re
@@ -54,16 +61,20 @@ def virtual_deck_entries(raw):
     return _first_of_each(raw, _virtual_deck, "serial")
 
 
-def network_endpoint(item):
-    """The ``(host, port)`` a ``network_decks`` entry names: the host with the
-    spaces around it trimmed, and the port as a whole number (NET_DEFAULT_PORT
-    when it is left out), or None when it is not one."""
+def _endpoint(item, bad_port):
     host = str(item.get("host", "")).strip()
     try:
         port = int(item.get("port", NET_DEFAULT_PORT))
     except (TypeError, ValueError):
-        port = None
+        port = bad_port
     return host, port
+
+
+def network_endpoint(item):
+    """The ``(host, port)`` a ``network_decks`` entry names: the host with the
+    spaces around it trimmed, and the port as a whole number (NET_DEFAULT_PORT
+    when it is left out), or None when it is not one."""
+    return _endpoint(item, None)
 
 
 def _usable_port(port):
@@ -104,3 +115,48 @@ def network_deck_entries(raw):
     """The decks a ``network_decks`` list declares, each with its ``key``; an
     address an earlier deck took is skipped."""
     return _first_of_each(raw, _network_deck, "key")
+
+
+def entry_address(item):
+    """The ``"host:port"`` a writer matches a ``network_decks`` entry by: its
+    ``network_endpoint``, with NET_DEFAULT_PORT for a port that is not a whole
+    number."""
+    host, port = _endpoint(item, NET_DEFAULT_PORT)
+    return f"{host}:{port}"
+
+
+def edit_network_decks(raw, edit):
+    """A ``network_decks`` list with ``edit(entry, address)`` run on a copy of
+    each object entry (its ``entry_address``); other items are kept as they
+    are. Returns the new list and whether any edit reported a change, or
+    ``(None, False)`` for a value that is not a list."""
+    if not isinstance(raw, list):
+        return None, False
+    updated, changed = [], False
+    for item in raw:
+        entry = dict(item) if isinstance(item, dict) else item
+        if isinstance(entry, dict) and edit(entry, entry_address(entry)):
+            changed = True
+        updated.append(entry)
+    return updated, changed
+
+
+def unrecorded_serials(entry, own, advertised):
+    """The serials a deck reported that its entry does not hold yet, by field:
+    ``serial`` is the deck's own (its identity everywhere), ``mdns_sn`` the
+    one the unit advertises (a dock's alias, kept only to find the deck
+    again). They are different strings for the same deck: never collapse
+    them, or the deck cards twice."""
+    return {
+        field: value
+        for field, value in (("serial", own), ("mdns_sn", advertised))
+        if value and entry.get(field) != value
+    }
+
+
+def record_serials(entry, own, advertised):
+    """Write the serials a deck reported onto its entry; True when that
+    changed it."""
+    changes = unrecorded_serials(entry, own, advertised)
+    entry.update(changes)
+    return bool(changes)

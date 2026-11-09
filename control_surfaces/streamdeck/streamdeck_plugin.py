@@ -28,7 +28,13 @@ from types import SimpleNamespace
 
 from .conditions import coerce_numeric, eval_condition, reads_as_on
 from .config_check import config_problems
-from .declared_decks import network_deck_entries, virtual_deck_entries
+from .declared_decks import (
+    edit_network_decks,
+    network_deck_entries,
+    record_serials,
+    unrecorded_serials,
+    virtual_deck_entries,
+)
 from .key_entries import (
     action_list,
     assignment_for,
@@ -1013,154 +1019,122 @@ class StreamDeckPlugin:
 
         Keeps one DockLink per configured entry, publishes each link's
         status for the editor (``plugin.streamdeck.net.<key>.status``),
-        appends deck objects for transports that came up, and self-heals the
-        configured host via discovery when a known deck stops answering.
+        appends deck objects for transports that came up, records the
+        serials a deck reported, and looks a known deck up through discovery
+        when it stops answering.
         """
-        entries = self._network_deck_entries()
-        declared = {e["key"]: e for e in entries}
+        declared = {e["key"]: e for e in self._network_deck_entries()}
+        await self._close_undeclared_links(declared)
+        unrecorded = False
+        for key, entry in declared.items():
+            link = self._link_for(key, entry)
+            new_decks.extend(self._net_decks(await link.ensure(self._loop, self.api.log)))
+            await self.api.state_set(f"net.{link.state_key}.address", key)
+            await self.api.state_set(f"net.{link.state_key}.status", link.status)
+            if unrecorded_serials(entry, link.observed_serial, link.advertised_serial):
+                unrecorded = True
+            self._look_up_if_lost(key, link, link.answers_to(entry["serial"], entry["mdns_sn"]))
+        if unrecorded:
+            await self._persist_network_serials()
 
+    async def _close_undeclared_links(self, declared):
+        """Close the link of every deck the config no longer declares, and say
+        so in its status."""
         for key, link in list(self._dock_links.items()):
             if key not in declared:
                 link.close()
                 del self._dock_links[key]
                 await self.api.state_set(f"net.{link.state_key}.status", "removed")
 
-        serial_updates = False
-        for key, entry in declared.items():
-            link = self._dock_links.get(key)
-            if link is None:
-                link = DockLink(entry["host"], entry["port"], self.api.local_address)
-                if entry["serial"]:
-                    link.observed_serial = entry["serial"]
-                if entry["mdns_sn"]:
-                    link.advertised_serial = entry["mdns_sn"]
-                self._dock_links[key] = link
-            transports = await link.ensure(self._loop, self.api.log)
-            for transport in transports:
-                if transport.path() not in self._sessions:
-                    cls = net_deck_class(transport.product_id(), StreamDeck)
-                    if cls is not None:
-                        new_decks.append(cls(transport))
-            await self.api.state_set(f"net.{link.state_key}.address", key)
-            await self.api.state_set(f"net.{link.state_key}.status", link.status)
-            if (
-                (link.observed_serial and link.observed_serial != entry["serial"])
-                or (link.advertised_serial and link.advertised_serial != entry["mdns_sn"])
-            ):
-                serial_updates = True
-            # Match discovery against every name this deck answers to: its own
-            # serial, the serial it advertises (the dock's alias), and any
-            # serials already recorded on the entry.
-            known_serials = {
-                s
-                for s in (
-                    link.observed_serial,
-                    link.advertised_serial,
-                    entry["serial"],
-                    entry["mdns_sn"],
-                )
-                if s
-            }
-            if (
-                known_serials
-                and link.fail_count >= 3
-                and not link._resolve_attempted
-                and callable(getattr(self.api, "mdns_browse", None))
-            ):
-                link._resolve_attempted = True
-                self.api.create_task(
-                    self._net_reresolve(key, known_serials),
-                    name=f"net_reresolve_{link.state_key}",
-                )
-        if serial_updates:
-            await self._persist_network_serials()
+    def _link_for(self, key, entry):
+        """A declared deck's link, made on its first tick from the entry's
+        address and the serials it recorded."""
+        link = self._dock_links.get(key)
+        if link is None:
+            link = DockLink(entry["host"], entry["port"], self.api.local_address)
+            link.remember_serials(entry["serial"], entry["mdns_sn"])
+            self._dock_links[key] = link
+        return link
+
+    def _net_decks(self, transports):
+        """A deck object for each transport that came up and is not open yet,
+        of the class the library names for its product id."""
+        decks = []
+        for transport in transports:
+            if transport.path() not in self._sessions:
+                cls = net_deck_class(transport.product_id(), StreamDeck)
+                if cls is not None:
+                    decks.append(cls(transport))
+        return decks
+
+    def _look_up_if_lost(self, key, link, serials):
+        """Look a deck up by every serial it answers to, once per outage
+        (DockLink.claim_look_up), when discovery is available."""
+        if (
+            serials
+            and callable(getattr(self.api, "mdns_browse", None))
+            and link.claim_look_up()
+        ):
+            self.api.create_task(
+                self._net_reresolve(key, serials),
+                name=f"net_reresolve_{link.state_key}",
+            )
 
     async def _persist_network_serials(self):
-        """Record each deck's serials on its ``network_decks`` entry so
-        discovery can follow the deck if its address changes later.
+        """Record each deck's serials on its ``network_decks`` entry
+        (declared_decks.record_serials) so discovery can follow the deck if
+        its address changes later."""
 
-        ``serial`` is the deck's own serial (its identity everywhere);
-        ``mdns_sn`` is the serial the unit advertises (the dock's alias),
-        kept only for re-resolve matching. They are different strings for the
-        same deck — never collapse them, or the deck cards twice.
-        """
-        raw = self.api.config.get("network_decks")
-        if not isinstance(raw, list):
-            return
-        updated = []
-        changed = False
-        for item in raw:
-            entry = dict(item) if isinstance(item, dict) else item
-            if isinstance(entry, dict):
-                host = str(entry.get("host", "")).strip()
-                try:
-                    port = int(entry.get("port", NET_DEFAULT_PORT))
-                except (TypeError, ValueError):
-                    port = NET_DEFAULT_PORT
-                link = self._dock_links.get(f"{host}:{port}")
-                if link:
-                    if (
-                        link.observed_serial
-                        and entry.get("serial") != link.observed_serial
-                    ):
-                        entry["serial"] = link.observed_serial
-                        changed = True
-                    if (
-                        link.advertised_serial
-                        and entry.get("mdns_sn") != link.advertised_serial
-                    ):
-                        entry["mdns_sn"] = link.advertised_serial
-                        changed = True
-            updated.append(entry)
+        def record(entry, address):
+            link = self._dock_links.get(address)
+            return link is not None and record_serials(
+                entry, link.observed_serial, link.advertised_serial
+            )
+
+        updated, changed = edit_network_decks(self.api.config.get("network_decks"), record)
         if changed:
-            config = dict(self.api.config)
-            config["network_decks"] = updated
-            await self.api.save_config(config)
+            await self._save_network_decks(updated)
 
     async def _net_reresolve(self, key, serials):
         """A configured deck stopped answering: browse discovery for any of
-        its known serials (deck or advertised unit) and follow it to its
-        new address."""
+        its known serials (deck or advertised unit) and follow the first
+        answer to its new address. An answer at the address it already has
+        ends the look-up."""
         try:
             results = await self.api.mdns_browse([NET_MDNS_SERVICE], duration=5.0)
         except Exception as e:
             self.api.log(f"Network deck discovery failed: {e}", level="warning")
             return
-        for r in results:
-            txt = r.get("txt") or {}
-            if str(txt.get("sn", "")) not in serials:
-                continue
-            new_host = r.get("ip")
-            new_port = r.get("port") or NET_DEFAULT_PORT
-            if not new_host or f"{new_host}:{new_port}" == key:
-                return
-            raw = self.api.config.get("network_decks")
-            if not isinstance(raw, list):
-                return
-            updated = []
-            changed = False
-            for item in raw:
-                entry = dict(item) if isinstance(item, dict) else item
-                if isinstance(entry, dict):
-                    e_host = str(entry.get("host", "")).strip()
-                    try:
-                        e_port = int(entry.get("port", NET_DEFAULT_PORT))
-                    except (TypeError, ValueError):
-                        e_port = NET_DEFAULT_PORT
-                    if f"{e_host}:{e_port}" == key:
-                        entry["host"] = new_host
-                        entry["port"] = new_port
-                        changed = True
-                updated.append(entry)
-            if changed:
-                self.api.log(
-                    f"Network deck {str(txt.get('sn', ''))} answered at "
-                    f"{new_host}:{new_port} (was {key}); following it"
-                )
-                config = dict(self.api.config)
-                config["network_decks"] = updated
-                await self.api.save_config(config)
+        found = next(
+            (r for r in results if str((r.get("txt") or {}).get("sn", "")) in serials), None
+        )
+        if found is None:
             return
+        new_host = found.get("ip")
+        new_port = found.get("port") or NET_DEFAULT_PORT
+        if not new_host or f"{new_host}:{new_port}" == key:
+            return
+
+        def move(entry, address):
+            if address != key:
+                return False
+            entry["host"] = new_host
+            entry["port"] = new_port
+            return True
+
+        updated, changed = edit_network_decks(self.api.config.get("network_decks"), move)
+        if changed:
+            self.api.log(
+                f"Network deck {str(found['txt'].get('sn', ''))} answered at "
+                f"{new_host}:{new_port} (was {key}); following it"
+            )
+            await self._save_network_decks(updated)
+
+    async def _save_network_decks(self, decks):
+        """Save the config with ``decks`` as its ``network_decks`` list."""
+        config = dict(self.api.config)
+        config["network_decks"] = decks
+        await self.api.save_config(config)
 
     def _build_ext_router(self):
         """FastAPI router serving the live-mirror images.
