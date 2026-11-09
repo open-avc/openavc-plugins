@@ -37,6 +37,7 @@ try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from integrations.video_panel import stream_records
     from integrations.video_panel.video_panel_plugin import VideoPanelPlugin
 
     _PLUGIN_IMPORTABLE = True
@@ -151,7 +152,7 @@ async def test_bind_to_process_lifetime_smoke():
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_stream_source_url_injects_credentials():
-    f = VideoPanelPlugin._stream_source_url
+    f = stream_records.stream_source_url
     assert (
         f({"rtsp_url": "rtsp://cam/stream1", "username": "admin", "password": "p@ss/word"})
         == "rtsp://admin:p%40ss%2Fword@cam/stream1"
@@ -298,8 +299,8 @@ def test_parse_probe_surfaces_auth_and_unreachable_errors():
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_slugify_and_entry_shaping():
-    assert VideoPanelPlugin._slugify("Front Door Cam!") == "front_door_cam"
-    assert VideoPanelPlugin._slugify("   ") == "stream"
+    assert stream_records.slugify("Front Door Cam!") == "front_door_cam"
+    assert stream_records.slugify("   ") == "stream"
 
     class _In:  # mimic CameraIn attribute access
         name = "  Lobby  "
@@ -310,7 +311,7 @@ def test_slugify_and_entry_shaping():
         transcode = "always"
         hardware_accel = "auto"
 
-    entry = VideoPanelPlugin._entry_from_input(_In(), "lobby")
+    entry = stream_records.entry_from_input(_In(), "lobby")
     assert entry == {
         "stream_id": "lobby",
         "name": "Lobby",
@@ -499,14 +500,14 @@ def test_saved_login_is_the_platforms_marker():
         pytest.skip("no OpenAVC checkout found")
     from openavc.core.device_logins import SAVED_LOGIN as platform_marker
 
-    from integrations.video_panel import video_panel_plugin
+    from integrations.video_panel import stream_records
 
-    assert video_panel_plugin.SAVED_LOGIN == platform_marker
+    assert stream_records.SAVED_LOGIN == platform_marker
 
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_the_stream_list_never_carries_a_password(monkeypatch):
-    from integrations.video_panel.video_panel_plugin import SAVED_LOGIN
+    from integrations.video_panel.stream_records import SAVED_LOGIN
 
     client, _plugin, _added, _deleted = _crud_client(monkeypatch)
     added = client.post("/streams", json={
@@ -525,7 +526,7 @@ def test_the_stream_list_never_carries_a_password(monkeypatch):
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_the_marker_sent_back_keeps_the_password_and_empty_clears_it(monkeypatch):
-    from integrations.video_panel.video_panel_plugin import SAVED_LOGIN
+    from integrations.video_panel.stream_records import SAVED_LOGIN
 
     stream = {
         "stream_id": "lobby", "name": "Lobby", "rtsp_url": "rtsp://cam/1",
@@ -565,7 +566,7 @@ def test_the_marker_sent_back_keeps_the_password_and_empty_clears_it(monkeypatch
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_a_login_in_the_address_is_split_out():
-    split = VideoPanelPlugin._split_url_login
+    split = stream_records.split_url_login
     assert split("rtsp://admin:p%40ss@cam:554/s1") == ("rtsp://cam:554/s1", "admin", "p@ss")
     # An unescaped @ in the password: the host is after the last one.
     assert split("rtsp://admin:p@ss@cam/s1") == ("rtsp://cam/s1", "admin", "p@ss")
@@ -630,7 +631,7 @@ async def test_a_stream_saved_with_a_login_in_its_address_moves_it_once(monkeypa
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_a_test_with_the_marker_uses_the_saved_password(monkeypatch):
-    from integrations.video_panel.video_panel_plugin import SAVED_LOGIN
+    from integrations.video_panel.stream_records import SAVED_LOGIN
 
     stream = {
         "stream_id": "lobby", "name": "Lobby", "rtsp_url": "rtsp://cam/1",

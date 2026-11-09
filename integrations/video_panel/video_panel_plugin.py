@@ -19,7 +19,7 @@ import socket
 import stat
 import sys
 import time
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -39,9 +39,10 @@ except ImportError:  # pragma: no cover - exercised only via package-path import
     from .sidecar import NO_WINDOW, SidecarSupervisor
 
 try:
+    import stream_records
     import transcode
 except ImportError:  # pragma: no cover - exercised only via package-path import
-    from . import transcode
+    from . import stream_records, transcode
 
 # A sentence raised as PluginRefusal from start() is the one the AI assistant
 # repeats to the integrator; on an older OpenAVC the card shows it either way.
@@ -49,17 +50,6 @@ try:
     from openavc.core.plugin_api import PluginRefusal
 except ImportError:  # OpenAVC before 0.38.0
     PluginRefusal = RuntimeError
-
-# What a stream's password reads as anywhere outside this plugin: the stream
-# list the Programmer draws, and what it sends back for "keep the saved one".
-# The password itself never leaves the plugin. The same string OpenAVC puts in
-# a project field whose login is saved on the system, so the Programmer shows
-# it as "Saved on this system"; an older Programmer shows it as a filled
-# password box and sends it back unchanged, which keeps the password too.
-try:
-    from openavc.core.device_logins import SAVED_LOGIN
-except ImportError:  # OpenAVC before the login file
-    SAVED_LOGIN = "<saved on this system>"
 
 # MediaMTX listeners. Everything is on localhost except the WebRTC media UDP
 # port, which the browser connects to directly for low-latency LAN playback.
@@ -108,10 +98,6 @@ _SNAPSHOT_TIMEOUT = 15.0
 # an unbounded walk of the candidates could finish, and being killed there is
 # worse than encoding in software: it leaves the whole plugin down.
 _ENCODER_BUDGET = 10.0
-
-# Stream ids become MediaMTX path names and panel-element binding values, so
-# keep them to a portable, URL-safe character set.
-_STREAM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 # The routes a standalone room panel may reach with its panel-scoped token.
 # A panel on a claimed instance is unauthenticated by design, so a media route
@@ -306,9 +292,10 @@ class ReportIn(BaseModel):
 class ProbeIn(BaseModel):
     """Probe payload — tests an RTSP URL before it is saved as a stream.
 
-    ``password`` is :data:`SAVED_LOGIN` to test with a stream's saved one:
-    the stream named by ``stream_id``, or, from a Programmer that does not
-    send one, the stream with the same address and username."""
+    ``password`` is the saved-login marker to test with a stream's saved
+    one: the stream named by ``stream_id``, or, from a Programmer that does
+    not send one, the stream with the same address and username
+    (``stream_records.password_for_test``)."""
 
     rtsp_url: str
     username: str = ""
@@ -838,7 +825,7 @@ class VideoPanelPlugin:
             # A login written into the address, saved by an earlier version,
             # moves into Username and Password, so the password is kept with
             # the logins rather than in the address.
-            if self._move_url_login(stream):
+            if stream_records.move_url_login(stream, self.api.log):
                 changed = True
             self._streams.append(stream)
             await self._sync_path_add(stream)
@@ -854,7 +841,7 @@ class VideoPanelPlugin:
         ``<id>`` runs ffmpeg on demand to re-encode to H.264 and republish.
         """
         stream_id = stream["stream_id"]
-        source = self._stream_source_url(stream)
+        source = stream_records.stream_source_url(stream)
         if not source:
             self.api.log(
                 f"stream '{stream_id}' has no usable rtsp_url; not registered with sidecar",
@@ -998,45 +985,6 @@ class VideoPanelPlugin:
         cfg["streams"] = self._streams
         await self.api.save_config(cfg)
 
-    def _find_stream(self, stream_id):
-        for s in self._streams:
-            if s.get("stream_id") == stream_id:
-                return s
-        return None
-
-    def _unique_stream_id(self, name):
-        base = self._slugify(name)
-        sid = base
-        n = 2
-        while self._find_stream(sid):
-            sid = f"{base}_{n}"
-            n += 1
-        return sid
-
-    @staticmethod
-    def _slugify(name):
-        slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
-        return slug or "stream"
-
-    @staticmethod
-    def _entry_from_input(data, stream_id, saved_password=""):
-        """The stream entry for an add or edit. A password sent as
-        SAVED_LOGIN keeps ``saved_password`` (the edited stream's own; an add
-        has none)."""
-        password = data.password or ""
-        if password == SAVED_LOGIN:
-            password = saved_password or ""
-        return {
-            "stream_id": stream_id,
-            "name": (data.name or "").strip() or stream_id,
-            "rtsp_url": (data.rtsp_url or "").strip(),
-            "username": data.username or "",
-            "password": password,
-            "codec_hint": data.codec_hint or "auto",
-            "transcode": data.transcode or "auto",
-            "hardware_accel": data.hardware_accel or "auto",
-        }
-
     async def _live_status_map(self):
         data = await self._api_get("/v3/paths/list")
         live = {}
@@ -1047,82 +995,6 @@ class VideoPanelPlugin:
                     # `ready` is deprecated in 1.18.x in favour of `available`.
                     live[name] = bool(item.get("available", item.get("ready", False)))
         return live
-
-    @staticmethod
-    def _stream_view(stream, live):
-        """A stream as the Programmer sees it: its password, when it has one,
-        is SAVED_LOGIN, never the password itself."""
-        return {
-            **stream,
-            "password": SAVED_LOGIN if stream.get("password") else "",
-            "status": "streaming" if live.get(stream["stream_id"]) else "idle",
-        }
-
-    @staticmethod
-    def _split_url_login(url):
-        """``url`` written ``scheme://user:password@host/...`` as the address
-        without its login, the username and the password, both unescaped.
-        The username and password are None when the address carries no login,
-        and the password alone is None when it carries a username only."""
-        url = (url or "").strip()
-        scheme, sep, rest = url.partition("://")
-        if not sep:
-            return url, None, None
-        ends = [i for i in (rest.find(c) for c in "/?#") if i != -1]
-        end = min(ends) if ends else len(rest)
-        authority, tail = rest[:end], rest[end:]
-        userinfo, at, host = authority.rpartition("@")
-        if not at:
-            return url, None, None
-        username, colon, password = userinfo.partition(":")
-        return (
-            f"{scheme}://{host}{tail}",
-            unquote(username),
-            unquote(password) if colon else None,
-        )
-
-    def _move_url_login(self, entry):
-        """Move a login written into ``entry``'s address into its Username and
-        Password. The address's login wins over the fields, since it is the
-        one the stream was played with. Returns True when ``entry`` changed.
-
-        An address with a password and no username is left as it is: the
-        fields cannot carry a password without a username."""
-        url, username, password = self._split_url_login(entry.get("rtsp_url"))
-        if not username:
-            return False
-        replaced = (
-            (entry.get("username") and entry["username"] != username)
-            or (password is not None and entry.get("password") and entry["password"] != password)
-        )
-        entry["rtsp_url"] = url
-        entry["username"] = username
-        if password is not None:
-            entry["password"] = password
-        if replaced and self.api is not None:
-            self.api.log(
-                f"Stream '{entry.get('stream_id', '')}': the login written into its "
-                "address replaced its Username and Password",
-                level="warning",
-            )
-        return True
-
-    def _saved_password_for(self, body):
-        """The saved password a Test sent as SAVED_LOGIN stands for: the
-        stream named in ``body``, else the stream at the same address with the
-        same username, else none."""
-        stream = self._find_stream(body.stream_id) if body.stream_id else None
-        if stream is None:
-            address = (body.rtsp_url or "").strip()
-            stream = next(
-                (
-                    s for s in self._streams
-                    if (s.get("rtsp_url") or "").strip() == address
-                    and (s.get("username") or "") == (body.username or "")
-                ),
-                None,
-            )
-        return (stream or {}).get("password") or ""
 
     async def _publish_streams(self):
         await self._publish_stream_list()
@@ -1618,33 +1490,15 @@ class VideoPanelPlugin:
 
     def _is_known_stream(self, stream_id):
         """A stream the panel may play: configured or auto-discovered."""
-        return self._find_stream(stream_id) is not None or stream_id in self._discovered
+        return (
+            stream_records.find(self._streams, stream_id) is not None
+            or stream_id in self._discovered
+        )
 
     def _resolve_mjpeg_url(self, stream_id):
         """Upstream MJPEG URL for a discovered source, or None if not MJPEG."""
         d = self._discovered.get(stream_id)
         return d["url"] if d and d["format"] == "mjpeg" else None
-
-    @staticmethod
-    def _stream_source_url(stream):
-        return VideoPanelPlugin._source_url(
-            stream.get("rtsp_url") or "", stream.get("username") or "", stream.get("password") or ""
-        )
-
-    @staticmethod
-    def _source_url(url, username, password):
-        url = (url or "").strip()
-        if not url or "://" not in url:
-            return None
-        if not username:
-            return url
-        scheme, _, rest = url.partition("://")
-        authority = rest.split("/", 1)[0]
-        if "@" in authority:
-            # Credentials already embedded in the URL — leave it as authored.
-            return url
-        cred = f"{quote(username, safe='')}:{quote(password, safe='')}@"
-        return f"{scheme}://{cred}{rest}"
 
     # ──── HTTP router (mounted at /api/plugins/video_panel/ext/) ────
 
@@ -1662,38 +1516,24 @@ class VideoPanelPlugin:
         @router.get("/streams")
         async def list_streams():
             live = await self._live_status_map()
-            return {"streams": [self._stream_view(s, live) for s in self._streams]}
+            return {"streams": [stream_records.programmer_view(s, live) for s in self._streams]}
 
         @router.post("/streams")
         async def add_stream(data: StreamIn):
-            self._validate_url(data.rtsp_url)
-            stream_id = (data.stream_id or "").strip() or self._unique_stream_id(data.name)
-            self._validate_stream_id(stream_id)
-            if self._find_stream(stream_id):
-                raise HTTPException(409, f"A stream with id '{stream_id}' already exists.")
-            entry = self._entry_from_input(data, stream_id)
-            self._move_url_login(entry)
+            entry = stream_records.new_record(self._streams, data, self.api.log)
             self._streams.append(entry)
             await self._persist_streams()
             await self._sync_path_add(entry)
             await self._publish_streams()
             live = await self._live_status_map()
-            return self._stream_view(entry, live)
+            return stream_records.programmer_view(entry, live)
 
         @router.put("/streams/{stream_id}")
         async def edit_stream(stream_id: str, data: StreamIn):
-            existing = self._find_stream(stream_id)
+            existing = stream_records.find(self._streams, stream_id)
             if not existing:
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
-            self._validate_url(data.rtsp_url)
-            new_id = (data.stream_id or "").strip() or stream_id
-            self._validate_stream_id(new_id)
-            if new_id != stream_id and self._find_stream(new_id):
-                raise HTTPException(409, f"A stream with id '{new_id}' already exists.")
-            # SAVED_LOGIN keeps the stream's own password, whatever its id
-            # becomes.
-            entry = self._entry_from_input(data, new_id, existing.get("password") or "")
-            self._move_url_login(entry)
+            entry = stream_records.edited_record(self._streams, existing, data, self.api.log)
             self._streams[self._streams.index(existing)] = entry
             await self._persist_streams()
             # save_config does not restart the plugin, so the MediaMTX path must be
@@ -1702,11 +1542,11 @@ class VideoPanelPlugin:
             await self._sync_path_add(entry)
             await self._publish_streams()
             live = await self._live_status_map()
-            return self._stream_view(entry, live)
+            return stream_records.programmer_view(entry, live)
 
         @router.delete("/streams/{stream_id}")
         async def delete_stream(stream_id: str):
-            existing = self._find_stream(stream_id)
+            existing = stream_records.find(self._streams, stream_id)
             if not existing:
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
             self._streams.remove(existing)
@@ -1718,27 +1558,25 @@ class VideoPanelPlugin:
 
         @router.post("/streams/probe")
         async def probe_stream(body: ProbeIn):
-            self._validate_url(body.rtsp_url)
+            stream_records.validate_url(body.rtsp_url)
             if not self._ffmpeg_bin:
                 raise HTTPException(
                     503,
                     "ffmpeg is not available. Reinstall the Video Panel plugin to "
                     "fetch its native dependencies.",
                 )
-            password = body.password
-            if password == SAVED_LOGIN:
-                password = self._saved_password_for(body)
-            url = self._source_url(body.rtsp_url, body.username, password)
+            password = stream_records.password_for_test(self._streams, body)
+            url = stream_records.source_url(body.rtsp_url, body.username, password)
             return await self._probe_rtsp(url)
 
         @router.get("/streams/{stream_id}/snapshot.jpg")
         async def snapshot(stream_id: str):
-            stream = self._find_stream(stream_id)
+            stream = stream_records.find(self._streams, stream_id)
             if not stream:
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
             if not self._ffmpeg_bin:
                 raise HTTPException(503, "ffmpeg is not available.")
-            data = await self._snapshot_rtsp(self._stream_source_url(stream))
+            data = await self._snapshot_rtsp(stream_records.stream_source_url(stream))
             if not data:
                 raise HTTPException(502, "Could not capture a frame from the stream.")
             return Response(
@@ -1754,7 +1592,7 @@ class VideoPanelPlugin:
         # playback, and dispatches on what comes back.
         @router.get("/delivery/{stream_id}")
         async def delivery(stream_id: str, request: Request):
-            self._validate_stream_id(stream_id)
+            stream_records.validate_stream_id(stream_id)
             if not self._is_known_stream(stream_id):
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
             return self._delivery_for(stream_id, request)
@@ -1769,7 +1607,7 @@ class VideoPanelPlugin:
             reason = " ".join(body.reason.split())[:200]
             stream_id = body.stream_id or ""
             if stream_id:
-                self._validate_stream_id(stream_id)
+                stream_records.validate_stream_id(stream_id)
             await self.api.state_set("playback_error", reason)
             await self.api.state_set("playback_error_stream", stream_id)
             await self.api.state_set(
@@ -1785,7 +1623,7 @@ class VideoPanelPlugin:
         # follow-up comes back through here authenticated.
         @router.get("/hls/{stream_id}/{filename}")
         async def hls(stream_id: str, filename: str, request: Request):
-            self._validate_stream_id(stream_id)
+            stream_records.validate_stream_id(stream_id)
             if not self._is_known_stream(stream_id):
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
             if not _HLS_FILE_RE.fullmatch(filename or ""):
@@ -1814,7 +1652,7 @@ class VideoPanelPlugin:
         # only the OpenAVC host needs a route to the AV/video LAN.
         @router.get("/mjpeg/{stream_id}")
         async def mjpeg(stream_id: str, request: Request):
-            self._validate_stream_id(stream_id)
+            stream_records.validate_stream_id(stream_id)
             url = self._resolve_mjpeg_url(stream_id)
             if not url:
                 raise HTTPException(404, f"No MJPEG preview for '{stream_id}'.")
@@ -1837,7 +1675,7 @@ class VideoPanelPlugin:
         # teardown then come back through here.
         @router.post("/whep/{stream_id}")
         async def whep_offer(stream_id: str, request: Request):
-            self._validate_stream_id(stream_id)
+            stream_records.validate_stream_id(stream_id)
             if not self._is_known_stream(stream_id):
                 raise HTTPException(404, f"No stream with id '{stream_id}'.")
             # allow_internal: the sidecar is on localhost; proxy_to refuses
@@ -1853,7 +1691,7 @@ class VideoPanelPlugin:
 
         @router.patch("/whep/{stream_id}/{secret}")
         async def whep_trickle(stream_id: str, secret: str, request: Request):
-            self._validate_stream_id(stream_id)
+            stream_records.validate_stream_id(stream_id)
             self._validate_secret(secret)
             return await self.api.proxy_to(
                 self._whep_url(stream_id, secret), request, allow_internal=True
@@ -1861,7 +1699,7 @@ class VideoPanelPlugin:
 
         @router.delete("/whep/{stream_id}/{secret}")
         async def whep_teardown(stream_id: str, secret: str, request: Request):
-            self._validate_stream_id(stream_id)
+            stream_records.validate_stream_id(stream_id)
             self._validate_secret(secret)
             return await self.api.proxy_to(
                 self._whep_url(stream_id, secret), request, allow_internal=True
@@ -2049,19 +1887,6 @@ class VideoPanelPlugin:
         return StreamingResponse(
             _pump(), media_type=media_type, headers={"Cache-Control": "no-store"}
         )
-
-    @staticmethod
-    def _validate_url(url):
-        if not url or "://" not in url:
-            raise HTTPException(422, "Source URL must be a full URL, e.g. rtsp://host:554/stream.")
-
-    @staticmethod
-    def _validate_stream_id(stream_id):
-        if not _STREAM_ID_RE.fullmatch(stream_id or ""):
-            raise HTTPException(
-                422,
-                "Stream ID may contain only letters, numbers, hyphens, and underscores.",
-            )
 
     @staticmethod
     def _validate_secret(secret):

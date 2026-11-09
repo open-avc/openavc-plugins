@@ -34,8 +34,10 @@ try:
     from fastapi.testclient import TestClient
     from starlette.responses import Response
 
+    from integrations.video_panel import stream_records
     from integrations.video_panel import video_panel_plugin as vp_mod
-    from integrations.video_panel.video_panel_plugin import SAVED_LOGIN, VideoPanelPlugin
+    from integrations.video_panel.stream_records import SAVED_LOGIN
+    from integrations.video_panel.video_panel_plugin import VideoPanelPlugin
 
     _PLUGIN_IMPORTABLE = True
 except Exception:  # fastapi/httpx not installed in this environment
@@ -178,7 +180,7 @@ def test_an_entry_fills_every_blank_and_keeps_its_key_order():
         name="   ", rtsp_url=None, username=None, password=None,
         codec_hint="", transcode=None, hardware_accel="",
     )
-    entry = VideoPanelPlugin._entry_from_input(form, "cam")
+    entry = stream_records.entry_from_input(form, "cam")
     assert list(entry.items()) == [
         ("stream_id", "cam"), ("name", "cam"), ("rtsp_url", ""),
         ("username", ""), ("password", ""), ("codec_hint", "auto"),
@@ -189,13 +191,13 @@ def test_an_entry_fills_every_blank_and_keeps_its_key_order():
 def test_an_entry_sent_the_marker_keeps_the_saved_password_or_none():
     form = _Form(password=SAVED_LOGIN, codec_hint="h265", transcode="never",
                  hardware_accel="qsv", name=" Lobby ", rtsp_url=" rtsp://a/b ")
-    kept = VideoPanelPlugin._entry_from_input(form, "lobby", "secret")
+    kept = stream_records.entry_from_input(form, "lobby", "secret")
     assert kept["password"] == "secret"
     assert (kept["name"], kept["rtsp_url"]) == ("Lobby", "rtsp://a/b")
     assert (kept["codec_hint"], kept["transcode"], kept["hardware_accel"]) == ("h265", "never", "qsv")
-    assert VideoPanelPlugin._entry_from_input(form, "lobby")["password"] == ""
-    assert VideoPanelPlugin._entry_from_input(form, "lobby", None)["password"] == ""
-    typed = VideoPanelPlugin._entry_from_input(_Form(password="new"), "x", "secret")
+    assert stream_records.entry_from_input(form, "lobby")["password"] == ""
+    assert stream_records.entry_from_input(form, "lobby", None)["password"] == ""
+    typed = stream_records.entry_from_input(_Form(password="new"), "x", "secret")
     assert typed["password"] == "new"
 
 
@@ -215,14 +217,12 @@ def test_an_entry_sent_the_marker_keeps_the_saved_password_or_none():
     ("srt://u:p:z@h:9000", ("srt://h:9000", "u", "p:z")),
 ])
 def test_splitting_a_login_out_of_an_address(url, expected):
-    assert VideoPanelPlugin._split_url_login(url) == expected
+    assert stream_records.split_url_login(url) == expected
 
 
 def _move(entry, api=True):
     plugin, entries = _plugin()
-    if not api:
-        plugin.api = None
-    changed = plugin._move_url_login(entry)
+    changed = stream_records.move_url_login(entry, plugin.api.log if api else None)
     return changed, entry, list(entries)
 
 
@@ -285,17 +285,22 @@ def test_which_saved_password_a_test_stands_for():
         _stream("c", rtsp_url="rtsp://h/2", username="u", password=None),
         _stream("d", rtsp_url=None, username=None, password="pd"),
     ])
-    assert plugin._saved_password_for(_Probe(stream_id="b")) == "pb"
+
+    def saved(**probe):
+        return stream_records.password_for_test(
+            plugin._streams, _Probe(password=SAVED_LOGIN, **probe))
+
+    assert saved(stream_id="b") == "pb"
     # A named stream that is gone falls back to the address.
-    assert plugin._saved_password_for(_Probe(stream_id="zz", rtsp_url="rtsp://h/1")) == "pa"
+    assert saved(stream_id="zz", rtsp_url="rtsp://h/1") == "pa"
     # The first match wins; both sides are stripped.
-    assert plugin._saved_password_for(_Probe(rtsp_url=" rtsp://h/1 ")) == "pa"
+    assert saved(rtsp_url=" rtsp://h/1 ") == "pa"
     # A username that does not match finds nothing; None reads as empty.
-    assert plugin._saved_password_for(_Probe(rtsp_url="rtsp://h/1", username="x")) == ""
-    assert plugin._saved_password_for(_Probe(rtsp_url="", username=None)) == "pd"
+    assert saved(rtsp_url="rtsp://h/1", username="x") == ""
+    assert saved(rtsp_url="", username=None) == "pd"
     # A stream with no password answers empty.
-    assert plugin._saved_password_for(_Probe(rtsp_url="rtsp://h/2", username="u")) == ""
-    assert plugin._saved_password_for(_Probe(stream_id="c")) == ""
+    assert saved(rtsp_url="rtsp://h/2", username="u") == ""
+    assert saved(stream_id="c") == ""
 
 
 @pytest.mark.parametrize("url, user, password, expected", [
@@ -311,37 +316,37 @@ def test_which_saved_password_a_test_stands_for():
     ("rtsp://h/x", "u", "", "rtsp://u:@h/x"),
 ])
 def test_putting_a_login_back_into_a_source_address(url, user, password, expected):
-    assert VideoPanelPlugin._source_url(url, user, password) == expected
+    assert stream_records.source_url(url, user, password) == expected
 
 
 def test_a_stream_source_reads_missing_fields_as_empty():
-    assert VideoPanelPlugin._stream_source_url({"rtsp_url": "rtsp://h/x", "username": "u"}) == "rtsp://u:@h/x"
-    assert VideoPanelPlugin._stream_source_url({}) is None
+    assert stream_records.stream_source_url({"rtsp_url": "rtsp://h/x", "username": "u"}) == "rtsp://u:@h/x"
+    assert stream_records.stream_source_url({}) is None
 
 
 def test_ids_from_names():
-    assert VideoPanelPlugin._slugify(None) == "stream"
-    assert VideoPanelPlugin._slugify("Ünïcode Cam") == "n_code_cam"
+    assert stream_records.slugify(None) == "stream"
+    assert stream_records.slugify("Ünïcode Cam") == "n_code_cam"
     plugin, _ = _plugin([_stream("lobby"), _stream("lobby_2")])
-    assert plugin._unique_stream_id("Lobby") == "lobby_3"
-    assert plugin._unique_stream_id("!!!") == "stream"
+    assert stream_records.unique_stream_id(plugin._streams, "Lobby") == "lobby_3"
+    assert stream_records.unique_stream_id(plugin._streams, "!!!") == "stream"
     plugin, _ = _plugin([_stream("lobby_2")])
-    assert plugin._unique_stream_id("Lobby") == "lobby"
+    assert stream_records.unique_stream_id(plugin._streams, "Lobby") == "lobby"
 
 
 def test_the_three_checks_and_their_sentences():
     for bad in (None, "", "rtsp:/x"):
         with pytest.raises(HTTPException) as exc:
-            VideoPanelPlugin._validate_url(bad)
+            stream_records.validate_url(bad)
         assert (exc.value.status_code, exc.value.detail) == (
             422, "Source URL must be a full URL, e.g. rtsp://host:554/stream.")
-    VideoPanelPlugin._validate_url("x://")
+    stream_records.validate_url("x://")
     for bad in (None, "", "a b", "a.b", "é"):
         with pytest.raises(HTTPException) as exc:
-            VideoPanelPlugin._validate_stream_id(bad)
+            stream_records.validate_stream_id(bad)
         assert (exc.value.status_code, exc.value.detail) == (
             422, "Stream ID may contain only letters, numbers, hyphens, and underscores.")
-    VideoPanelPlugin._validate_stream_id("a-b_C9")
+    stream_records.validate_stream_id("a-b_C9")
     for bad in (None, "", "a_b", "a/b"):
         with pytest.raises(HTTPException) as exc:
             VideoPanelPlugin._validate_secret(bad)
@@ -350,15 +355,15 @@ def test_the_three_checks_and_their_sentences():
 
 
 def test_the_view_the_programmer_is_given():
-    with_pw = VideoPanelPlugin._stream_view(_stream("a", password="x"), {"a": True})
+    with_pw = stream_records.programmer_view(_stream("a", password="x"), {"a": True})
     assert list(with_pw.items()) == [
         ("stream_id", "a"), ("name", "A"), ("rtsp_url", "rtsp://cam/a"), ("username", ""),
         ("password", SAVED_LOGIN), ("codec_hint", "h264"), ("transcode", "auto"),
         ("hardware_accel", "auto"), ("status", "streaming"),
     ]
-    bare = VideoPanelPlugin._stream_view({"stream_id": "b"}, {"b": False})
+    bare = stream_records.programmer_view({"stream_id": "b"}, {"b": False})
     assert list(bare.items()) == [("stream_id", "b"), ("password", ""), ("status", "idle")]
-    assert VideoPanelPlugin._stream_view({"stream_id": "c", "password": None}, {})["password"] == ""
+    assert stream_records.programmer_view({"stream_id": "c", "password": None}, {})["password"] == ""
 
 
 # ──── The plugin page's operations, in order ────
