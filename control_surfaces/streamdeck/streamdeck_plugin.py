@@ -14,9 +14,9 @@ declares, and the writes to a network deck's entry), dials.py (what a dial
 gesture runs, and the touch strip's zones), key_entries.py (which config entry
 a key runs, and the actions a binding holds), looks.py (what a key, a strip
 zone or an info item shows: the value line, the meter, the feedback style),
-virtual_deck.py (a deck that
-exists only in software) and watch_keys.py (which state keys a deck reads, and
-what each one redraws).
+context_actions.py (what a context action or a simulated input asks for),
+virtual_deck.py (a deck that exists only in software) and watch_keys.py (which
+state keys a deck reads, and what each one redraws).
 """
 
 import asyncio
@@ -32,6 +32,7 @@ from types import SimpleNamespace
 
 from .conditions import coerce_numeric, eval_condition, reads_as_on
 from .config_check import config_problems
+from .context_actions import action_for, deck_action_args, simulated_inputs
 from .declared_decks import (
     edit_network_decks,
     network_deck_entries,
@@ -1332,15 +1333,12 @@ class StreamDeckPlugin:
             await self.api.state_set(f"{session.serial}.touch_key.{index}", color)
 
     async def _simulate_input(self, payload):
-        """Dispatch a simulated key/dial/touch input into a session.
+        """Run a simulated key/dial/touch input on a deck.
 
         Used by the IDE workbench (clicking a virtual or physical deck's
-        image). Runs the exact same handler paths as hardware input.
-        Payload: ``{serial, type: key|dial_turn|dial_push|touch, index?,
-        pressed?, amount?, x?, y?, touch_type?: short|long|drag, x_out?}``.
-        A ``key`` or ``dial_push`` without ``pressed`` is a full tap
-        (press + release); ``touch`` defaults to a short tap and a drag
-        needs ``x_out``.
+        image). Runs the exact same handler paths as hardware input. The
+        payload (``{serial, type: key|dial_turn|dial_push|touch, ...}``) is
+        read by context_actions.simulated_inputs.
         """
         serial = str(payload.get("serial", ""))
         session = next(
@@ -1352,78 +1350,22 @@ class StreamDeckPlugin:
                 level="warning",
             )
             return
-
-        kind = payload.get("type")
-        if kind == "key":
-            try:
-                index = int(payload.get("index"))
-            except (TypeError, ValueError):
-                return
-            total = session.deck.key_count() + session.deck.touch_key_count()
-            if not 0 <= index < total:
-                return
-            pressed = payload.get("pressed")
-            if pressed is None:
-                # Full tap: press then release, like a quick physical press.
-                await self._on_key_change(session, session.deck, index, True)
-                await self._on_key_change(session, session.deck, index, False)
-            else:
-                await self._on_key_change(session, session.deck, index, bool(pressed))
-
-        elif kind == "dial_turn":
-            try:
-                index = int(payload.get("index"))
-                amount = int(payload.get("amount", 1))
-            except (TypeError, ValueError):
-                return
-            await self._on_dial_event(
-                session, session.deck, index, SimpleNamespace(name="TURN"), amount
-            )
-
-        elif kind == "dial_push":
-            try:
-                index = int(payload.get("index"))
-            except (TypeError, ValueError):
-                return
-            pressed = payload.get("pressed")
-            if pressed is None:
-                # Full tap: push then release, like a quick physical press.
+        deck = session.deck
+        inputs = simulated_inputs(
+            payload, lambda: deck.key_count() + deck.touch_key_count()
+        )
+        for kind, *args in inputs:
+            if kind == "key":
+                await self._on_key_change(session, deck, *args)
+            elif kind == "dial":
+                index, event, value = args
                 await self._on_dial_event(
-                    session, session.deck, index, SimpleNamespace(name="PUSH"), True
-                )
-                await self._on_dial_event(
-                    session, session.deck, index, SimpleNamespace(name="PUSH"), False
+                    session, deck, index, SimpleNamespace(name=event), value
                 )
             else:
-                await self._on_dial_event(
-                    session, session.deck, index,
-                    SimpleNamespace(name="PUSH"), bool(pressed),
-                )
-
-        elif kind == "touch":
-            try:
-                x = int(payload.get("x"))
-            except (TypeError, ValueError):
-                return
-            try:
-                y = int(payload.get("y", 50))
-            except (TypeError, ValueError):
-                y = 50
-            touch_type = str(payload.get("touch_type", "short")).lower()
-            if touch_type == "drag":
-                try:
-                    x_out = int(payload.get("x_out"))
-                except (TypeError, ValueError):
-                    return
+                event, value = args
                 await self._on_touchscreen_event(
-                    session, session.deck, SimpleNamespace(name="DRAG"),
-                    {"x": x, "y": y, "x_out": x_out, "y_out": y},
-                )
-            else:
-                name = "LONG" if touch_type == "long" else "SHORT"
-                await self._on_touchscreen_event(
-                    session, session.deck, SimpleNamespace(name=name),
-                    {"x": x, "y": y},
+                    session, deck, SimpleNamespace(name=event), value
                 )
 
     async def _set_live_mirror(self, payload):
@@ -3306,54 +3248,36 @@ class StreamDeckPlugin:
     # ──── Context Actions ────
 
     async def _on_context_action(self, event_name, payload):
-        """Handle context action events."""
+        """Run the context action an event names (context_actions.py): a
+        simulated input, the live mirror switch, or a deck action on the
+        deck its payload names (every deck without a serial)."""
         data = payload if isinstance(payload, dict) else {}
-        if "action.simulate_input" in event_name:
+        action = action_for(event_name)
+        if action == "simulate_input":
             await self._simulate_input(data)
-        elif "action.set_live_mirror" in event_name:
+        elif action == "set_live_mirror":
             await self._set_live_mirror(data)
-        elif event_name.endswith(".set_page"):
-            try:
-                page = int(data.get("page"))
-            except (TypeError, ValueError):
+        elif action is not None:
+            args = deck_action_args(action, data)
+            if args is None:
                 return
             for session in self._sessions_for(data.get("serial")):
-                await self._change_page(session, page)
-        elif event_name.endswith(".set_brightness"):
-            level = coerce_numeric(data.get("level"))
-            if level is None:
-                return
-            level = max(0, min(100, int(level)))
-            for session in self._sessions_for(data.get("serial")):
-                self._set_deck_brightness(session, level)
-        elif event_name.endswith(".flash_key"):
-            try:
-                index = int(data.get("index"))
-            except (TypeError, ValueError):
-                return
-            try:
-                times = max(1, min(10, int(data.get("times", 2))))
-            except (TypeError, ValueError):
-                times = 2
-            for session in self._sessions_for(data.get("serial")):
-                await self._flash_key(session, index, times)
-        elif event_name.endswith(".show_message"):
-            text = str(data.get("text", "")).strip()
-            if not text:
-                return
-            seconds = coerce_numeric(data.get("seconds"))
-            seconds = float(seconds) if seconds is not None and seconds > 0 else 5.0
-            for session in self._sessions_for(data.get("serial")):
-                if session.drawable:
-                    await self._show_message(session, text, seconds)
-        elif "action.identify" in event_name:
-            # A serial in the payload identifies one specific deck (the deck
-            # picker's per-deck Identify); without one, flash every deck.
-            serial = data.get("serial")
-            for session in list(self._sessions.values()):
-                if serial and session.serial != serial:
-                    continue
-                await self._identify_deck(session)
+                await self._run_deck_action(action, session, args)
+
+    async def _run_deck_action(self, action, session, args):
+        """One deck action on one deck; a message shows only on a deck with
+        a screen."""
+        if action == "set_page":
+            await self._change_page(session, *args)
+        elif action == "set_brightness":
+            self._set_deck_brightness(session, *args)
+        elif action == "flash_key":
+            await self._flash_key(session, *args)
+        elif action == "show_message":
+            if session.drawable:
+                await self._show_message(session, *args)
+        else:
+            await self._identify_deck(session)
 
     async def _identify_deck(self, session):
         """Flash a deck's buttons to identify which physical deck it is."""
