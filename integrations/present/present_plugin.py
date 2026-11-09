@@ -69,12 +69,13 @@ except ImportError:  # pragma: no cover - exercised only via package-path import
     from .sidecar import SidecarSupervisor
 
 try:
+    import display_records
     import encoders
     import join_address
     import kiosk
     import output
 except ImportError:  # pragma: no cover - exercised only via package-path import
-    from . import encoders, join_address, kiosk, output
+    from . import display_records, encoders, join_address, kiosk, output
 
 # A sentence raised as PluginRefusal from start() is the one the AI assistant
 # repeats to the integrator; on an older OpenAVC the card shows it either way.
@@ -135,18 +136,11 @@ _NAME_MAX_CHARS = 60
 _INGEST_PREFIX = "in"
 _OUTPUT_PREFIX = "out"
 
-# The display kinds. Browser displays open the Display page; stream displays
-# are pulled by hardware decoders from the persistent per-display output.
-_DISPLAY_KINDS = ("browser", "stream")
-
 # The routing value that means "follow the active presenter" rather than a
 # pinned one. Reserved everywhere a presenter or display name could collide
 # with it.
 _AUTO = "auto"
 
-# Display ids become state-key segments and URL path segments, so keep them to
-# a portable, URL-safe character set.
-_DISPLAY_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Presenter names arrive as the second segment of an ingest path
 # (in/<presenter>), chosen by the publisher; constrain before they're spliced
 # into proxied sidecar URLs.
@@ -154,12 +148,6 @@ _PRESENTER_RE = re.compile(r"[A-Za-z0-9._-]+")
 # WHEP session secrets are MediaMTX-minted UUIDs; constrain to a URL-safe set
 # before they're spliced into the proxied sidecar URL.
 _SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
-
-# Display ids that would collide with the routing "auto" sentinel, the sidecar
-# path namespaces, or the guest URL segments.
-_RESERVED_DISPLAY_IDS = {
-    _AUTO, "connect", "display", "displays", "status", "whep", "whip", "in", "out",
-}
 
 _DISPLAY_ERROR_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Present</title>
@@ -663,43 +651,7 @@ class PresentPlugin:
         self._displays = []
         if not isinstance(configured, list):
             return
-        changed = False
-        for display in configured:
-            if not isinstance(display, dict):
-                continue
-            display_id = (display.get("id") or "").strip()
-            if not display_id or not _DISPLAY_ID_RE.fullmatch(display_id):
-                continue
-            if display_id in _RESERVED_DISPLAY_IDS:
-                continue
-            # A display saved without a key (hand-edited project file, older
-            # plugin version) gets one now so its Display URL works.
-            if not display.get("display_key"):
-                display["display_key"] = self._new_display_key()
-                changed = True
-            if display.get("kind") not in _DISPLAY_KINDS:
-                display["kind"] = "browser"
-                changed = True
-            if display["kind"] == "stream" and not display.get("stream_key"):
-                display["stream_key"] = self._new_stream_key()
-                changed = True
-            # local_output is a browser-display feature, and one host output
-            # can only hold one window (hand-edited files can violate both).
-            if display.get("local_output") and display["kind"] != "browser":
-                display.pop("local_output", None)
-                changed = True
-            self._displays.append(display)
-        seen_outputs = set()
-        for display in self._displays:
-            local_output = display.get("local_output")
-            if not local_output:
-                continue
-            if local_output in seen_outputs:
-                display.pop("local_output", None)
-                changed = True
-            else:
-                seen_outputs.add(local_output)
-        if changed:
+        if display_records.load_into(self._displays, configured):
             await self._persist_displays()
         # Routing is runtime state: every display comes up following the
         # active presenter. Pins don't survive a restart (revisit if that
@@ -714,35 +666,7 @@ class PresentPlugin:
         await self.api.save_config(cfg)
 
     def _find_display(self, display_id):
-        for d in self._displays:
-            if d.get("id") == display_id:
-                return d
-        return None
-
-    def _unique_display_id(self, label):
-        base = self._slugify(label)
-        did = base
-        n = 2
-        while self._find_display(did) or did in _RESERVED_DISPLAY_IDS:
-            did = f"{base}_{n}"
-            n += 1
-        return did
-
-    @staticmethod
-    def _slugify(label):
-        slug = re.sub(r"[^a-z0-9]+", "_", (label or "").lower()).strip("_")
-        return slug or "display"
-
-    @staticmethod
-    def _new_display_key():
-        return secrets.token_urlsafe(24)
-
-    @staticmethod
-    def _new_stream_key():
-        # Deliberately short: decoder UIs are often typed with a remote.
-        # Guessing runs against MediaMTX directly (no platform rate limiter),
-        # but 8 URL-safe chars is far beyond LAN brute-force reach.
-        return secrets.token_urlsafe(6)
+        return display_records.find(self._displays, display_id)
 
     def _display_path(self, display):
         """Site-relative Display URL; the plugin page prepends the origin.
@@ -794,23 +718,6 @@ class PresentPlugin:
                     "url": self._local_display_url(display),
                 }
         await self._kiosk.sync(specs)
-
-    def _validate_local_output(self, output_id, kind, exclude_id=None):
-        """422/409 when a local_output assignment isn't allowed."""
-        if kind != "browser":
-            raise HTTPException(
-                422,
-                "Only a browser display can be shown on one of this "
-                "server's video outputs.",
-            )
-        for display in self._displays:
-            if display.get("id") == exclude_id:
-                continue
-            if display.get("local_output") == output_id:
-                label = display.get("label") or display["id"]
-                raise HTTPException(
-                    409, f"That output is already showing display '{label}'."
-                )
 
     # ──── Routing (the internal matrix) ────
 
@@ -1117,7 +1024,7 @@ class PresentPlugin:
         platform rate limiter's brute-force accounting.
         """
         display = None
-        if _DISPLAY_ID_RE.fullmatch(display_id or ""):
+        if display_records.ID_RE.fullmatch(display_id or ""):
             display = self._find_display(display_id)
         supplied = (key or "").strip()
         expected = (display or {}).get("display_key") or ""
@@ -1371,27 +1278,9 @@ class PresentPlugin:
 
         @router.post("/displays")
         async def add_display(data: DisplayIn):
-            label = (data.label or "").strip()
-            if not label:
-                raise HTTPException(422, "Display name is required.")
-            kind = self._validate_kind(data.kind)
-            display_id = (data.display_id or "").strip() or self._unique_display_id(label)
-            self._validate_display_id(display_id)
-            if self._find_display(display_id):
-                raise HTTPException(409, f"A display with id '{display_id}' already exists.")
-            local_output = (data.local_output or "").strip()
-            if local_output:
-                self._validate_local_output(local_output, kind)
-            display = {
-                "id": display_id,
-                "label": label,
-                "kind": kind,
-                "display_key": self._new_display_key(),
-            }
-            if kind == "stream":
-                display["stream_key"] = self._new_stream_key()
-            if local_output:
-                display["local_output"] = local_output
+            display = display_records.new_record(self._displays, data)
+            kind = display["kind"]
+            display_id = display["id"]
             self._displays.append(display)
             self._routing[display_id] = _AUTO
             await self._persist_displays()
@@ -1406,31 +1295,7 @@ class PresentPlugin:
             display = self._find_display(display_id)
             if not display:
                 raise HTTPException(404, f"No display with id '{display_id}'.")
-            label = (data.label or "").strip()
-            if not label:
-                raise HTTPException(422, "Display name is required.")
-            old_kind = display.get("kind", "browser")
-            kind = self._validate_kind(data.kind) if data.kind is not None else old_kind
-            new_id = (data.display_id or "").strip() or display_id
-            self._validate_display_id(new_id)
-            if new_id != display_id and self._find_display(new_id):
-                raise HTTPException(409, f"A display with id '{new_id}' already exists.")
-            display["label"] = label
-            display["kind"] = kind
-            if kind == "stream" and not display.get("stream_key"):
-                display["stream_key"] = self._new_stream_key()
-            if kind != "browser":
-                # Local windows are a browser-display feature; a kind change
-                # drops the assignment rather than carrying it invisibly.
-                display.pop("local_output", None)
-            if data.local_output is not None:
-                local_output = data.local_output.strip()
-                if local_output:
-                    self._validate_local_output(local_output, kind,
-                                                exclude_id=display_id)
-                    display["local_output"] = local_output
-                else:
-                    display.pop("local_output", None)
+            kind, new_id = display_records.apply_edit(self._displays, display, data)
             if new_id != display_id:
                 # The id is baked into the Display URL, the stream URLs, and
                 # the state keys, so a rename moves the routing and clears old
@@ -1476,7 +1341,7 @@ class PresentPlugin:
             # Display pages get a 401 on their next poll and show the
             # "link isn't valid" card. A local window relaunches on the new
             # URL (its old one just died with the key).
-            display["display_key"] = self._new_display_key()
+            display["display_key"] = display_records.new_display_key()
             await self._persist_displays()
             await self._sync_kiosks()
             return self._display_view(display)
@@ -1490,7 +1355,7 @@ class PresentPlugin:
                 raise HTTPException(422, "Only stream displays have a stream key.")
             # New key = new output path: every decoder holding the old URL
             # loses the stream and must be given the new one.
-            display["stream_key"] = self._new_stream_key()
+            display["stream_key"] = display_records.new_stream_key()
             await self._persist_displays()
             await self._restart_output(display)
             return self._display_view(display)
@@ -1548,23 +1413,6 @@ class PresentPlugin:
                 # started (missing font); before start() it is simply off.
                 view["encoder_state"] = "error" if self._supervisor else "stopped"
         return view
-
-    @staticmethod
-    def _validate_display_id(display_id):
-        if not _DISPLAY_ID_RE.fullmatch(display_id or ""):
-            raise HTTPException(
-                422,
-                "Display ID may contain only letters, numbers, hyphens, and underscores.",
-            )
-        if display_id in _RESERVED_DISPLAY_IDS:
-            raise HTTPException(422, f"'{display_id}' is a reserved name; pick another display ID.")
-
-    @staticmethod
-    def _validate_kind(kind):
-        kind = (kind or "browser").strip().lower()
-        if kind not in _DISPLAY_KINDS:
-            raise HTTPException(422, "Display kind must be 'browser' or 'stream'.")
-        return kind
 
     @staticmethod
     def _validate_presenter(presenter):

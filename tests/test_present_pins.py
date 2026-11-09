@@ -1160,3 +1160,28 @@ async def test_scan_presenters_when_the_api_is_down():
 
     plugin._api_get = deprecated
     assert await plugin._scan_presenters() == {"old", "new"}
+
+
+def test_reserved_display_ids_hold_the_plugins_own_names():
+    """The display rules sit apart from the routing value and the sidecar's
+    path prefixes; a display may take none of them as its id."""
+    from integrations.present import display_records
+
+    for name in (present_plugin._AUTO, present_plugin._INGEST_PREFIX, present_plugin._OUTPUT_PREFIX):
+        assert name in display_records.RESERVED_IDS
+
+
+@pytest.mark.asyncio
+async def test_load_displays_raising_on_a_record_keeps_the_ones_before_it():
+    plugin = _plugin()
+    plugin.api._config["displays"] = [{"id": "a", "display_key": "k", "kind": "browser"}, {"id": 5}]
+    with pytest.raises(AttributeError):
+        await plugin._load_displays()
+    assert [d["id"] for d in plugin._displays] == ["a"]
+    plugin.api._config["displays"] = [
+        {"id": "a", "display_key": "k", "kind": "browser", "local_output": ["x"]},
+    ]
+    with pytest.raises(TypeError):
+        await plugin._load_displays()
+    assert [d["id"] for d in plugin._displays] == ["a"]
+    assert plugin.api.saved == []

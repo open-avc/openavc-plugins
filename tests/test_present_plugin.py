@@ -37,6 +37,7 @@ try:
     from fastapi import FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
+    from integrations.present import display_records
     from integrations.present.present_plugin import PresentPlugin
 
     _PLUGIN_IMPORTABLE = True
@@ -367,25 +368,25 @@ def test_render_config_survives_an_unresolvable_join_address(monkeypatch):
 
 
 def test_slugify_and_unique_display_id():
-    assert PresentPlugin._slugify("Main Screen!") == "main_screen"
-    assert PresentPlugin._slugify("   ") == "display"
+    assert display_records.slugify("Main Screen!") == "main_screen"
+    assert display_records.slugify("   ") == "display"
 
     plugin = _plugin(displays=[_DISPLAY])
-    assert plugin._unique_display_id("Main Screen") == "main_screen"
+    assert display_records.unique_id(plugin._displays, "Main Screen") == "main_screen"
     plugin._displays.append({"id": "main_screen", "label": "x", "display_key": "k"})
-    assert plugin._unique_display_id("Main Screen") == "main_screen_2"
+    assert display_records.unique_id(plugin._displays, "Main Screen") == "main_screen_2"
     # Reserved names are skipped, not produced.
-    assert plugin._unique_display_id("Auto") == "auto_2"
+    assert display_records.unique_id(plugin._displays, "Auto") == "auto_2"
 
 
 def test_validate_display_id_rejects_bad_and_reserved():
-    PresentPlugin._validate_display_id("main")
+    display_records.check_id("main")
     with pytest.raises(HTTPException) as e:
-        PresentPlugin._validate_display_id("bad id!")
+        display_records.check_id("bad id!")
     assert e.value.status_code == 422
     for reserved in ("auto", "connect", "display", "displays", "in", "out", "status", "whep", "whip"):
         with pytest.raises(HTTPException) as e:
-            PresentPlugin._validate_display_id(reserved)
+            display_records.check_id(reserved)
         assert e.value.status_code == 422
 
 
