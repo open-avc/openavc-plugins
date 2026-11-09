@@ -14,8 +14,10 @@
     },
     "dante": {
       "files": {
-        "integrations/dante/dante_plugin.py": "de36547eca62ce61f84e96a0c4f7309fa090b9b58cb75bf65187984ec315e329",
-        "integrations/dante/plugin.json": "299fede7829ee15cb321c23eb449e7072ffb9c52844a1f2b24f65280daca6365"
+        "integrations/dante/channel_keys.py": "a3e8a6e8e796ee8545432da9d43dd29028e62f2277aa2b269c432f1abcda0893",
+        "integrations/dante/dante_plugin.py": "cca68d0194673928ff63af61a956c974712d733e08752351d16423c00adfc9fd",
+        "integrations/dante/plugin.json": "527714c5a84357d5b273ec115397e8c977bb0c7df05bb5c891a07faebe37616b",
+        "integrations/dante/routing.py": "066197c6c3c32a4fd7739d6d1c8b3ad98d7891ee69f4691c5637f731f28433d4"
       }
     },
     "mqtt": {
