@@ -65,8 +65,7 @@ class ProbeIn(BaseModel):
 
     ``password`` is :data:`SAVED_LOGIN` to test with a stream's saved one:
     the stream named by ``stream_id``, or, from a Programmer that does not
-    send one, the stream with the same address and username
-    (:func:`password_for_test`)."""
+    send one, the stream with the same address and username."""
 
     rtsp_url: str
     username: str = ""
