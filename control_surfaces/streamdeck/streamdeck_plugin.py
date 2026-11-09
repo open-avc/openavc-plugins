@@ -62,7 +62,10 @@ from .deck_profile import (
     connected_line,
     deck_geometry,
     deck_identity,
+    is_touch_key,
+    key_total,
     tell_link_serial,
+    touch_key_indexes,
 )
 from .dials import (
     dial_entry,
@@ -1348,7 +1351,7 @@ class StreamDeckPlugin:
             return
         deck = session.deck
         inputs = simulated_inputs(
-            payload, lambda: deck.key_count() + deck.touch_key_count()
+            payload, lambda: key_total(deck)
         )
         for kind, *args in inputs:
             if kind == "key":
@@ -1392,7 +1395,7 @@ class StreamDeckPlugin:
         deck = session.deck
         if not session.drawable or session.overlay_active:
             return
-        if not 0 <= index < deck.key_count() + deck.touch_key_count():
+        if not 0 <= index < key_total(deck):
             return
         is_touch = self._is_touch_key(session, index)
         white = None
@@ -1470,9 +1473,7 @@ class StreamDeckPlugin:
                 (col * key_w, row * key_h, (col + 1) * key_w, (row + 1) * key_h)
             )
             self._apply_key_image(session, index, tile)
-        for index in range(
-            deck.key_count(), deck.key_count() + deck.touch_key_count()
-        ):
+        for index in touch_key_indexes(deck):
             self._apply_key_color(session, index, "#ffffff")
 
     # Where the overlay writes on the strip and the screen: the deck's format
@@ -2401,17 +2402,16 @@ class StreamDeckPlugin:
         if not session.drawable:
             return
 
-        key_count = session.deck.key_count() + session.deck.touch_key_count()
-        for key_index in range(key_count):
+        for key_index in range(key_total(session.deck)):
             await self._render_button(session, key_index)
 
     @staticmethod
     def _is_touch_key(session, key_index):
-        """True for the color-only touch keys indexed after the LCD keys."""
+        """True for the color-only touch keys indexed after the LCD keys
+        (deck_profile.is_touch_key); False with no deck."""
         if not session.deck:
             return False
-        key_count = session.deck.key_count()
-        return key_count <= key_index < key_count + session.deck.touch_key_count()
+        return is_touch_key(session.deck, key_index)
 
     async def _render_button(self, session, key_index):
         """Draw one key from its entry and the state it reads: an LCD key's
@@ -3078,7 +3078,7 @@ class StreamDeckPlugin:
             f"Identifying Stream Deck {session.serial} (flashing all buttons)"
         )
         key_count = deck.key_count()
-        touch_keys = range(key_count, key_count + deck.touch_key_count())
+        touch_keys = touch_key_indexes(deck)
 
         # Flash white
         white_img = self._create_button_image(session, plain("#ffffff"))
