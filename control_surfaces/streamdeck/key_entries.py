@@ -14,7 +14,9 @@ config check (config_check.py) is what reports them. ``ACTION_KINDS`` are the
 action types a deck runs: the plugin has one runner for each, and the config
 check reports any other type. ``write_door`` is what a state.set action, a dial
 adjust or a zone fader may write; the plugin writes through it and the config
-check reports a key it refuses.
+check reports a key it refuses. A toggle's ``off_action`` and a tap-hold's
+``hold_action`` run in place of the press only as an object with something in
+it (``alternate_action``); anything else runs the press itself.
 """
 
 # The action types a deck runs, in the order the config check lists them.
@@ -62,6 +64,13 @@ def press_actions(bindings):
     if not isinstance(bindings, dict):
         return []
     return action_list(bindings.get("press"))
+
+
+def alternate_action(press, field):
+    """A press action's ``off_action`` or ``hold_action`` (``field``) when it
+    is an object with something in it, else None."""
+    action = press.get(field)
+    return action if isinstance(action, dict) and action else None
 
 
 def global_buttons(cfg):

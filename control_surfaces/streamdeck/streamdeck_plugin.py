@@ -48,6 +48,7 @@ from .declared_decks import (
 )
 from .key_entries import (
     action_list,
+    alternate_action,
     assignment_for,
     press_actions,
     unwrap_binding,
@@ -1640,9 +1641,9 @@ class StreamDeckPlugin:
         if not pressed:
             return
         press = actions[0]
-        off_action = press.get("off_action")
+        off_action = alternate_action(press, "off_action")
         is_on = await self._toggle_is_on(press)
-        if is_on and off_action and isinstance(off_action, dict):
+        if is_on and off_action:
             await self._execute_action(session, off_action, f"key {key_index}")
         else:
             await self._execute_action(session, press, f"key {key_index}")
@@ -1663,8 +1664,8 @@ class StreamDeckPlugin:
             # while the button was hidden) fires nothing.
             return
         held = asyncio.get_event_loop().time() - session.press_times.pop(key_index)
-        hold_action = press.get("hold_action")
-        if held >= threshold and hold_action and isinstance(hold_action, dict):
+        hold_action = alternate_action(press, "hold_action")
+        if held >= threshold and hold_action:
             await self._execute_action(session, hold_action, f"key {key_index}")
         else:
             await self._execute_action(session, press, f"key {key_index}")
