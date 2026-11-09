@@ -42,6 +42,13 @@ VALID_CONFIG_TYPES = {
 
 VALID_PLATFORMS = {"all", "win_x64", "linux_x64", "linux_arm64"}
 
+# The list fields a manifest may carry: the field, what one value is called in
+# a message, and the values it may hold. Checked in this order.
+_LISTED_FIELDS = (
+    ("capabilities", "capability", VALID_CAPABILITIES),
+    ("platforms", "platform", VALID_PLATFORMS),
+)
+
 # Top-level path segments a guest_alias may not shadow. Mirrors
 # openavc/core/plugin_loader.py RESERVED_GUEST_ALIASES.
 RESERVED_GUEST_ALIASES = {
@@ -49,6 +56,9 @@ RESERVED_GUEST_ALIASES = {
     "docs", "redoc", "openapi.json", "assets", "themes", "health",
     "favicon.ico", "static", "simulator",
 }
+
+# What a guest_alias must look like, the whole of it: one lowercase URL segment.
+GUEST_ALIAS_PATTERN = r"[a-z][a-z0-9_-]{0,31}"
 
 # EXTENSIONS types the panel/IDE understand, and the field that uniquely
 # identifies an entry within each type (panel_elements are keyed by `type`,
@@ -79,6 +89,13 @@ PLUGIN_DIRS = list(CATEGORY_DIRS)
 # claims a higher floor than PLUGIN_INFO reads as gated in the catalog while
 # installing onto a core that can't run it.
 AGREED_FIELDS = ("id", "name", "version", "category", "license", "min_openavc_version")
+
+# The fields every index.json entry must have, in the order a missing one is
+# reported.
+INDEX_REQUIRED_FIELDS = (
+    "id", "name", "file", "format", "category", "version", "author", "license",
+    "platforms", "capabilities", "has_native_dependencies", "verified", "description",
+)
 
 _VCS_PREFIXES = ("git+", "hg+", "svn+", "bzr+")
 
@@ -314,83 +331,117 @@ def _defines(statement, name):
 
 
 def validate_plugin_info(plugin_info, result, source="PLUGIN_INFO", unresolved=()):
-    """Validate a PLUGIN_INFO dict.
+    """Validate a PLUGIN_INFO dict, or plugin.json read as one; `source` names
+    which in every message.
 
     `unresolved` names keys that are present in the source but whose value is
-    computed at runtime -- they are declared, so they are not missing.
+    computed at runtime -- they are declared, so they are not missing. The
+    required fields come first, then each of _FIELD_CHECKS in order, each
+    reporting every problem it finds.
     """
-
-    # Required fields
     for field in REQUIRED_MANIFEST_FIELDS:
         if field not in plugin_info and field not in unresolved:
             result.error(f"{source}: missing required field '{field}'")
+    for check in _FIELD_CHECKS:
+        check(plugin_info, source, result)
 
-    # ID format
-    plugin_id = plugin_info.get("id", "")
-    if plugin_id:
-        if not validate_id_format(plugin_id):
-            result.error(f"{source}: invalid plugin ID '{plugin_id}': must be lowercase letters, numbers, and underscores, starting with a letter")
-        if "." in plugin_id:
-            result.error(f"{source}: plugin ID must not contain dots (breaks state key parsing)")
 
-    # Category
-    if "category" in plugin_info:
-        if plugin_info["category"] not in VALID_CATEGORIES:
-            result.error(f"{source}: invalid category '{plugin_info['category']}': must be one of {sorted(VALID_CATEGORIES)}")
+def _check_id(info, source, result):
+    plugin_id = info.get("id", "")
+    if not plugin_id:
+        return
+    if not validate_id_format(plugin_id):
+        result.error(f"{source}: invalid plugin ID '{plugin_id}': must be lowercase letters, numbers, and underscores, starting with a letter")
+    if "." in plugin_id:
+        result.error(f"{source}: plugin ID must not contain dots (breaks state key parsing)")
 
-    # License
-    if "license" in plugin_info:
-        if plugin_info["license"].lower() not in MIT_COMPATIBLE_LICENSES:
-            result.error(f"{source}: license '{plugin_info['license']}' is not MIT-compatible. Must be one of: {sorted(MIT_COMPATIBLE_LICENSES)}")
 
-    # Capabilities
-    if "capabilities" in plugin_info:
-        if not isinstance(plugin_info["capabilities"], list):
-            result.error(f"{source}: capabilities must be a list")
-        else:
-            for cap in plugin_info["capabilities"]:
-                if cap not in VALID_CAPABILITIES:
-                    result.error(f"{source}: invalid capability '{cap}': must be one of {sorted(VALID_CAPABILITIES)}")
+def _check_category(info, source, result):
+    if "category" in info and info["category"] not in VALID_CATEGORIES:
+        result.error(f"{source}: invalid category '{info['category']}': must be one of {sorted(VALID_CATEGORIES)}")
 
-    # Platforms
-    if "platforms" in plugin_info:
-        if not isinstance(plugin_info["platforms"], list):
-            result.error(f"{source}: platforms must be a list")
-        else:
-            for plat in plugin_info["platforms"]:
-                if plat not in VALID_PLATFORMS:
-                    result.error(f"{source}: invalid platform '{plat}': must be one of {sorted(VALID_PLATFORMS)}")
 
-    # Guest alias (top-level short route for the guest router) — mirrors the
-    # platform loader's static rules.
-    if "guest_alias" in plugin_info:
-        alias = plugin_info["guest_alias"]
-        if not isinstance(alias, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", alias):
-            result.error(f"{source}: invalid guest_alias '{alias}': must be one lowercase URL segment (letters, digits, hyphens, underscores; max 32 chars)")
-        elif alias in RESERVED_GUEST_ALIASES:
-            result.error(f"{source}: guest_alias '{alias}' is a reserved platform path")
-        if "guest_endpoints" not in plugin_info.get("capabilities", []):
-            result.error(f"{source}: guest_alias requires the guest_endpoints capability")
+def _check_license(info, source, result):
+    if "license" in info and not is_mit_compatible(info["license"]):
+        result.error(f"{source}: license '{info['license']}' is not MIT-compatible. Must be one of: {sorted(MIT_COMPATIBLE_LICENSES)}")
 
-    # Version format
-    if "version" in plugin_info:
-        if not re.match(r'^\d+\.\d+\.\d+', str(plugin_info["version"])):
-            result.warn(f"{source}: version '{plugin_info['version']}' doesn't follow semver format (X.Y.Z)")
 
-    # Dependencies: each must be a plain named requirement (the installer
-    # rejects URLs/VCS/pip-options), plus a license reminder.
-    if "dependencies" in plugin_info:
-        if not isinstance(plugin_info["dependencies"], list):
-            result.error(f"{source}: dependencies must be a list")
-        elif plugin_info["dependencies"]:
-            for dep in plugin_info["dependencies"]:
-                if not is_safe_requirement(dep):
-                    result.error(
-                        f"{source}: unsafe dependency {dep!r} -- must be a plain "
-                        "'package' or 'package>=x.y' requirement (no URLs, VCS, "
-                        "pip options, or '@' direct references)"
-                    )
-            result.warn(f"{source}: has pip dependencies {plugin_info['dependencies']} -- ensure all are MIT-compatible")
+def _check_listed(info, source, result):
+    """Each of _LISTED_FIELDS present must be a list of its allowed values."""
+    for field, noun, allowed in _LISTED_FIELDS:
+        if field not in info:
+            continue
+        if not isinstance(info[field], list):
+            result.error(f"{source}: {field} must be a list")
+            continue
+        for value in _unknown(info[field], allowed):
+            result.error(f"{source}: invalid {noun} '{value}': must be one of {sorted(allowed)}")
+
+
+def _check_guest_alias(info, source, result):
+    """The guest router's short top-level route: one lowercase URL segment that
+    is not a platform path, and only with the guest_endpoints capability."""
+    if "guest_alias" not in info:
+        return
+    alias = info["guest_alias"]
+    if not _is_url_segment(alias):
+        result.error(f"{source}: invalid guest_alias '{alias}': must be one lowercase URL segment (letters, digits, hyphens, underscores; max 32 chars)")
+    elif alias in RESERVED_GUEST_ALIASES:
+        result.error(f"{source}: guest_alias '{alias}' is a reserved platform path")
+    if "guest_endpoints" not in info.get("capabilities", []):
+        result.error(f"{source}: guest_alias requires the guest_endpoints capability")
+
+
+def _is_url_segment(alias):
+    return isinstance(alias, str) and bool(re.fullmatch(GUEST_ALIAS_PATTERN, alias))
+
+
+def _check_version(info, source, result):
+    if "version" in info and not re.match(r'^\d+\.\d+\.\d+', str(info["version"])):
+        result.warn(f"{source}: version '{info['version']}' doesn't follow semver format (X.Y.Z)")
+
+
+def _check_dependencies(info, source, result):
+    """Each must be a plain named requirement (the installer rejects
+    URLs/VCS/pip-options), plus a license reminder when there are any."""
+    if "dependencies" not in info:
+        return
+    dependencies = info["dependencies"]
+    if not isinstance(dependencies, list):
+        result.error(f"{source}: dependencies must be a list")
+        return
+    if not dependencies:
+        return
+    for dep in dependencies:
+        if not is_safe_requirement(dep):
+            result.error(
+                f"{source}: unsafe dependency {dep!r} -- must be a plain "
+                "'package' or 'package>=x.y' requirement (no URLs, VCS, "
+                "pip options, or '@' direct references)"
+            )
+    result.warn(f"{source}: has pip dependencies {dependencies} -- ensure all are MIT-compatible")
+
+
+# The checks validate_plugin_info runs after the required fields, in order.
+_FIELD_CHECKS = (
+    _check_id,
+    _check_category,
+    _check_license,
+    _check_listed,
+    _check_guest_alias,
+    _check_version,
+    _check_dependencies,
+)
+
+
+def is_mit_compatible(name):
+    """Whether a license name is one of MIT_COMPATIBLE_LICENSES, in any case."""
+    return name.lower() in MIT_COMPATIBLE_LICENSES
+
+
+def _unknown(values, allowed):
+    """Each value not in `allowed`, in order."""
+    return (value for value in values if value not in allowed)
 
 
 def validate_config_schema(config_schema, result):
@@ -658,83 +709,86 @@ def validate_plugin_dir(plugin_path, result):
 
 
 def validate_index_json(repo_root, results):
-    """Validate index.json and cross-reference with plugin files."""
+    """Validate index.json: each entry, its folder and its plugin.json, then
+    the plugin folders no entry names. One result, added to `results`."""
     index_path = repo_root / "index.json"
-    if not index_path.exists():
-        r = ValidationResult(index_path)
-        r.error("index.json not found")
-        results.append(r)
-        return
-
     result = ValidationResult(index_path)
+    index = _read_index(index_path, result)
+    if index is not None:
+        _check_entries(repo_root, index["plugins"], result)
+        _check_unindexed(repo_root, index["plugins"], result)
+    results.append(result)
 
+
+def _read_index(index_path, result):
+    """index.json's contents, or None after reporting why there are none."""
+    if not index_path.exists():
+        result.error("index.json not found")
+        return None
     try:
         with open(index_path, encoding="utf-8") as f:
             index = json.load(f)
     except json.JSONDecodeError as e:
         result.error(f"Invalid JSON: {e}")
-        results.append(result)
-        return
-
+        return None
     if "plugins" not in index:
         result.error("Missing 'plugins' array")
-        results.append(result)
-        return
+        return None
+    return index
 
+
+def _check_entries(repo_root, entries, result):
     seen_ids = set()
-    for entry in index["plugins"]:
-        plugin_id = entry.get("id", "<missing>")
+    for entry in entries:
+        _check_entry(repo_root, entry, seen_ids, result)
 
-        # Required fields
-        for field in ("id", "name", "file", "format", "category",
-                      "version", "author", "license", "platforms",
-                      "capabilities", "has_native_dependencies",
-                      "verified", "description"):
-            if field not in entry:
-                result.error(f"Plugin '{plugin_id}': missing required field '{field}'")
 
-        # Duplicate IDs
-        if plugin_id in seen_ids:
-            result.error(f"Duplicate plugin ID '{plugin_id}' in index.json")
-        seen_ids.add(plugin_id)
+def _check_entry(repo_root, entry, seen_ids, result):
+    """One entry: its required fields, its id against the entries before it,
+    its folder, its values, then its plugin.json."""
+    plugin_id = entry.get("id", "<missing>")
+    for field in INDEX_REQUIRED_FIELDS:
+        if field not in entry:
+            result.error(f"Plugin '{plugin_id}': missing required field '{field}'")
+    if plugin_id in seen_ids:
+        result.error(f"Duplicate plugin ID '{plugin_id}' in index.json")
+    seen_ids.add(plugin_id)
+    if "file" in entry and not (repo_root / entry["file"]).exists():
+        result.error(f"Plugin '{plugin_id}': directory '{entry['file']}' does not exist")
+    _check_entry_values(entry, plugin_id, result)
+    if "file" in entry:
+        _compare_with_plugin_json(repo_root / entry["file"] / "plugin.json", entry, plugin_id, result)
 
-        # Directory exists
-        if "file" in entry:
-            plugin_dir = repo_root / entry["file"]
-            if not plugin_dir.exists():
-                result.error(f"Plugin '{plugin_id}': directory '{entry['file']}' does not exist")
 
-        # Valid category
-        if "category" in entry and entry["category"] not in VALID_CATEGORIES:
-            result.error(f"Plugin '{plugin_id}': invalid category '{entry['category']}'")
+def _check_entry_values(entry, plugin_id, result):
+    """The entry's category, license and capabilities, by the same rules as a
+    manifest's, in shorter messages. A capabilities value that is not a list
+    is not reported here."""
+    if "category" in entry and entry["category"] not in VALID_CATEGORIES:
+        result.error(f"Plugin '{plugin_id}': invalid category '{entry['category']}'")
+    if "license" in entry and not is_mit_compatible(entry["license"]):
+        result.error(f"Plugin '{plugin_id}': license '{entry['license']}' is not MIT-compatible")
+    if "capabilities" in entry and isinstance(entry["capabilities"], list):
+        for cap in _unknown(entry["capabilities"], VALID_CAPABILITIES):
+            result.error(f"Plugin '{plugin_id}': invalid capability '{cap}'")
 
-        # Valid license
-        if "license" in entry and entry["license"].lower() not in MIT_COMPATIBLE_LICENSES:
-            result.error(f"Plugin '{plugin_id}': license '{entry['license']}' is not MIT-compatible")
 
-        # Valid capabilities
-        if "capabilities" in entry and isinstance(entry["capabilities"], list):
-            for cap in entry["capabilities"]:
-                if cap not in VALID_CAPABILITIES:
-                    result.error(f"Plugin '{plugin_id}': invalid capability '{cap}'")
-
-        # Cross-reference with plugin.json
-        if "file" in entry:
-            plugin_json = repo_root / entry["file"] / "plugin.json"
-            if plugin_json.exists():
-                try:
-                    with open(plugin_json, encoding="utf-8") as f:
-                        manifest = json.load(f)
-                    for field in _disagreements(manifest, entry):
-                        result.error(
-                            f"Plugin '{plugin_id}': index.json {field}='{entry[field]}' "
-                            f"doesn't match plugin.json {field}='{manifest[field]}'"
-                        )
-                except Exception:
-                    pass
-
-    _check_unindexed(repo_root, index["plugins"], result)
-    results.append(result)
+def _compare_with_plugin_json(plugin_json, entry, plugin_id, result):
+    """An error for each of AGREED_FIELDS the entry and the plugin's
+    plugin.json disagree on. A plugin.json that is missing, or that cannot be
+    read or compared, is passed over here without a word."""
+    if not plugin_json.exists():
+        return
+    try:
+        with open(plugin_json, encoding="utf-8") as f:
+            manifest = json.load(f)
+        for field in _disagreements(manifest, entry):
+            result.error(
+                f"Plugin '{plugin_id}': index.json {field}='{entry[field]}' "
+                f"doesn't match plugin.json {field}='{manifest[field]}'"
+            )
+    except Exception:
+        pass
 
 
 def _check_unindexed(repo_root, entries, result):
