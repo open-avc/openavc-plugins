@@ -423,14 +423,11 @@ class PresentPlugin:
         self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
         if self._mediamtx_bin is None or self._ffmpeg_bin is None:
             missing = "MediaMTX" if self._mediamtx_bin is None else "FFmpeg"
-            msg = (
+            await self._refuse(
                 f"{missing} binary not found in plugin_repo/.deps/. Native "
                 "dependencies install when the plugin is installed from the "
                 "community repository; reinstall the Present plugin."
             )
-            await self.api.state_set("running", False)
-            await self.api.state_set("error", msg)
-            raise PluginRefusal(msg)
         self._ensure_executable(self._mediamtx_bin)
         self._ensure_executable(self._ffmpeg_bin)
 
@@ -443,15 +440,12 @@ class PresentPlugin:
         # while the imposter (usually an orphan from an unclean shutdown)
         # half-serves traffic. Refuse loudly instead.
         if await self._api_get("/v3/paths/list") is not None:
-            msg = (
+            await self._refuse(
                 f"Another process is already using this plugin's media ports "
                 f"(something answers on {_API_HOST}:{_API_PORT}) — usually a "
                 "MediaMTX left over from an unclean shutdown. Close it (or "
                 "restart this computer), then enable the plugin again."
             )
-            await self.api.state_set("running", False)
-            await self.api.state_set("error", msg)
-            raise PluginRefusal(msg)
 
         await self.api.state_set("running", False)
         await self.api.state_set("error", "")
@@ -467,52 +461,7 @@ class PresentPlugin:
         )
 
         try:
-            await self._supervisor.start()
-            if not await self._wait_until_ready():
-                raise RuntimeError(
-                    f"MediaMTX did not respond on {_API_HOST}:{_API_PORT} "
-                    f"within {int(_READY_TIMEOUT)}s"
-                )
-            await self.api.state_set("running", True)
-            self.api.register_router(self._build_ext_router())
-            self.api.register_guest_router(self._build_guest_router())
-            await self._load_displays()
-            # The connect card's dynamic text lives in small files the stream
-            # displays' idle pumps re-read every frame; set them up before the
-            # first code rotation so it lands on the card.
-            self._card = output.IdleCard(self.api.data_dir / "card")
-            self._font = output.find_font()
-            self._rotate_code()
-            await self._refresh_card()
-            await self._publish_all()
-            for display in self._displays:
-                if display.get("kind") == "stream":
-                    await self._start_output(display)
-            # Local-fullscreen windows: one supervised kiosk browser per
-            # browser display pinned to one of this host's video outputs.
-            self._kiosk = kiosk.KioskManager(
-                environment=kiosk.detect_environment(
-                    _PLUGIN_DIR, self.api.data_dir, self.api.log
-                ),
-                data_dir=self.api.data_dir,
-                log=self.api.log,
-                task_factory=self.api.create_task,
-                browser_resolver=self._resolve_browser,
-            )
-            await self._sync_kiosks()
-            # The routing state key is the matrix's write surface: macros
-            # (state.set), scripts, and the API drive it directly. Subscribe
-            # after the initial publish; our own writes no-op in the handler.
-            await self.api.state_subscribe(
-                "plugin.present.display.*.source", self._on_source_write
-            )
-            self.api.create_periodic_task(
-                self._poll, interval_seconds=_POLL_SECONDS, name="presence_poll"
-            )
-            self.api.log(
-                f"Present started: MediaMTX {_MEDIAMTX_VERSION} on "
-                f"{_API_HOST}:{_API_PORT}, {len(self._displays)} display(s)"
-            )
+            await self._bring_up()
         except Exception:
             # Don't leave orphaned processes if start() fails partway.
             if self._kiosk is not None:
@@ -522,6 +471,63 @@ class PresentPlugin:
             self._supervisor = None
             raise
 
+    async def _refuse(self, msg):
+        """Mark the plugin not running with ``msg`` as its error, and refuse
+        to start with it. A sentence raised as PluginRefusal is the one the
+        AI assistant repeats to the integrator."""
+        await self.api.state_set("running", False)
+        await self.api.state_set("error", msg)
+        raise PluginRefusal(msg)
+
+    async def _bring_up(self):
+        """Everything after the sidecar is spawned, in order: start() stops
+        whatever this got to (the kiosk windows, then the sidecar) if any
+        step raises."""
+        await self._supervisor.start()
+        if not await self._wait_until_ready():
+            raise RuntimeError(
+                f"MediaMTX did not respond on {_API_HOST}:{_API_PORT} "
+                f"within {int(_READY_TIMEOUT)}s"
+            )
+        await self.api.state_set("running", True)
+        self.api.register_router(self._build_ext_router())
+        self.api.register_guest_router(self._build_guest_router())
+        await self._load_displays()
+        # The connect card's dynamic text lives in small files the stream
+        # displays' idle pumps re-read every frame; set them up before the
+        # first code rotation so it lands on the card.
+        self._card = output.IdleCard(self.api.data_dir / "card")
+        self._font = output.find_font()
+        self._rotate_code()
+        await self._refresh_card()
+        await self._publish_all()
+        await self._start_stream_outputs()
+        # Local-fullscreen windows: one supervised kiosk browser per
+        # browser display pinned to one of this host's video outputs.
+        self._kiosk = kiosk.KioskManager(
+            environment=kiosk.detect_environment(
+                _PLUGIN_DIR, self.api.data_dir, self.api.log
+            ),
+            data_dir=self.api.data_dir,
+            log=self.api.log,
+            task_factory=self.api.create_task,
+            browser_resolver=self._resolve_browser,
+        )
+        await self._sync_kiosks()
+        # The routing state key is the matrix's write surface: macros
+        # (state.set), scripts, and the API drive it directly. Subscribe
+        # after the initial publish; our own writes no-op in the handler.
+        await self.api.state_subscribe(
+            "plugin.present.display.*.source", self._on_source_write
+        )
+        self.api.create_periodic_task(
+            self._poll, interval_seconds=_POLL_SECONDS, name="presence_poll"
+        )
+        self.api.log(
+            f"Present started: MediaMTX {_MEDIAMTX_VERSION} on "
+            f"{_API_HOST}:{_API_PORT}, {len(self._displays)} display(s)"
+        )
+
     async def stop(self):
         # State keys, subscriptions, and managed tasks are cleaned up by the
         # platform; we only need to stop the external processes — kiosk
@@ -530,8 +536,7 @@ class PresentPlugin:
         if self._kiosk is not None:
             await self._kiosk.stop()
             self._kiosk = None
-        for display_id in list(self._controllers):
-            await self._stop_output(display_id)
+        await self._stop_all_outputs()
         if self._supervisor is not None:
             await self._supervisor.stop()
             self._supervisor = None
@@ -576,8 +581,7 @@ class PresentPlugin:
         encoders that publish into it (left running they'd only crash-loop
         through their backoff while it's down). Stream-display decoders
         re-acquire on their own retry once the output path is back."""
-        for display_id in list(self._controllers):
-            await self._stop_output(display_id)
+        await self._stop_all_outputs()
         await self._supervisor.stop()
         self._config_path.write_text(self._render_config(), encoding="utf-8")
         await self._supervisor.start()
@@ -589,9 +593,7 @@ class PresentPlugin:
             )
             await self.api.state_set("running", False)
             return
-        for display in self._displays:
-            if display.get("kind") == "stream":
-                await self._start_output(display)
+        await self._start_stream_outputs()
 
     # ──── Space ────
 
@@ -779,12 +781,9 @@ class PresentPlugin:
         Fires for our own publishes too; those match the routing table and
         return early. A cleared key (display removed) is not a route request.
         """
-        parts = key.split(".")
-        if len(parts) != 5 or parts[2] != "display" or parts[4] != "source":
+        display_id = self._source_key_display(key)
+        if display_id is None or value is None:
             return
-        if value is None:
-            return
-        display_id = parts[3]
         normalized = self._normalize_source(value)
         if normalized is not None and normalized == self._routing.get(display_id):
             return
@@ -796,6 +795,14 @@ class PresentPlugin:
             current = self._routing.get(display_id)
             if current is not None:
                 await self.api.state_set(f"display.{display_id}.source", current)
+
+    @staticmethod
+    def _source_key_display(key):
+        """The display id in a plugin.present.display.<id>.source key, else None."""
+        parts = key.split(".")
+        if len(parts) != 5 or parts[2] != "display" or parts[4] != "source":
+            return None
+        return parts[3]
 
     async def action_route(self, params, _context):
         await self._route((params.get("display") or "").strip(), params.get("source"))
@@ -836,6 +843,16 @@ class PresentPlugin:
         await controller.start()
         # Catch up with current routing (a presenter may already be live).
         await self._publish_display(display_id, set(self._presence))
+
+    async def _start_stream_outputs(self):
+        """Bring up the output of every stream display, in the displays' order."""
+        for display in self._displays:
+            if display.get("kind") == "stream":
+                await self._start_output(display)
+
+    async def _stop_all_outputs(self):
+        for display_id in list(self._controllers):
+            await self._stop_output(display_id)
 
     async def _stop_output(self, display_id):
         controller = self._controllers.pop(display_id, None)
@@ -882,27 +899,37 @@ class PresentPlugin:
     async def _scan_presenters(self):
         """Live presenters from the sidecar's path list.
 
-        Ingest paths are named ``in/<presenter>`` by the publisher; a path
-        counts once its stream is available. Returns ``None`` when the sidecar
-        API is unreachable, else the set of live presenter names.
+        Returns ``None`` when the sidecar API is unreachable, else the set of
+        live presenter names.
         """
         data = await self._api_get("/v3/paths/list")
         if data is None:
             return None
         live = set()
         for item in data.get("items", []):
-            name = item.get("name") or ""
-            prefix, sep, presenter = name.partition("/")
-            if prefix != _INGEST_PREFIX or not sep or not presenter:
-                continue
-            # "auto" is the routing sentinel, never a valid presenter.
-            if presenter == _AUTO or not _PRESENTER_RE.fullmatch(presenter):
-                continue
-            # `ready` is deprecated in MediaMTX 1.18.x in favour of `available`.
-            if not bool(item.get("available", item.get("ready", False))):
-                continue
-            live.add(presenter)
+            presenter = self._live_presenter(item)
+            if presenter is not None:
+                live.add(presenter)
         return live
+
+    @staticmethod
+    def _live_presenter(item):
+        """The presenter a sidecar path belongs to, or None.
+
+        Ingest paths are named ``in/<presenter>`` by the publisher; a path
+        counts once its stream is available.
+        """
+        name = item.get("name") or ""
+        prefix, sep, presenter = name.partition("/")
+        if prefix != _INGEST_PREFIX or not sep or not presenter:
+            return None
+        # "auto" is the routing sentinel, never a valid presenter.
+        if presenter == _AUTO or not _PRESENTER_RE.fullmatch(presenter):
+            return None
+        # `ready` is deprecated in MediaMTX 1.18.x in favour of `available`.
+        if not bool(item.get("available", item.get("ready", False))):
+            return None
+        return presenter
 
     async def _poll(self):
         # Only OUR sidecar counts. Without this guard, an imposter answering
@@ -919,9 +946,17 @@ class PresentPlugin:
             await self.api.state_set("running", False)
             return
         await self.api.state_set("running", True)
-        now = int(time.time())
         was_live = bool(self._presence)
+        await self._apply_presence(live)
+        self._rotate_code_when_due(was_live)
+        await self._refresh_card()
+        await self._publish_all()
 
+    async def _apply_presence(self, live):
+        """Record who joined and who left since the last poll, announcing each
+        (joins first, each group in name order). A leaver's typed name goes
+        with them."""
+        now = int(time.time())
         for name in sorted(live - set(self._presence)):
             self._presence[name] = now
             await self.api.event_emit(
@@ -932,17 +967,16 @@ class PresentPlugin:
             label = self._labels.pop(name, name)
             await self.api.event_emit("presenter_left", {"name": name, "label": label})
 
+    def _rotate_code_when_due(self, was_live):
+        """The join code rotates when a session ends (a code seen on the
+        displays during the meeting must not open the next one) and while
+        idle, once it is older than _CODE_ROTATE_SECONDS."""
         is_live = bool(self._presence)
         _code, rotated_at = self._code
         if was_live and not is_live:
-            # Session ended: a code seen on the displays during the meeting
-            # must not open the next one.
             self._rotate_code()
         elif not is_live and time.monotonic() - rotated_at > _CODE_ROTATE_SECONDS:
             self._rotate_code()
-
-        await self._refresh_card()
-        await self._publish_all()
 
     def _label_for(self, presenter):
         """The display name the guest typed at connect time, else the slug.
