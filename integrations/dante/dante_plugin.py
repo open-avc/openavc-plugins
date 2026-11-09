@@ -42,6 +42,11 @@ PLUGIN_INFO = {
 # field inside its group; see _settings.
 _SETTING_GROUPS = ("connection", "polling")
 
+# A reconnect waits 5 s after a failure, doubling up to this; a poll gives the
+# connection up after this many failures in a row.
+_RECONNECT_MAX_DELAY = 60
+_MAX_POLL_FAILURES = 3
+
 
 def _settings(config: dict) -> dict:
     """The plugin's settings as one flat dict.
@@ -327,26 +332,18 @@ class DanteDDMPlugin:
         await api.state_set("subscription_count", 0)
         await self._show_preset("")
 
-        # Subscribe to context actions and programmatic route events
+        # The Programmer's context actions and matrix, and the same events
+        # from macros and scripts.
         await api.event_subscribe("plugin.dante.action.*", self._on_action)
 
-        # Connect
-        connected = await self._connect(cfg)
-        if not connected:
+        if not await self._connect(cfg):
             self._schedule_reconnect(cfg)
 
         api.log("Dante DDM plugin started")
 
     async def stop(self):
         self._shutting_down = True
-
-        if self._client:
-            try:
-                await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
-
+        await self._close_client()
         self._connected = False
         self._devices.clear()
         self._state_keys.clear()
@@ -368,7 +365,8 @@ class DanteDDMPlugin:
     # ──── Connection ────
 
     async def _connect(self, cfg: dict) -> bool:
-        """Establish connection to DDM GraphQL API. Returns True on success."""
+        """Connect to the DDM's GraphQL API, take a domain and start polling.
+        True on success; on failure the reason is logged and no client is left."""
         try:
             import httpx
         except ImportError:
@@ -400,91 +398,101 @@ class DanteDDMPlugin:
                 verify=verify,
                 timeout=10.0,
             )
-
-            # Test connection by fetching domains
-            domains = await self._fetch_domains()
-            if domains is None:
-                raise ConnectionError("Failed to fetch domains")
-
-            # Select domain
-            domain_id = cfg.get("domain_id", "").strip()
-            if domain_id:
-                self._domain_id = domain_id
-                # Find name from list
-                for d in domains:
-                    if d["id"] == domain_id:
-                        self._domain_name = d["name"]
-                        break
-                else:
-                    self._domain_name = domain_id
-            elif domains:
-                self._domain_id = domains[0]["id"]
-                self._domain_name = domains[0]["name"]
-                self.api.log(
-                    f"Auto-selected domain: {self._domain_name} ({self._domain_id})"
-                )
-            else:
-                self.api.log("No Dante domains found", level="error")
-                if self._client:
-                    await self._client.aclose()
-                    self._client = None
-                return False
-
-            self._connected = True
-            await self.api.state_set("connected", True)
-            await self.api.state_set("domain_name", self._domain_name or "")
-            await self.api.event_emit("connected")
-
-            # Start polling
-            interval = cfg.get("poll_interval", 5)
-            self._poll_task = self.api.create_task(
-                self._poll_loop(interval), name="dante_poll"
-            )
-
-            self.api.log(
-                f"Connected to DDM, domain: {self._domain_name}"
-            )
-            return True
-
+            return await self._open_domain(cfg)
         except Exception as e:
             self.api.log(f"Failed to connect to DDM: {e}", level="error")
             await self.api.state_set("connected", False)
+            await self._close_client()
+            return False
+
+    async def _open_domain(self, cfg: dict) -> bool:
+        """With the client made: read the domains, take one and go online.
+        False, the client closed, when the DDM has no domain to take; raises
+        when the domains cannot be read."""
+        domains = await self._fetch_domains()
+        if domains is None:
+            raise ConnectionError("Failed to fetch domains")
+
+        if not self._take_domain(cfg.get("domain_id", "").strip(), domains):
+            self.api.log("No Dante domains found", level="error")
             if self._client:
-                try:
-                    await self._client.aclose()
-                except Exception:
-                    pass
+                await self._client.aclose()
                 self._client = None
             return False
 
+        await self._go_online(cfg.get("poll_interval", 5))
+        return True
+
+    def _take_domain(self, wanted: str, domains: list[dict]) -> bool:
+        """The configured domain, named from the list when it is there, else
+        by its id; with none configured, the first the DDM lists. False when
+        there is none to take."""
+        if wanted:
+            self._domain_id = wanted
+            self._domain_name = next(
+                (d["name"] for d in domains if d["id"] == wanted), wanted
+            )
+            return True
+        if not domains:
+            return False
+        self._domain_id = domains[0]["id"]
+        self._domain_name = domains[0]["name"]
+        self.api.log(
+            f"Auto-selected domain: {self._domain_name} ({self._domain_id})"
+        )
+        return True
+
+    async def _go_online(self, interval: int):
+        self._connected = True
+        await self.api.state_set("connected", True)
+        await self.api.state_set("domain_name", self._domain_name or "")
+        await self.api.event_emit("connected")
+        self._poll_task = self.api.create_task(
+            self._poll_loop(interval), name="dante_poll"
+        )
+        self.api.log(f"Connected to DDM, domain: {self._domain_name}")
+
+    async def _close_client(self):
+        """Close the client, if there is one, ignoring an error closing it."""
+        if self._client:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+            self._client = None
+
     def _schedule_reconnect(self, cfg: dict):
-        """Schedule reconnection with exponential backoff."""
+        """Start reconnecting, unless stopping or already reconnecting."""
         if self._shutting_down:
             return
         if self._reconnect_task and not self._reconnect_task.done():
-            return  # Already running
-
-        async def _reconnect():
-            delay = 5
-            max_delay = 60
-            try:
-                while not self._shutting_down:
-                    await asyncio.sleep(delay)
-                    if self._connected or self._shutting_down:
-                        return
-                    self.api.log("Reconnecting to DDM...", level="debug")
-                    try:
-                        if await self._connect(cfg):
-                            return
-                    except Exception as e:
-                        self.api.log(f"Reconnect failed: {e}", level="warning")
-                    delay = min(delay * 2, max_delay)
-            finally:
-                self._reconnect_task = None
-
+            return
         self._reconnect_task = self.api.create_task(
-            _reconnect(), name="dante_reconnect"
+            self._reconnect(cfg), name="dante_reconnect"
         )
+
+    async def _reconnect(self, cfg: dict):
+        """Connect again after 5 s, doubling the wait after each failure up to
+        a minute, until connected (here or elsewhere) or stopping."""
+        delay = 5
+        try:
+            while not self._shutting_down:
+                await asyncio.sleep(delay)
+                if self._connected or self._shutting_down:
+                    return
+                self.api.log("Reconnecting to DDM...", level="debug")
+                if await self._connect_again(cfg):
+                    return
+                delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+        finally:
+            self._reconnect_task = None
+
+    async def _connect_again(self, cfg: dict) -> bool:
+        try:
+            return await self._connect(cfg)
+        except Exception as e:
+            self.api.log(f"Reconnect failed: {e}", level="warning")
+            return False
 
     # ──── GraphQL Client ────
 
@@ -536,30 +544,34 @@ class DanteDDMPlugin:
     # ──── Polling ────
 
     async def _poll_loop(self, interval: int):
-        """Periodically poll DDM for device and routing state."""
-        consecutive_failures = 0
-        max_failures = 3
-
+        """Refresh the state from the DDM every interval, until stopping or
+        until the connection is given up."""
+        failures = 0
         while not self._shutting_down:
             try:
                 await self._refresh_state()
-                consecutive_failures = 0
+                failures = 0
             except Exception as e:
-                consecutive_failures += 1
-                level = "error" if consecutive_failures >= max_failures else "warning"
-                self.api.log(
-                    f"Poll error ({consecutive_failures}/{max_failures}): {e}",
-                    level=level,
-                )
-                if consecutive_failures >= max_failures:
-                    if self._connected:
-                        self._connected = False
-                        await self.api.state_set("connected", False)
-                        await self.api.event_emit("disconnected")
-                        self._schedule_reconnect(self.api.config)
-                        return
-
+                failures += 1
+                if await self._poll_failed(failures, e):
+                    return
             await asyncio.sleep(interval)
+
+    async def _poll_failed(self, failures: int, error: Exception) -> bool:
+        """Log a failed poll. At the limit while connected, go offline and
+        start reconnecting: True, the poll stops."""
+        at_limit = failures >= _MAX_POLL_FAILURES
+        self.api.log(
+            f"Poll error ({failures}/{_MAX_POLL_FAILURES}): {error}",
+            level="error" if at_limit else "warning",
+        )
+        if not (at_limit and self._connected):
+            return False
+        self._connected = False
+        await self.api.state_set("connected", False)
+        await self.api.event_emit("disconnected")
+        self._schedule_reconnect(self.api.config)
+        return True
 
     async def _refresh_state(self):
         """Read the domain, publish every channel's state, clear the keys of
@@ -604,45 +616,37 @@ class DanteDDMPlugin:
         tx_device_name: str,
         tx_channel_name: str,
     ) -> bool:
-        """Create or update an audio subscription on an Rx channel.
-
-        To unsubscribe, pass empty strings for tx_device_name and tx_channel_name.
-        """
-        try:
-            data = await self._graphql(
-                _MUTATION_SET_SUBSCRIPTIONS,
-                {
-                    "input": {
-                        "deviceId": rx_device_id,
-                        "subscriptions": [
-                            {
-                                "rxChannelIndex": rx_channel_index,
-                                "subscribedDevice": tx_device_name,
-                                "subscribedChannel": tx_channel_name,
-                            }
-                        ],
-                        "allowSubscriptionToNonExistentDevice": False,
-                        "allowSubscriptionToNonExistentChannel": False,
-                    }
-                },
-            )
-        except Exception as e:
-            self.api.log(f"Subscription request failed: {e}", level="error")
-            return False
-
-        if data is None:
-            return False
-
-        result = data.get("DeviceRxChannelsSubscriptionSet", {})
-        return result.get("ok", False)
+        """Route one receive channel, refusing a source DDM does not know.
+        Blank names unsubscribe it."""
+        return await self._send_subscriptions(
+            rx_device_id,
+            [routing.subscription(rx_channel_index, tx_device_name, tx_channel_name)],
+            allow_unknown=False,
+            failure="Subscription request failed",
+        )
 
     async def _set_subscriptions_batch(
         self, rx_device_id: str, subscriptions: list[dict]
     ) -> bool:
-        """Set multiple subscriptions on a single Rx device in one mutation.
+        """Set several receive channels on one device in one request, sources
+        DDM does not know included."""
+        return await self._send_subscriptions(
+            rx_device_id,
+            subscriptions,
+            allow_unknown=True,
+            failure="Batch subscription request failed",
+        )
 
-        Each subscription dict: {rxChannelIndex, subscribedDevice, subscribedChannel}
-        """
+    async def _send_subscriptions(
+        self,
+        rx_device_id: str,
+        subscriptions: list[dict],
+        *,
+        allow_unknown: bool,
+        failure: str,
+    ) -> bool:
+        """The subscription mutation for one receiving device: True when DDM
+        answers ok. A request that cannot be sent is logged as ``failure``."""
         try:
             data = await self._graphql(
                 _MUTATION_SET_SUBSCRIPTIONS,
@@ -650,13 +654,13 @@ class DanteDDMPlugin:
                     "input": {
                         "deviceId": rx_device_id,
                         "subscriptions": subscriptions,
-                        "allowSubscriptionToNonExistentDevice": True,
-                        "allowSubscriptionToNonExistentChannel": True,
+                        "allowSubscriptionToNonExistentDevice": allow_unknown,
+                        "allowSubscriptionToNonExistentChannel": allow_unknown,
                     }
                 },
             )
         except Exception as e:
-            self.api.log(f"Batch subscription request failed: {e}", level="error")
+            self.api.log(f"{failure}: {e}", level="error")
             return False
 
         if data is None:
