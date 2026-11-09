@@ -964,3 +964,67 @@ async def test_identifying_a_deck_with_no_screen_does_nothing():
     logs_before = list(plugin._logs)
     await plugin._identify_deck(session)
     assert deck.asked == [] and calls == [] and plugin._logs == logs_before
+
+
+# ──── The order an input's effects go out in ────
+
+
+def _ordered(plugin):
+    """One log of everything an input does, in the order it happens."""
+    log = []
+    for target, name in ((plugin.api, "event_emit"), (plugin, "_publish_input_echo"),
+                         (plugin, "_execute_actions"), (plugin, "_apply_dial_adjust"),
+                         (plugin, "_flash_touch_zone"), (plugin, "_apply_touch_fader")):
+        _record(target, log, name, result=False)
+    return log
+
+
+def _names(log):
+    return [entry[0] if entry[0] != "event_emit" else entry[1] for entry in log]
+
+
+@pytest.mark.asyncio
+async def test_a_dial_is_echoed_and_announced_before_it_runs_anything():
+    plugin, _, _ = _plugin({"dials": [
+        {"index": 0, "press": _m("p"), "adjust": {"key": "var.v"}, "cw": _m("cw")},
+        {"index": 1, "press": _m("p"), "long_press": _m("lp")},
+    ]})
+    session = _session(plugin)
+    log = _ordered(plugin)
+    await plugin._on_dial_event(session, None, 0, PUSH, True)
+    await plugin._on_dial_event(session, None, 0, PUSH, False)
+    await plugin._on_dial_event(session, None, 0, TURN, 1)
+    await plugin._on_dial_event(session, None, 1, PUSH, True)
+    await plugin._on_dial_event(session, None, 1, PUSH, False)
+    assert _names(log) == [
+        "_publish_input_echo", "dial.press", "_execute_actions",
+        "_publish_input_echo", "dial.turn", "_apply_dial_adjust", "_execute_actions",
+        "_publish_input_echo", "dial.press", "_execute_actions",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_touch_is_echoed_announced_and_flashed_before_it_runs_anything():
+    plugin, _, _ = _plugin({"touchscreen": {"zones": [
+        {"touch": _m("t"), "drag_adjust": {"key": "var.v", "fader": True, "min": 0, "max": 9}},
+    ]}})
+    session = _session(plugin, _Deck(dials=0))
+    log = _ordered(plugin)
+    await plugin._on_touchscreen_event(session, None, SHORT, {"x": 10})
+    await plugin._on_touchscreen_event(session, None, DRAG, {"x": 10, "x_out": 30})
+    assert _names(log) == [
+        "_publish_input_echo", "touchscreen.touch", "_flash_touch_zone",
+        "_apply_touch_fader", "_execute_actions",
+        "_publish_input_echo", "_flash_touch_zone", "_apply_touch_fader", "_apply_dial_adjust",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_look_up_for_no_serial_follows_an_answer_that_advertises_none(monkeypatch):
+    plugin, _, _, saves, _ = _net_rig(monkeypatch, [{"host": "192.0.2.1"}])
+    _browse(plugin, [{"ip": "192.0.2.9", "txt": None}])
+    await plugin._net_reresolve("192.0.2.1:5343", {""})
+    assert saves == [[{"host": "192.0.2.9", "port": 5343}]]
+    assert plugin._logs[-1] == (
+        "info", "Network deck  answered at 192.0.2.9:5343 (was 192.0.2.1:5343); following it"
+    )
