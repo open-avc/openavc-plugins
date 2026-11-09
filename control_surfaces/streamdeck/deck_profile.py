@@ -1,6 +1,7 @@
 """
 What a Stream Deck says about itself: who it is and its layout when it opens,
-and how big its touch strip and info screen are whenever the plugin draws.
+and how big its touch strip and info screen are whenever the plugin draws on
+them or reads a touch.
 
 The plugin opens every deck the same way, whatever carries it: a USB deck the
 library enumerates, a virtual deck (virtual_deck.py) or a network deck
@@ -22,9 +23,9 @@ LCD keys are 0-7 and its two touch keys 8 and 9); ``key_total``,
 numbering from the deck.
 
 A touch strip and an info screen say their size through the deck's format
-readers, read three ways, each kept as it was written: the strip's zones are laid out on the
-width the deck reports, a 0 included, or 800 when it cannot say
-(``strip_width``); the strip's renders take its format with both sides as
+readers, read three ways, each kept as it was written: the strip's zones are
+laid out on the width the deck reports, a 0 included, or 800 when it cannot
+say (``strip_width``); the strip's renders take its format with both sides as
 reported (``strip_format``); an overlay and the info screen draw only where
 both sides are above 0 (``panel_size``). A deck has an info screen when its
 screen reports a width above 0 (``deck_geometry``).

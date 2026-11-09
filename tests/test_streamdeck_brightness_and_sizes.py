@@ -513,3 +513,40 @@ def test_a_hex_color_reads_as_rgb_or_black(color, rgb):
 ])
 def test_lightening_blends_toward_white(color, amount, expect):
     assert lighten_hex(color, amount) == expect
+
+
+# ──── A macro's mark on an LCD key ────
+
+
+@pytest.mark.parametrize("mark, border, loader", [
+    ("running", (245, 158, 11), [("loader", "#f59e0b", 24)]),
+    ("done", (34, 197, 94), []),
+    ("error", (239, 68, 68), []),
+])
+def test_an_lcd_key_marks_a_run_with_a_border_and_only_running_with_the_loader(
+        monkeypatch, mark, border, loader):
+    img_mod = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    monkeypatch.setattr(sd_module, "ImageDraw", ImageDraw)
+    plugin, _state, _logs = _plugin()
+    asked = []
+
+    def icon(name, color, size):
+        asked.append((name, color, size))
+        return None
+    plugin._render_icon = icon
+    image = img_mod.new("RGB", (72, 72), "#000000")
+    marked = plugin._apply_macro_mark(image, mark)
+    assert asked == loader
+    assert marked.getpixel((0, 0)) == border and marked.getpixel((36, 36)) == (0, 0, 0)
+    assert image.getpixel((0, 0)) == (0, 0, 0)
+
+
+def test_an_lcd_key_without_a_known_mark_keeps_its_image(monkeypatch):
+    img_mod = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(sd_module, "Image", img_mod)
+    plugin, _state, _logs = _plugin()
+    image = img_mod.new("RGB", (72, 72), "#000000")
+    assert plugin._apply_macro_mark(image, "paused") is image
+    assert plugin._apply_macro_mark(image, None) is image
