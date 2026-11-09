@@ -8,12 +8,15 @@ stream display (the secret in its output path), and an optional
 ``local_output`` (one of this server's video outputs; a browser display only,
 and one display per output).
 
-Three doors write records, each in its own manner. The load at start repairs
-what it can, skips what it cannot, and says whether anything changed so the
-plugin saves once. The add and edit routes refuse instead, with the HTTP
-status and the sentence the plugin page shows. A new field or kind is a rule
-here that all three follow; what a change does to the running outputs, state
-keys and kiosk windows stays with the plugin.
+Three doors create or change records under these rules, each in its own
+manner. The load at start repairs what it can, skips what it cannot, and says
+whether anything changed so the plugin saves once. The add and edit routes
+refuse instead, with the HTTP status and the sentence the plugin page shows
+(the statuses are part of the rule, hence HTTPException here). The plugin
+writes three things itself: a regenerated key (minted here), and a renamed
+id, written only once the display's running state has moved off the old one.
+What a record's kind does to the running outputs, state keys and kiosk
+windows stays with the plugin.
 """
 
 import re
@@ -32,6 +35,12 @@ ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 RESERVED_IDS = {
     "auto", "connect", "display", "displays", "status", "whep", "whip", "in", "out",
 }
+
+
+def window_allowed(kind):
+    """Whether a display of ``kind`` may be shown on one of this server's
+    video outputs (a local kiosk window): browser displays only."""
+    return kind == "browser"
 
 
 def no_such_display(display_id):
@@ -116,7 +125,7 @@ def _repair(display):
     # local_output is a browser-display feature (hand-edited files can put it
     # anywhere). The load drops only a value it would act on; the edit route
     # drops the field whenever the kind is not browser.
-    if display.get("local_output") and display["kind"] != "browser":
+    if display.get("local_output") and not window_allowed(display["kind"]):
         display.pop("local_output", None)
         changed = True
     return changed
@@ -163,13 +172,14 @@ def check_kind(kind):
     """The kind as stored (trimmed, lower case, browser when blank), or a 422."""
     kind = (kind or "browser").strip().lower()
     if kind not in KINDS:
-        raise HTTPException(422, "Display kind must be 'browser' or 'stream'.")
+        named = " or ".join(f"'{k}'" for k in KINDS)
+        raise HTTPException(422, f"Display kind must be {named}.")
     return kind
 
 
 def check_local_output(records, output_id, kind, exclude_id=None):
     """422/409 when a local_output assignment isn't allowed."""
-    if kind != "browser":
+    if not window_allowed(kind):
         raise HTTPException(
             422,
             "Only a browser display can be shown on one of this "
@@ -227,8 +237,8 @@ def new_record(records, data):
 def apply_edit(records, display, data):
     """Apply the edit route's ``data`` to ``display`` in place.
 
-    Returns ``(kind, new_id)``; the id itself is not changed here, because a
-    rename first moves the display's running state off the old id. The label,
+    Returns the id the display is to take; the id itself is not changed here,
+    because a rename first moves the display's running state off the old id. The label,
     kind and id are refused before anything changes. A refused local output
     is checked only after the label, kind and stream key were written, so it
     leaves those changes on the record in memory (unsaved).
@@ -241,13 +251,13 @@ def apply_edit(records, display, data):
     display["label"] = label
     display["kind"] = kind
     _mint_stream_key(display)
-    if kind != "browser":
+    if not window_allowed(kind):
         # Local windows are a browser-display feature; a kind change
         # drops the assignment rather than carrying it invisibly.
         display.pop("local_output", None)
     if data.local_output is not None:
         _assign_local_output(records, display, data.local_output.strip(), kind)
-    return kind, new_id
+    return new_id
 
 
 def _assign_local_output(records, display, local_output, kind):

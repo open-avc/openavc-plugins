@@ -423,7 +423,7 @@ class PresentPlugin:
         self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
         if self._mediamtx_bin is None or self._ffmpeg_bin is None:
             missing = "MediaMTX" if self._mediamtx_bin is None else "FFmpeg"
-            await self._refuse(
+            raise await self._refusal(
                 f"{missing} binary not found in plugin_repo/.deps/. Native "
                 "dependencies install when the plugin is installed from the "
                 "community repository; reinstall the Present plugin."
@@ -440,7 +440,7 @@ class PresentPlugin:
         # while the imposter (usually an orphan from an unclean shutdown)
         # half-serves traffic. Refuse loudly instead.
         if await self._api_get("/v3/paths/list") is not None:
-            await self._refuse(
+            raise await self._refusal(
                 f"Another process is already using this plugin's media ports "
                 f"(something answers on {_API_HOST}:{_API_PORT}) — usually a "
                 "MediaMTX left over from an unclean shutdown. Close it (or "
@@ -471,13 +471,13 @@ class PresentPlugin:
             self._supervisor = None
             raise
 
-    async def _refuse(self, msg):
-        """Mark the plugin not running with ``msg`` as its error, and refuse
-        to start with it. A sentence raised as PluginRefusal is the one the
-        AI assistant repeats to the integrator."""
+    async def _refusal(self, msg):
+        """Mark the plugin not running with ``msg`` as its error; the refusal
+        start() raises. A sentence raised as PluginRefusal is the one the AI
+        assistant repeats to the integrator."""
         await self.api.state_set("running", False)
         await self.api.state_set("error", msg)
-        raise PluginRefusal(msg)
+        return PluginRefusal(msg)
 
     async def _bring_up(self):
         """Everything after the sidecar is spawned, in order: start() stops
@@ -714,7 +714,7 @@ class PresentPlugin:
             return
         specs = {}
         for display in self._displays:
-            if display.get("kind") == "browser" and display.get("local_output"):
+            if display_records.window_allowed(display.get("kind")) and display.get("local_output"):
                 specs[display["id"]] = {
                     "output": display["local_output"],
                     "url": self._local_display_url(display),
@@ -1291,7 +1291,7 @@ class PresentPlugin:
     @staticmethod
     def _slugify_presenter(name):
         """Path-safe ingest name from a typed display name ('' when nothing
-        survives). Distinct from _slugify: no fallback value — an empty name
+        survives). Distinct from display_records.slugify: no fallback value — an empty name
         is rejected, not defaulted."""
         return re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
 
@@ -1390,12 +1390,12 @@ class PresentPlugin:
 
     async def _edit_display(self, display_id, data):
         display = self._display_or_404(display_id)
-        kind, new_id = display_records.apply_edit(self._displays, display, data)
+        new_id = display_records.apply_edit(self._displays, display, data)
         if new_id != display_id:
             await self._move_display(display, new_id)
         await self._persist_displays()
         await self._publish_all()
-        await self._reconcile_output(display, kind)
+        await self._reconcile_output(display)
         await self._sync_kiosks()
         return self._display_view(display)
 
@@ -1413,9 +1413,9 @@ class PresentPlugin:
         self._routing[new_id] = routed
         kiosk.remove_profile(self.api.data_dir, old_id)
 
-    async def _reconcile_output(self, display, kind):
+    async def _reconcile_output(self, display):
         """A stream display has a running output; any other kind has none."""
-        if kind == "stream":
+        if display["kind"] == "stream":
             if display["id"] not in self._controllers:
                 await self._start_output(display)
         else:
@@ -1476,7 +1476,7 @@ class PresentPlugin:
             "output_state": "live" if showing else "idle",
         }
         local_output = display.get("local_output") or ""
-        if view["kind"] == "browser":
+        if display_records.window_allowed(view["kind"]):
             view["local_output"] = local_output
         if local_output:
             view.update(self._local_window_view(display_id, local_output))

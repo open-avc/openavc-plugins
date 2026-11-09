@@ -57,7 +57,10 @@ _UDP_ADDRESSES = {"webrtcLocalUDPAddress", "srtAddress", "rtpAddress", "rtcpAddr
 def _rendered(plugin_cls):
     plugin = plugin_cls()
     plugin._auth_pass = "a1b2c3d4e5f6"
-    plugin._detect_local_ip = lambda: "192.0.2.10"
+    if hasattr(plugin, "_join_address"):  # Present asks its join address
+        plugin._join_address.detect_local_ip = lambda: "192.0.2.10"
+    else:
+        plugin._detect_local_ip = lambda: "192.0.2.10"
     return yaml.safe_load(plugin._render_config())
 
 
