@@ -1209,7 +1209,9 @@ class StreamDeckPlugin:
 
         @router.post("/network/scan")
         async def network_scan():
-            """Find network decks on the LAN."""
+            """Find network decks on the LAN. Returns browse_available=False
+            where multicast discovery can't run (older cores, Docker bridge
+            networks) — the manual add-by-address path always works."""
             return await self._scan_network()
 
         @router.post("/network/test")
@@ -1220,10 +1222,9 @@ class StreamDeckPlugin:
         return router
 
     async def _scan_network(self):
-        """Find network decks on the LAN (deck_answers.scan_listing).
-        ``browse_available`` is False where multicast discovery can't run
-        (older cores, Docker bridge networks); the manual add-by-address
-        path always works."""
+        """The scan route's answer: the decks discovery finds
+        (deck_answers.scan_listing), or ``browse_available`` False when it
+        cannot browse."""
         entries = self._network_deck_entries()
         browse = getattr(self.api, "mdns_browse", None)
         if not callable(browse):

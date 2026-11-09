@@ -62,7 +62,7 @@
         "control_surfaces/streamdeck/looks.py": "20689dfea5d9c0cd05e5c469ab6601cc0d84ac7a89331ffce66ce9cf3ee8c1f0",
         "control_surfaces/streamdeck/net_deck.py": "bc8b366f9a2edf9ac7659af96c7085fa38610c796378fe00e6ea8c5774698a38",
         "control_surfaces/streamdeck/plugin.json": "017f6c544d588ebe47a09fe8aae0c6aa0bf2c35fd9bf2a3058dcdbd5e1ce1418",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "65525b19e597ffc99d95c4994dbbb5848068dbc2f97c2bb6fbff3cf69358aa9c",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "c29b2923806dd98e7180b1e78cd2ac5bac2791cc46c4fa232c631813d88fe561",
         "control_surfaces/streamdeck/virtual_deck.py": "61e9cd9663a73eb1c7068ea0d7d8ce67718f0fa696f24617358db6bbb4a39aef",
         "control_surfaces/streamdeck/watch_keys.py": "3351a6e6f9dce2fc4d9c0c9e9526ea2cc2821343fd5bd1e50e0a32e71553ff75"
       }
