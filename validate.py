@@ -64,7 +64,21 @@ EXTENSION_ID_FIELD = {
     "panel_elements": "type",
 }
 
-PLUGIN_DIRS = ["control_surfaces", "integrations", "sensors", "utility"]
+# The folder each category's plugins live in, in the order they are checked.
+CATEGORY_DIRS = {
+    "control_surfaces": "control_surface",
+    "integrations": "integration",
+    "sensors": "sensor",
+    "utility": "utility",
+}
+PLUGIN_DIRS = list(CATEGORY_DIRS)
+
+# The fields PLUGIN_INFO, plugin.json and index.json must agree on wherever two
+# copies both have one, compared as text. min_openavc_version is here because
+# PLUGIN_INFO is the copy the platform actually enforces -- a plugin.json that
+# claims a higher floor than PLUGIN_INFO reads as gated in the catalog while
+# installing onto a core that can't run it.
+AGREED_FIELDS = ("id", "name", "version", "category", "license", "min_openavc_version")
 
 _VCS_PREFIXES = ("git+", "hg+", "svn+", "bzr+")
 
@@ -621,19 +635,12 @@ def validate_plugin_dir(plugin_path, result):
                 manifest = json.load(f)
             validate_plugin_info(manifest, result, source="plugin.json")
 
-            # Cross-reference with PLUGIN_INFO. min_openavc_version is in here
-            # because PLUGIN_INFO is the copy the platform actually enforces --
-            # a plugin.json that claims a higher floor than PLUGIN_INFO reads as
-            # gated in the catalog while installing onto a core that can't run it.
             if plugin_info:
-                for field in ("id", "name", "version", "category", "license",
-                              "min_openavc_version"):
-                    if field in plugin_info and field in manifest:
-                        if str(plugin_info[field]) != str(manifest[field]):
-                            result.error(
-                                f"Mismatch: PLUGIN_INFO.{field}='{plugin_info[field]}' "
-                                f"vs plugin.json.{field}='{manifest[field]}'"
-                            )
+                for field in _disagreements(plugin_info, manifest):
+                    result.error(
+                        f"Mismatch: PLUGIN_INFO.{field}='{plugin_info[field]}' "
+                        f"vs plugin.json.{field}='{manifest[field]}'"
+                    )
         except json.JSONDecodeError as e:
             result.error(f"plugin.json is invalid JSON: {e}")
 
@@ -645,13 +652,7 @@ def validate_plugin_dir(plugin_path, result):
     # Check category matches directory
     if plugin_info and "category" in plugin_info:
         parent_dir = plugin_path.parent.name
-        expected_categories = {
-            "control_surfaces": "control_surface",
-            "integrations": "integration",
-            "sensors": "sensor",
-            "utility": "utility",
-        }
-        expected = expected_categories.get(parent_dir)
+        expected = CATEGORY_DIRS.get(parent_dir)
         if expected and plugin_info["category"] != expected:
             result.warn(f"Category '{plugin_info['category']}' doesn't match directory '{parent_dir}/' (expected '{expected}')")
 
@@ -724,55 +725,87 @@ def validate_index_json(repo_root, results):
                 try:
                     with open(plugin_json, encoding="utf-8") as f:
                         manifest = json.load(f)
-                    for field in ("id", "name", "version", "category", "license",
-                                  "min_openavc_version"):
-                        if field in manifest and field in entry:
-                            if str(manifest[field]) != str(entry[field]):
-                                result.error(
-                                    f"Plugin '{plugin_id}': index.json {field}='{entry[field]}' "
-                                    f"doesn't match plugin.json {field}='{manifest[field]}'"
-                                )
+                    for field in _disagreements(manifest, entry):
+                        result.error(
+                            f"Plugin '{plugin_id}': index.json {field}='{entry[field]}' "
+                            f"doesn't match plugin.json {field}='{manifest[field]}'"
+                        )
                 except Exception:
                     pass
 
-    # Check for plugin dirs not in index
-    for dir_name in PLUGIN_DIRS:
-        dir_path = repo_root / dir_name
-        if not dir_path.exists():
-            continue
-        for d in dir_path.iterdir():
-            if d.is_dir() and not d.name.startswith(".") and not d.name.startswith("_"):
-                file_rel = f"{dir_name}/{d.name}"
-                if not any(e.get("file") == file_rel for e in index["plugins"]):
-                    # Check it's actually a plugin (has *_plugin.py)
-                    if list(d.glob("*_plugin.py")):
-                        result.warn(f"Plugin directory '{file_rel}' exists but has no index.json entry")
-
+    _check_unindexed(repo_root, index["plugins"], result)
     results.append(result)
 
 
-def find_plugin_dirs(repo_root, targets=None):
-    """Find plugin directories to validate."""
-    dirs = []
-    if targets:
-        for target in targets:
-            path = Path(target)
-            if not path.is_absolute():
-                path = repo_root / path
-            if path.is_dir():
-                dirs.append(path)
-            else:
-                print(f"WARNING: Not a directory: {target}")
-    else:
-        for dir_name in PLUGIN_DIRS:
-            dir_path = repo_root / dir_name
-            if not dir_path.exists():
+def _check_unindexed(repo_root, entries, result):
+    """A warning for each plugin folder (one with a *_plugin.py) that no
+    entry's ``file`` names. A folder with only a plugin.json is not one here,
+    though find_plugin_dirs validates it."""
+    for dir_name, dir_path in _category_folders(repo_root):
+        for folder in dir_path.iterdir():
+            if not _may_hold_a_plugin(folder):
                 continue
-            for d in sorted(dir_path.iterdir()):
-                if d.is_dir() and not d.name.startswith(".") and not d.name.startswith("_"):
-                    # Only validate directories that look like plugins
-                    if list(d.glob("*_plugin.py")) or (d / "plugin.json").exists():
-                        dirs.append(d)
+            file_rel = f"{dir_name}/{folder.name}"
+            if not any(e.get("file") == file_rel for e in entries) and _has_plugin_module(folder):
+                result.warn(f"Plugin directory '{file_rel}' exists but has no index.json entry")
+
+
+def _disagreements(first, second):
+    """Each of AGREED_FIELDS that both copies have and that reads differently
+    as text, in AGREED_FIELDS order."""
+    for field in AGREED_FIELDS:
+        if _both_have(field, first, second) and str(first[field]) != str(second[field]):
+            yield field
+
+
+def _both_have(field, first, second):
+    return field in first and field in second
+
+
+def _category_folders(repo_root):
+    """``(name, path)`` for each category folder the repository has, in
+    PLUGIN_DIRS order."""
+    for dir_name in PLUGIN_DIRS:
+        dir_path = repo_root / dir_name
+        if dir_path.exists():
+            yield dir_name, dir_path
+
+
+def _may_hold_a_plugin(path):
+    """A folder in a category folder that may hold a plugin: a directory
+    whose name starts with neither '.' nor '_'."""
+    return path.is_dir() and not path.name.startswith((".", "_"))
+
+
+def _has_plugin_module(path):
+    return any(path.glob("*_plugin.py"))
+
+
+def find_plugin_dirs(repo_root, targets=None):
+    """The plugin folders to validate: each named target that is a directory
+    (a relative one taken from the repository root), else every folder in the
+    category folders with a *_plugin.py or a plugin.json, sorted within each."""
+    if targets:
+        return _named_dirs(repo_root, targets)
+    return [
+        folder
+        for _, dir_path in _category_folders(repo_root)
+        for folder in sorted(dir_path.iterdir())
+        if _may_hold_a_plugin(folder) and (_has_plugin_module(folder) or (folder / "plugin.json").exists())
+    ]
+
+
+def _named_dirs(repo_root, targets):
+    """The targets that are directories; a line printed for each that is not."""
+    dirs = []
+    for target in targets:
+        path = Path(target)
+        if not path.is_absolute():
+            path = repo_root / path
+        if path.is_dir():
+            dirs.append(path)
+        else:
+            print(f"WARNING: Not a directory: {target}")
     return dirs
 
 
