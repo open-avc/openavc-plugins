@@ -39,10 +39,11 @@ except ImportError:  # pragma: no cover - exercised only via package-path import
     from .sidecar import NO_WINDOW, SidecarSupervisor
 
 try:
+    import preview_sources
     import stream_records
     import transcode
 except ImportError:  # pragma: no cover - exercised only via package-path import
-    from . import stream_records, transcode
+    from . import preview_sources, stream_records, transcode
 
 # A sentence raised as PluginRefusal from start() is the one the AI assistant
 # repeats to the integrator; on an older OpenAVC the card shows it either way.
@@ -225,40 +226,11 @@ _REMOTE_BLOCKED_DETAIL = (
 # before they're spliced into the proxied sidecar URL.
 _SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
 
-# Auto-discovered preview sources. Any driver that publishes the generic
-# preview-source convention — a `preview_url` (+ optional `preview_format`)
-# state key on a device or child entity — is surfaced as a selectable stream
-# in the UI Builder dropdown with no manual setup. Their stream ids carry this
-# prefix so they can never collide with a user-authored stream.
-_DISCOVER_PREFIX = "auto-"
-# Trailing debounce: coalesce a burst of preview-key changes (e.g. a controller
+# Auto-discovered preview sources (preview_sources.py) are rescanned on a
+# trailing debounce: coalesce a burst of preview-key changes (e.g. a controller
 # enumerating dozens of encoders at once) into a single rebuild.
 _DISCOVER_DEBOUNCE_SECONDS = 0.3
 
-# The preview formats this plugin can actually render. A driver that declares
-# something outside this set is SKIPPED rather than guessed at: a source we
-# cannot draw is better absent from the picker than present and permanently
-# broken. (Before SRT landed an unknown format fell back to mjpeg, which meant
-# an <img> pointed at an srt:// URL -- a dead tile with no explanation.)
-_RENDERABLE_FORMATS = ("mjpeg", "rtsp", "srt")
-# Of those, the ones MediaMTX ingests and re-serves as WebRTC. MJPEG is the odd
-# one out: the plugin proxies it itself and the sidecar never sees it.
-_SIDECAR_FORMATS = ("rtsp", "srt")
-# How a URL scheme maps to a format, for a driver that publishes a preview_url
-# and leaves preview_format off -- the convention says the format is optional.
-# What a source on a device the platform cannot reach says for itself. The
-# driver's own sentence is about the source; this one is about the device, and
-# it outranks the driver's EXCEPT where the driver named a setting to fill in
-# -- typing a port number works perfectly well with the device switched off.
-_OFFLINE_DETAIL = (
-    "This device is not connected right now. The source will play when it "
-    "comes back."
-)
-_SCHEME_FORMATS = {
-    "rtsp": "rtsp", "rtsps": "rtsp",
-    "srt": "srt",
-    "http": "mjpeg", "https": "mjpeg",
-}
 # What MediaMTX names a video track a browser can decode natively. Anything
 # else has to go through ffmpeg. MediaMTX reports this for every source type it
 # ingests, SRT included -- measured against a live vMix SRT output, which comes
@@ -1004,63 +976,10 @@ class VideoPanelPlugin:
             await self.api.state_set(f"streams.{s['stream_id']}", "idle")
 
     async def _publish_stream_list(self):
-        # Configured streams play over WebRTC; auto-discovered sources carry a
-        # `mode` so the panel element knows whether to use the WHEP path or the
-        # MJPEG <img> path. The dropdown's option parser ignores unknown fields,
-        # so adding `mode` is backward-compatible. Kept separate from the status
-        # seeding above so a discovery rebuild doesn't flicker configured-stream
-        # status badges.
-        #
-        # Discovered sources also carry what the picker needs to be legible
-        # rather than a flat list of names: which device each belongs to, and
-        # whether it can be played.
-        listing = [
-            {"value": s["stream_id"], "label": s.get("name") or s["stream_id"], "mode": "webrtc"}
-            for s in self._streams
-        ]
-        configured_ids = {s["stream_id"] for s in self._streams}
-        for sid, d in self._discovered.items():
-            if sid in configured_ids:
-                continue  # a configured stream with the same id takes precedence
-            entry = {
-                "value": sid,
-                "label": d["label"],
-                "mode": "mjpeg" if d["format"] == "mjpeg" else "webrtc",
-                "group": d.get("group", ""),
-                "device": d.get("device", ""),
-            }
-            if d.get("status"):
-                # Offline, and only offline, reaches here -- it stays pickable.
-                # A page is built long before the room is powered up, and a
-                # camera that is off today is still the camera the page is for.
-                entry["status"] = d["status"]
-                entry["detail"] = d.get("detail") or _OFFLINE_DETAIL
-            listing.append(entry)
-        for sid, u in self._unusable.items():
-            if sid in configured_ids:
-                continue
-            # NO `value` KEY, and that is the whole design of this row.
-            #
-            # There is no stream behind it, so there is nothing to pick: it is
-            # on screen to say what is missing. The shared option parser drops
-            # any entry without a `value`, so on a platform whose picker
-            # predates this the row simply is not there -- the behaviour before
-            # any of this work -- instead of offering a page a tile that could
-            # never draw. No version gate needed for that to be true.
-            listing.append({
-                "id": sid,
-                "label": u["label"],
-                "group": u.get("group", ""),
-                "device": u.get("device", ""),
-                "status": u["status"],
-                "detail": u.get("detail", ""),
-                **(
-                    {"setup": {"device": u["device"], "field": u["setup_field"]}}
-                    if u.get("setup_field") and u.get("device")
-                    else {}
-                ),
-            })
-        await self.api.state_set("stream_ids", json.dumps(listing))
+        # Kept separate from the status seeding above so a discovery rebuild
+        # doesn't flicker configured-stream status badges.
+        rows = preview_sources.picker_rows(self._streams, self._discovered, self._unusable)
+        await self.api.state_set("stream_ids", json.dumps(rows))
 
     async def _poll_statuses(self):
         if await self._maybe_apply_address_change():
@@ -1177,40 +1096,8 @@ class VideoPanelPlugin:
     # ──── Auto-discovered preview sources ────
 
     async def _setup_discovery(self):
-        """Subscribe to the generic preview-source convention and seed the list.
-
-        Any driver that publishes ``preview_url`` (+ optional ``preview_format``)
-        on a device or child entity is surfaced as a selectable stream. fnmatch
-        ``*`` crosses dots, so one pattern per key covers both device-level
-        (``device.<id>.preview_url``) and child-level
-        (``device.<id>.<type>.<padded>.preview_url``) sources. ``label`` and
-        ``name`` are watched too so a rename refreshes the dropdown text —
-        ``_discovery_label`` falls back from ``label`` to ``name``, so both must
-        trigger a rebuild (a device-reported ``name`` change is the common case
-        when no user label is set).
-        """
-        for pattern in (
-            "device.*.preview_url",
-            "device.*.preview_format",
-            # The optional half of the convention: a source that has no stream
-            # and something that could be done about it. A driver that never
-            # publishes these is unaffected -- absent means ready.
-            "device.*.preview_status",
-            "device.*.preview_status_detail",
-            "device.*.preview_setup_field",
-            "device.*.label",
-            "device.*.name",
-            # Whether the device is reachable is nobody's key but the
-            # platform's, and no driver reports it. preview_url is never
-            # cleared on a disconnect, so without this an unplugged encoder
-            # sits in the picker looking exactly like a working one.
-            "device.*.connected",
-            # And the same question one level down. A frame stays connected
-            # while one of its encoders goes dark, so the device key never
-            # moves and this is the only thing that says anything happened.
-            "device.*.online",
-            "device.*.offline_detail",  # the child half of it; see _unreachable_detail
-        ):
+        """Watch every key of the preview-source convention, then seed the list."""
+        for pattern in preview_sources.WATCHED:
             await self.api.state_subscribe(pattern, self._on_discovery_change)
         await self._rebuild_discovered()
 
@@ -1230,200 +1117,12 @@ class VideoPanelPlugin:
         await self._rebuild_discovered()
 
     async def _rebuild_discovered(self):
-        """Rescan preview-source keys and republish the merged stream list.
-
-        A scope earns a row if it has a URL we can draw, or a status saying
-        why it has not. The second kind is the point of the whole exercise:
-        an SRT output one port number away from working used to publish
-        nothing and be indistinguishable from a device that has no video at
-        all.
-        """
-        urls = await self.api.state_get_pattern("device.*.preview_url")
-        statuses = await self.api.state_get_pattern("device.*.preview_status")
-        scopes = set()
-        for key in urls:
-            scopes.add(key[: -len(".preview_url")])  # device.<id>[.<type>.<pad>]
-        for key in statuses:
-            scopes.add(key[: -len(".preview_status")])
-
-        connected = await self._connected_devices()
-        children = await self._online_children()
-        discovered, unusable = {}, {}
-        for prefix in sorted(scopes):
-            raw = urls.get(f"{prefix}.preview_url")
-            url = raw.strip() if isinstance(raw, str) else ""
-            raw = statuses.get(f"{prefix}.preview_status")
-            status = raw.strip() if isinstance(raw, str) else ""
-            device_id = self._device_of(prefix)
-            sid = self._discovered_stream_id(prefix)
-            reachable = await self._scope_reachable(prefix, connected, children)
-
-            if url and status in ("", "ready"):
-                declared = await self.api.state_get(f"{prefix}.preview_format")
-                fmt = self._preview_format(declared, url)
-                if fmt is None:
-                    if prefix not in self._warned_format:
-                        self._warned_format.add(prefix)
-                        self.api.log(
-                            f"{prefix} offers a preview this plugin cannot draw "
-                            f"(format {declared!r}, URL {url!r}); it is not being "
-                            f"listed as a stream. Supported: "
-                            f"{', '.join(_RENDERABLE_FORMATS)}.",
-                            "warning",
-                        )
-                    continue
-                self._warned_format.discard(prefix)
-                discovered[sid] = {
-                    "label": await self._discovery_label(prefix),
-                    "url": url,
-                    "format": fmt,
-                    "device": device_id,
-                    "group": await self._device_label(device_id),
-                    # Offline is decided here, not by the driver: it is the one
-                    # thing about a source that the platform already knows and
-                    # no driver reports. "Here" means the sub-unit as well as
-                    # the box -- one encoder on a sixteen-encoder frame going
-                    # dark is the common case, and the frame stays connected
-                    # right through it.
-                    "status": "" if reachable else "offline",
-                    "detail": "" if reachable else await self._unreachable_detail(prefix),
-                }
-                continue
-
-            if not status:
-                continue  # no stream and nothing to say: not a source at all
-            offline_ranks_below = reachable or status == "needs_setup"
-            unusable[sid] = {
-                "label": await self._discovery_label(prefix),
-                "device": device_id,
-                "group": await self._device_label(device_id),
-                # A missing setting outranks an unreachable device: the number
-                # can be typed either way, and "connect the device" is not the
-                # next step when the next step is "enter the port".
-                "status": status if offline_ranks_below else "offline",
-                "detail": (
-                    await self._text(f"{prefix}.preview_status_detail")
-                    if offline_ranks_below
-                    else await self._unreachable_detail(prefix)
-                ),
-                "setup_field": await self._text(f"{prefix}.preview_setup_field"),
-            }
-
-        self._discovered = discovered
-        self._unusable = unusable
+        """Rescan preview-source keys and republish the merged stream list."""
+        self._discovered, self._unusable = await preview_sources.scan(
+            self.api, self._warned_format
+        )
         await self._sync_discovered_sidecar()
         await self._publish_stream_list()
-
-    async def _connected_devices(self):
-        """device id -> whether the platform currently has a link to it."""
-        found = {}
-        for key, value in (
-            await self.api.state_get_pattern("device.*.connected")
-        ).items():
-            parts = key.split(".")
-            # Only the DEVICE's own key. A child entity has an `online` of its
-            # own, read separately below -- the two answer different questions
-            # and a frame full of encoders answers the device one for all of
-            # them at once.
-            if len(parts) == 3:
-                found[parts[1]] = bool(value)
-        return found
-
-    async def _online_children(self):
-        """child scope -> whether that sub-unit is answering.
-
-        A frame with sixteen encoders is ONE connected device. Reading only the
-        device's `connected` made every encoder on it look fine, including the
-        one somebody had just unplugged: its row stayed in the picker with
-        nothing to say, and a tile pointed at it reconnected forever to a
-        source that had gone. The child's own `online` is the only key that
-        knows, and it is the same key the device page draws its red dot from.
-        """
-        found = {}
-        for key, value in (await self.api.state_get_pattern("device.*.online")).items():
-            # device.<id>.<type>.<local id>.online -- five parts. Nothing else
-            # is a child, and the device's own reachability is `connected`.
-            if key.count(".") == 4:
-                found[key[: -len(".online")]] = bool(value)
-        return found
-
-    async def _scope_reachable(self, prefix, connected, children):
-        """Whether the thing at this scope can be reached at all right now.
-
-        A child is unreachable when it says so OR when the device carrying it
-        is down -- an encoder on a frame we have lost contact with is not
-        online just because the last poll before the link dropped said it was.
-        """
-        device_id = self._device_of(prefix)
-        if not connected.get(device_id, True):
-            return False
-        return children.get(prefix, True)
-
-    async def _unreachable_detail(self, prefix):
-        """The sentence for a source that cannot be reached.
-
-        A CHILD's own `offline_detail` is used when it has one: that vocabulary
-        is written for whoever is standing in front of the gear ("Not
-        answering. Check that it has power and a network connection."), and it
-        names the sub-unit rather than the frame it is plugged into.
-
-        A DEVICE's `offline_detail` is deliberately NOT used, even though it is
-        sitting right there. It is written for the person configuring the
-        system -- "Install it and make sure it's on the system PATH", "Wrong
-        transport or protocol for this device?" -- and a wall panel is the last
-        place that belongs. Same key name, different reader.
-        """
-        if prefix.count(".") == 3:  # device.<id>.<type>.<local id>
-            detail = await self._text(f"{prefix}.offline_detail")
-            if detail:
-                return detail
-        return _OFFLINE_DETAIL
-
-    @staticmethod
-    def _device_of(prefix):
-        """The device id out of a `device.<id>[.<type>.<pad>]` scope."""
-        parts = prefix.split(".")
-        return parts[1] if len(parts) > 1 else ""
-
-    async def _device_label(self, device_id):
-        """What to call the device a source belongs to, for grouping."""
-        if not device_id:
-            return ""
-        return await self._text(f"device.{device_id}.name") or device_id
-
-    async def _text(self, key):
-        value = await self.api.state_get(key)
-        return value.strip() if isinstance(value, str) else ""
-
-    @staticmethod
-    def _preview_format(declared, url):
-        """How to render a discovered preview, or None if we cannot.
-
-        The convention makes ``preview_format`` optional, so a URL on its own
-        has to resolve — and a declared format we do not recognise is more
-        likely a newer driver than a typo, in which case the scheme is the
-        better evidence anyway. Returns None when nothing can draw it, which
-        keeps a source we would only draw wrong out of the picker entirely.
-        """
-        fmt = (declared or "").strip().lower() if isinstance(declared, str) else ""
-        if fmt in _RENDERABLE_FORMATS:
-            return fmt
-        scheme = (url or "").split("://", 1)[0].strip().lower()
-        return _SCHEME_FORMATS.get(scheme)
-
-    async def _discovery_label(self, prefix):
-        """Friendly name for a discovered source: user label, else device name."""
-        for key in (f"{prefix}.label", f"{prefix}.name"):
-            value = await self.api.state_get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return self._discovered_stream_id(prefix)
-
-    @staticmethod
-    def _discovered_stream_id(prefix):
-        """Stable, URL-safe stream id derived from a ``device.<id>...`` prefix."""
-        slug = re.sub(r"[^A-Za-z0-9_-]+", "-", prefix[len("device."):]).strip("-")
-        return f"{_DISCOVER_PREFIX}{slug or 'source'}"
 
     async def _sync_discovered_sidecar(self):
         """Register/unregister MediaMTX paths for discovered RTSP + SRT previews.
@@ -1441,7 +1140,7 @@ class VideoPanelPlugin:
         want = {
             sid: d["url"]
             for sid, d in self._discovered.items()
-            if d["format"] in _SIDECAR_FORMATS
+            if d["format"] in preview_sources.SIDECAR_FORMATS
         }
         for sid in set(self._discovered_sidecar) - set(want):
             await self._sync_path_delete(sid)

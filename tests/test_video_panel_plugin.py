@@ -37,7 +37,7 @@ try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from integrations.video_panel import stream_records
+    from integrations.video_panel import preview_sources, stream_records
     from integrations.video_panel.video_panel_plugin import VideoPanelPlugin
 
     _PLUGIN_IMPORTABLE = True
@@ -873,7 +873,7 @@ def test_video_stream_panel_element_extension_shape():
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_discovered_stream_id_is_urlsafe_and_prefixed():
-    f = VideoPanelPlugin._discovered_stream_id
+    f = preview_sources.discovered_stream_id
     assert f("device.chazyctl.encoder.001") == "auto-chazyctl-encoder-001"
     assert f("device.cam1") == "auto-cam1"
     # Non-url-safe characters in an id collapse to hyphens, so the result stays
@@ -1486,7 +1486,7 @@ async def test_the_supervisor_really_drives_the_re_attach(tmp_path, monkeypatch)
 
 @pytest.mark.skipif(not _PLUGIN_IMPORTABLE, reason="fastapi/httpx/yaml not available")
 def test_preview_format_resolves_declared_then_scheme():
-    f = VideoPanelPlugin._preview_format
+    f = preview_sources.preview_format
     # A format we can draw is taken as declared.
     assert f("srt", "srt://vmix:10000") == "srt"
     assert f("rtsp", "rtsp://cam/sub") == "rtsp"
