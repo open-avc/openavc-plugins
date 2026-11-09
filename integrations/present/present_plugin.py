@@ -760,7 +760,7 @@ class PresentPlugin:
         user-facing message on an unknown display or malformed source."""
         display = self._find_display(display_id)
         if display is None:
-            raise ValueError(f"No display with id '{display_id}'.")
+            raise ValueError(display_records.no_such_display(display_id))
         normalized = self._normalize_source(source)
         if normalized is None:
             raise ValueError("Source must be 'auto' or a presenter name.")
@@ -1243,18 +1243,7 @@ class PresentPlugin:
 
         @router.get("/status")
         async def status():
-            presenters = self._presenters_list(self._presence)
-            return {
-                "running": bool(self._supervisor and self._supervisor.running),
-                "mediamtx_version": _MEDIAMTX_VERSION,
-                "space_name": await self._space_name(),
-                "code": self._current_code(),
-                "join_url": await self._join_url(),
-                "presenters": presenters,
-                "active_presenters": len(presenters),
-                "sources": self._sources_options(),
-                "display_ids": [d["id"] for d in self._displays],
-            }
+            return await self._status()
 
         @router.get("/displays")
         async def list_displays():
@@ -1263,114 +1252,158 @@ class PresentPlugin:
         @router.get("/outputs")
         async def list_outputs():
             """This server's video outputs, for the local-output picker."""
-            if self._kiosk is None:
-                return {
-                    "supported": False,
-                    "reason": "The plugin is not running.",
-                    "outputs": [],
-                }
-            in_use = {
-                d["local_output"]: d["id"]
-                for d in self._displays
-                if d.get("local_output")
-            }
-            return await self._kiosk.describe_outputs(in_use=in_use)
+            return await self._host_outputs()
 
         @router.post("/displays")
         async def add_display(data: DisplayIn):
-            display = display_records.new_record(self._displays, data)
-            kind = display["kind"]
-            display_id = display["id"]
-            self._displays.append(display)
-            self._routing[display_id] = _AUTO
-            await self._persist_displays()
-            await self._publish_all()
-            if kind == "stream":
-                await self._start_output(display)
-            await self._sync_kiosks()
-            return self._display_view(display)
+            return await self._add_display(data)
 
         @router.put("/displays/{display_id}")
         async def edit_display(display_id: str, data: DisplayIn):
-            display = self._find_display(display_id)
-            if not display:
-                raise HTTPException(404, f"No display with id '{display_id}'.")
-            kind, new_id = display_records.apply_edit(self._displays, display, data)
-            if new_id != display_id:
-                # The id is baked into the Display URL, the stream URLs, and
-                # the state keys, so a rename moves the routing and clears old
-                # keys. (Any open Display page for the old id stops at its
-                # next poll; a decoder on the old stream URL must be repointed.)
-                routed = self._routing.get(display_id, _AUTO)
-                await self._stop_output(display_id)
-                await self._clear_display_state(display_id)
-                display["id"] = new_id
-                self._routing[new_id] = routed
-                kiosk.remove_profile(self.api.data_dir, display_id)
-            await self._persist_displays()
-            await self._publish_all()
-            # Reconcile the output pipeline with the (possibly new) kind/id.
-            if kind == "stream":
-                if display["id"] not in self._controllers:
-                    await self._start_output(display)
-            else:
-                await self._stop_output(display["id"])
-            await self._sync_kiosks()
-            return self._display_view(display)
+            return await self._edit_display(display_id, data)
 
         @router.delete("/displays/{display_id}")
         async def delete_display(display_id: str):
-            display = self._find_display(display_id)
-            if not display:
-                raise HTTPException(404, f"No display with id '{display_id}'.")
-            self._displays.remove(display)
-            await self._stop_output(display_id)
-            await self._persist_displays()
-            await self._clear_display_state(display_id)
-            await self._publish_all()
-            await self._sync_kiosks()
-            kiosk.remove_profile(self.api.data_dir, display_id)
-            return {"status": "deleted", "display_id": display_id}
+            return await self._delete_display(display_id)
 
         @router.post("/displays/{display_id}/regenerate_key")
         async def regenerate_key(display_id: str):
-            display = self._find_display(display_id)
-            if not display:
-                raise HTTPException(404, f"No display with id '{display_id}'.")
-            # Invalidate every existing Display URL for this display; open
-            # Display pages get a 401 on their next poll and show the
-            # "link isn't valid" card. A local window relaunches on the new
-            # URL (its old one just died with the key).
-            display["display_key"] = display_records.new_display_key()
-            await self._persist_displays()
-            await self._sync_kiosks()
-            return self._display_view(display)
+            return await self._regenerate_key(display_id)
 
         @router.post("/displays/{display_id}/regenerate_stream_key")
         async def regenerate_stream_key(display_id: str):
-            display = self._find_display(display_id)
-            if not display:
-                raise HTTPException(404, f"No display with id '{display_id}'.")
-            if display.get("kind") != "stream":
-                raise HTTPException(422, "Only stream displays have a stream key.")
-            # New key = new output path: every decoder holding the old URL
-            # loses the stream and must be given the new one.
-            display["stream_key"] = display_records.new_stream_key()
-            await self._persist_displays()
-            await self._restart_output(display)
-            return self._display_view(display)
+            return await self._regenerate_stream_key(display_id)
 
         @router.post("/displays/{display_id}/route")
         async def route_display(display_id: str, data: RouteIn):
-            try:
-                await self._route(display_id, data.source)
-            except ValueError as e:
-                raise HTTPException(404 if self._find_display(display_id) is None else 422, str(e))
-            return self._display_view(self._find_display(display_id))
+            return await self._route_display(display_id, data.source)
 
         return router
 
+    # The plugin page's operations. Each returns what its route answers, or
+    # raises the HTTPException the page shows; the record rules are
+    # display_records', what a change does to the running system is here.
+
+    async def _status(self):
+        presenters = self._presenters_list(self._presence)
+        return {
+            "running": bool(self._supervisor and self._supervisor.running),
+            "mediamtx_version": _MEDIAMTX_VERSION,
+            "space_name": await self._space_name(),
+            "code": self._current_code(),
+            "join_url": await self._join_url(),
+            "presenters": presenters,
+            "active_presenters": len(presenters),
+            "sources": self._sources_options(),
+            "display_ids": [d["id"] for d in self._displays],
+        }
+
+    async def _host_outputs(self):
+        if self._kiosk is None:
+            return {
+                "supported": False,
+                "reason": "The plugin is not running.",
+                "outputs": [],
+            }
+        in_use = {
+            d["local_output"]: d["id"]
+            for d in self._displays
+            if d.get("local_output")
+        }
+        return await self._kiosk.describe_outputs(in_use=in_use)
+
+    def _display_or_404(self, display_id):
+        display = self._find_display(display_id)
+        if not display:
+            raise HTTPException(404, display_records.no_such_display(display_id))
+        return display
+
+    async def _add_display(self, data):
+        display = display_records.new_record(self._displays, data)
+        self._displays.append(display)
+        self._routing[display["id"]] = _AUTO
+        await self._persist_displays()
+        await self._publish_all()
+        if display["kind"] == "stream":
+            await self._start_output(display)
+        await self._sync_kiosks()
+        return self._display_view(display)
+
+    async def _edit_display(self, display_id, data):
+        display = self._display_or_404(display_id)
+        kind, new_id = display_records.apply_edit(self._displays, display, data)
+        if new_id != display_id:
+            await self._move_display(display, new_id)
+        await self._persist_displays()
+        await self._publish_all()
+        await self._reconcile_output(display, kind)
+        await self._sync_kiosks()
+        return self._display_view(display)
+
+    async def _move_display(self, display, new_id):
+        """A rename: the id is baked into the Display URL, the stream URLs and
+        the state keys, so the routing moves, the old keys clear, and the old
+        output and kiosk profile go. (Any open Display page for the old id
+        stops at its next poll; a decoder on the old stream URL must be
+        repointed.)"""
+        old_id = display["id"]
+        routed = self._routing.get(old_id, _AUTO)
+        await self._stop_output(old_id)
+        await self._clear_display_state(old_id)
+        display["id"] = new_id
+        self._routing[new_id] = routed
+        kiosk.remove_profile(self.api.data_dir, old_id)
+
+    async def _reconcile_output(self, display, kind):
+        """A stream display has a running output; any other kind has none."""
+        if kind == "stream":
+            if display["id"] not in self._controllers:
+                await self._start_output(display)
+        else:
+            await self._stop_output(display["id"])
+
+    async def _delete_display(self, display_id):
+        display = self._display_or_404(display_id)
+        self._displays.remove(display)
+        await self._stop_output(display_id)
+        await self._persist_displays()
+        await self._clear_display_state(display_id)
+        await self._publish_all()
+        await self._sync_kiosks()
+        kiosk.remove_profile(self.api.data_dir, display_id)
+        return {"status": "deleted", "display_id": display_id}
+
+    async def _regenerate_key(self, display_id):
+        """Invalidate every existing Display URL for this display; open
+        Display pages get a 401 on their next poll and show the "link isn't
+        valid" card. A local window relaunches on the new URL (its old one
+        just died with the key)."""
+        display = self._display_or_404(display_id)
+        display["display_key"] = display_records.new_display_key()
+        await self._persist_displays()
+        await self._sync_kiosks()
+        return self._display_view(display)
+
+    async def _regenerate_stream_key(self, display_id):
+        """New key = new output path: every decoder holding the old URL loses
+        the stream and must be given the new one."""
+        display = self._display_or_404(display_id)
+        if display.get("kind") != "stream":
+            raise HTTPException(422, "Only stream displays have a stream key.")
+        display["stream_key"] = display_records.new_stream_key()
+        await self._persist_displays()
+        await self._restart_output(display)
+        return self._display_view(display)
+
+    async def _route_display(self, display_id, source):
+        try:
+            await self._route(display_id, source)
+        except ValueError as e:
+            raise HTTPException(404 if self._find_display(display_id) is None else 422, str(e))
+        return self._display_view(self._find_display(display_id))
+
     def _display_view(self, display):
+        """What the plugin page shows for a display (presentClient.ts reads it)."""
         display_id = display["id"]
         showing = self._resolve_source(display_id, set(self._presence))
         view = {
@@ -1387,32 +1420,42 @@ class PresentPlugin:
         if view["kind"] == "browser":
             view["local_output"] = local_output
         if local_output:
-            # View-only, like encoder_state: the IDE's status chip reads
-            # these; automation triggers on output_state/showing as usual.
-            if self._kiosk is not None:
-                view["local_state"] = self._kiosk.state_for(display_id)
-                view["local_output_name"] = self._kiosk.output_name(local_output)
-                view["local_output_connected"] = self._kiosk.output_connected(
-                    local_output
-                )
-            else:
-                view["local_state"] = "stopped"
-                view["local_output_name"] = ""
-                view["local_output_connected"] = False
+            view.update(self._local_window_view(display_id, local_output))
         if view["kind"] == "stream":
-            # The IDE composes the copyable URLs from the host it reached the
-            # server on plus these; the path embeds the stream key.
-            view["stream_path"] = self._stream_path(display)
-            view["rtsp_port"] = _RTSP_PORT
-            view["srt_port"] = _SRT_PORT
-            controller = self._controllers.get(display_id)
-            if controller is not None:
-                view["encoder_state"] = controller.state
-            else:
-                # Running plugin but no controller = the output could not be
-                # started (missing font); before start() it is simply off.
-                view["encoder_state"] = "error" if self._supervisor else "stopped"
+            view.update(self._stream_view(display))
         return view
+
+    def _local_window_view(self, display_id, local_output):
+        """View-only, like encoder_state: the IDE's status chip reads these;
+        automation triggers on output_state/showing as usual."""
+        if self._kiosk is None:
+            return {
+                "local_state": "stopped",
+                "local_output_name": "",
+                "local_output_connected": False,
+            }
+        return {
+            "local_state": self._kiosk.state_for(display_id),
+            "local_output_name": self._kiosk.output_name(local_output),
+            "local_output_connected": self._kiosk.output_connected(local_output),
+        }
+
+    def _stream_view(self, display):
+        """The IDE composes the copyable URLs from the host it reached the
+        server on plus these; the path embeds the stream key."""
+        controller = self._controllers.get(display["id"])
+        if controller is not None:
+            encoder_state = controller.state
+        else:
+            # Running plugin but no controller = the output could not be
+            # started (missing font); before start() it is simply off.
+            encoder_state = "error" if self._supervisor else "stopped"
+        return {
+            "stream_path": self._stream_path(display),
+            "rtsp_port": _RTSP_PORT,
+            "srt_port": _SRT_PORT,
+            "encoder_state": encoder_state,
+        }
 
     @staticmethod
     def _validate_presenter(presenter):
