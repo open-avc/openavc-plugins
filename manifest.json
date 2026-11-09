@@ -89,7 +89,7 @@
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
         "integrations/video_panel/stream_records.py": "779272a3631506a108666630ddff6d77a63321c3c744cc74b75f90c31671d116",
         "integrations/video_panel/transcode.py": "93aa973202b67a2131321e96f328f39701a27b10b3b006088a8ed9f2ac7ca6be",
-        "integrations/video_panel/video_panel_plugin.py": "385c689b37c2da3dd25d3c1f2b5266bd67f04a14680fba8ed6f85e73c95467c0"
+        "integrations/video_panel/video_panel_plugin.py": "2a036e097bd76299e135a5a1fd9fe79dd94fde07e5c400c4686fc7a7f70fb74b"
       }
     }
   }

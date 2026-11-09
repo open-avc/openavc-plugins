@@ -490,9 +490,10 @@ class VideoPanelPlugin:
         self._encoder_cache = {}  # hardware_accel value -> resolved ffmpeg encoder
         # Auto-discovered preview sources, keyed by derived stream id, as
         # preview_sources.scan returns them (its _playable writes each one;
-        # this plugin reads "url" and "format"). Everything in here is playable. An OFFLINE source stays in it on
-        # purpose -- a camera that is switched off is still the camera a page
-        # is being built against, and hiding it is how one silently vanishes.
+        # this plugin reads "url" and "format"). Everything in here is
+        # playable. An OFFLINE source stays in it on purpose -- a camera that
+        # is switched off is still the camera a page is being built against,
+        # and hiding it is how one silently vanishes.
         self._discovered = {}
         # Sources that exist and cannot be played: a driver said `needs_setup`
         # or `unavailable`. Listed in the picker with what is missing, never
