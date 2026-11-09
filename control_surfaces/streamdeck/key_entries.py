@@ -12,11 +12,16 @@ list of actions, or as a single action object; ``action_list`` reads either.
 Entries and actions that are not objects are skipped, never an error: the
 config check (config_check.py) is what reports them. ``ACTION_KINDS`` are the
 action types a deck runs: the plugin has one runner for each, and the config
-check reports any other type.
+check reports any other type. ``write_door`` is what a state.set action, a dial
+adjust or a zone fader may write; the plugin writes through it and the config
+check reports a key it refuses.
 """
 
 # The action types a deck runs, in the order the config check lists them.
 ACTION_KINDS = ("macro", "device.command", "state.set", "navigate")
+
+# What a user variable's state key starts with; the variable's name follows.
+VARIABLE_PREFIX = "var."
 
 
 def objects(value):
@@ -96,3 +101,15 @@ def assignment_for(cfg, page, key_index):
         ),
         None,
     )
+
+
+def write_door(key, plugin_id):
+    """How a deck writes ``key``: ``"state"`` for its own plugin's
+    ``plugin.<plugin_id>.*`` state, ``"variable"`` for a ``var.*`` user
+    variable, None for anything else, which the deck refuses (the scope rule
+    the panel's plugin bridge keeps too). ``key`` must be text."""
+    if key.startswith(f"plugin.{plugin_id}."):
+        return "state"
+    if key.startswith(VARIABLE_PREFIX):
+        return "variable"
+    return None

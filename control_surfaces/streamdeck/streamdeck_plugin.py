@@ -45,11 +45,13 @@ from .declared_decks import (
     virtual_deck_entries,
 )
 from .key_entries import (
+    VARIABLE_PREFIX,
     action_list,
     assignment_for,
     objects,
     press_actions,
     unwrap_binding,
+    write_door,
 )
 from .deck_answers import answer_address, answer_serial, scan_listing
 from .deck_classes import net_deck_class
@@ -1767,22 +1769,19 @@ class StreamDeckPlugin:
     }
 
     async def _apply_state_set(self, key, value):
-        """Write a state value, mirroring the panel plugin-bridge scope rule.
-
-        A surface button may write only its own ``plugin.<id>.*`` namespace
-        (via ``state_set``) or a ``var.*`` user variable (via ``variable_set``).
-        Anything else is a confused-deputy write and is dropped with a warning —
-        exactly the scope rule the panel plugin bridge enforces in panel.js.
-        """
-        prefix = f"plugin.{self.api.plugin_id}."
-        if key.startswith(prefix):
+        """Write a state value through the deck's write rule
+        (key_entries.write_door): its own ``plugin.<id>.*`` state via
+        ``state_set``, a ``var.*`` user variable via ``variable_set``. Anything
+        else is a confused-deputy write, dropped with a warning."""
+        door = write_door(key, self.api.plugin_id)
+        if door == "state":
             await self.api.state_set(key, value)
-        elif key.startswith("var."):
-            await self.api.variable_set(key[len("var."):], value)
+        elif door == "variable":
+            await self.api.variable_set(key[len(VARIABLE_PREFIX):], value)
         else:
             self.api.log(
                 f"Ignoring state.set to '{key}': a surface button may only write "
-                f"its own {prefix}* state or a var.* user variable.",
+                f"its own plugin.{self.api.plugin_id}.* state or a var.* user variable.",
                 level="warning",
             )
 

@@ -23,7 +23,7 @@ import json
 
 from .conditions import KNOWN_OPERATORS, coerce_numeric
 from .declared_decks import endpoint_key, network_endpoint, virtual_serial
-from .key_entries import ACTION_KINDS, unwrap_binding
+from .key_entries import ACTION_KINDS, unwrap_binding, write_door
 from .pages import NEXT_PAGE, PREV_PAGE, page_number
 from .virtual_deck import VIRTUAL_MODELS
 
@@ -36,10 +36,9 @@ _DIAL_ACTIONS = (
 _PAGE_WORDS = (None, "", NEXT_PAGE, PREV_PAGE)
 _SOURCE_FIELDS = ("label_source", "value_source", "key")
 
-# What a key, dial or zone may write: a user variable or this plugin's own
-# state (its id is "streamdeck"), the rule _apply_state_set enforces when it
-# runs.
-_WRITABLE_PREFIXES = ("var.", "plugin.streamdeck.")
+# The id the plugin runs under (PLUGIN_INFO["id"]): a key, dial or zone may
+# write this plugin's own state or a user variable (key_entries.write_door).
+_OWN_ID = "streamdeck"
 
 
 # ──── Shared pieces ────
@@ -118,7 +117,7 @@ def _source_problems(entry, path, consequence, fields=_SOURCE_FIELDS):
 def _leaves_alone(key):
     """A key the write rule has nothing to say about: not text or empty
     (another rule's, or not filled in yet), or one a deck may write."""
-    return not isinstance(key, str) or not key or key.startswith(_WRITABLE_PREFIXES)
+    return not isinstance(key, str) or not key or write_door(key, _OWN_ID) is not None
 
 
 def _write_problems(key, path, consequence):
@@ -126,7 +125,7 @@ def _write_problems(key, path, consequence):
         return []
     return [
         f"{path}: {_shown(key)} is not a variable (var.*) or the deck's own "
-        f"plugin.streamdeck.* state, the only keys a deck writes, so {consequence}."
+        f"plugin.{_OWN_ID}.* state, the only keys a deck writes, so {consequence}."
     ]
 
 
