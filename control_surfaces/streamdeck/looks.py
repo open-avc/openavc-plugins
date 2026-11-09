@@ -14,6 +14,12 @@ Without a usable map, the ``condition`` pair applies ``style_active`` or
 ``style_inactive``; their label sits beside the style (``label_active`` /
 ``label_inactive``), not inside it, and applies only when the style is an
 object. In every form an empty field keeps what the look already has.
+
+A touch key has no screen, only a color (``touch_key_color``): a macro run's
+mark color outright, else its own background, lifted for "you are here" (a
+page key whose page is showing) and again while it is held. An LCD key shows
+the same marks drawn over its image, in the same ``MARK_COLORS``; drawing them
+is the plugin's.
 """
 
 from dataclasses import dataclass
@@ -21,6 +27,14 @@ from dataclasses import dataclass
 from .conditions import coerce_numeric, reads_as_on
 
 METER_DEFAULT_COLOR = "#8ab493"
+
+# A key's mark while a macro its press runs is running, has finished or
+# failed: the border on an LCD key, the whole color of a touch key.
+MARK_COLORS = {
+    "running": "#f59e0b",
+    "done": "#22c55e",
+    "error": "#ef4444",
+}
 
 
 @dataclass
@@ -35,6 +49,41 @@ class Look:
     text_color: str
     value_text: str = ""
     meter: object = None
+
+
+def hex_to_rgb(color):
+    """A #rrggbb (or #rgb) hex color as an (r, g, b) tuple; black for
+    anything else."""
+    value = str(color or "").lstrip("#")
+    try:
+        if len(value) == 3:
+            return tuple(int(c * 2, 16) for c in value)
+        if len(value) == 6:
+            return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        pass
+    return (0, 0, 0)
+
+
+def lighten_hex(color, amount):
+    """A hex color blended toward white by ``amount`` (0..1), as hex."""
+    r, g, b = hex_to_rgb(color)
+    r = int(r + (255 - r) * amount)
+    g = int(g + (255 - g) * amount)
+    b = int(b + (255 - b) * amount)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def touch_key_color(bg_color, macro_mark, nav_active, held):
+    """A touch key's color: its macro mark's color outright, else its own
+    ``bg_color``, lifted for "you are here" (only without a mark) and again
+    while held."""
+    color = MARK_COLORS.get(macro_mark, bg_color)
+    if nav_active and macro_mark is None:
+        color = lighten_hex(color, 0.2)
+    if held:
+        color = lighten_hex(color, 0.25)
+    return color
 
 
 def plain(color):

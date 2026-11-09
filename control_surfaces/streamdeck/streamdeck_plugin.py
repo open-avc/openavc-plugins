@@ -91,7 +91,16 @@ from .layouts import (
     overlay_panel_slot,
     zone_layout,
 )
-from .looks import Look, meter_fill, plain, styled, value_line
+from .looks import (
+    MARK_COLORS,
+    Look,
+    hex_to_rgb,
+    meter_fill,
+    plain,
+    styled,
+    touch_key_color,
+    value_line,
+)
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .pages import key_target_page, page_count, page_number, page_step
 from .screens import CLOCK, info_idle_mode, info_items, strip_idle_mode
@@ -2407,7 +2416,7 @@ class StreamDeckPlugin:
         held = key_index in session.pressed_keys
 
         if touch_key:
-            color = self._touch_key_color(look.bg_color, macro_mark, nav_active, held)
+            color = touch_key_color(look.bg_color, macro_mark, nav_active, held)
             self._apply_key_color(session, key_index, color)
             return
         image = self._create_button_image(session, look)
@@ -2469,16 +2478,6 @@ class StreamDeckPlugin:
             return press.get("on_label", "") or label
         return press.get("off_label", "") or label
 
-    def _touch_key_color(self, bg_color, macro_mark, nav_active, held):
-        """A touch key's color: a macro mark's color outright, else the key's
-        own, lifted for "you are here" and again while held."""
-        color = self._MACRO_MARK_COLORS.get(macro_mark, bg_color)
-        if nav_active and macro_mark is None:
-            color = self._lighten_hex(color, 0.2)
-        if held:
-            color = self._lighten_hex(color, 0.25)
-        return color
-
     def _marked_image(self, image, nav_active, held, macro_mark):
         """An LCD key's image with its marks drawn over it in order: "you are
         here", the press highlight, then a macro's run border."""
@@ -2502,34 +2501,12 @@ class StreamDeckPlugin:
         except Exception:
             return image
 
-    @staticmethod
-    def _hex_to_rgb(color):
-        """Parse a #rrggbb (or #rgb) hex color to an (r, g, b) tuple."""
-        value = str(color or "").lstrip("#")
-        try:
-            if len(value) == 3:
-                return tuple(int(c * 2, 16) for c in value)
-            if len(value) == 6:
-                return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
-        except ValueError:
-            pass
-        return (0, 0, 0)
-
-    @staticmethod
-    def _lighten_hex(color, amount):
-        """Blend a hex color toward white by ``amount`` (0..1), as hex."""
-        r, g, b = StreamDeckPlugin._hex_to_rgb(color)
-        r = int(r + (255 - r) * amount)
-        g = int(g + (255 - g) * amount)
-        b = int(b + (255 - b) * amount)
-        return f"#{r:02x}{g:02x}{b:02x}"
-
     def _apply_key_color(self, session, key_index, color):
         """Set a touch key's RGB backlight from a hex color (thread-safe)."""
         if self._mirror_enabled(session):
             session.touch_key_colors[key_index] = color
             self._schedule_mirror_bump(session)
-        r, g, b = self._hex_to_rgb(color)
+        r, g, b = hex_to_rgb(color)
         try:
             with session.deck:
                 session.deck.set_key_color(key_index, r, g, b)
@@ -2939,11 +2916,6 @@ class StreamDeckPlugin:
 
     # ──── Macro run feedback ────
 
-    _MACRO_MARK_COLORS = {
-        "running": "#f59e0b",
-        "done": "#22c55e",
-        "error": "#ef4444",
-    }
     # How long a result shows on its keys before they draw as usual.
     _MACRO_FLASH_SECONDS = {"done": 0.8, "error": 1.2}
 
@@ -2984,7 +2956,7 @@ class StreamDeckPlugin:
 
     def _apply_macro_mark(self, image, mark):
         """Border (+ loader glyph while running) showing a macro's run state."""
-        color = self._MACRO_MARK_COLORS.get(mark)
+        color = MARK_COLORS.get(mark)
         if color is None:
             return image
         try:

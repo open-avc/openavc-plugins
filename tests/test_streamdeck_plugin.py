@@ -46,6 +46,7 @@ from control_surfaces.streamdeck.conditions import (  # noqa: E402
     eval_operator,
 )
 from control_surfaces.streamdeck.virtual_deck import VIRTUAL_MODELS  # noqa: E402
+from control_surfaces.streamdeck.looks import hex_to_rgb, lighten_hex  # noqa: E402
 from control_surfaces.streamdeck.key_entries import press_actions  # noqa: E402
 from control_surfaces.streamdeck.pages import key_target_page  # noqa: E402
 from control_surfaces.streamdeck.screens import info_items  # noqa: E402
@@ -1609,12 +1610,12 @@ class _FakeNeoDeck(_FakeDeck):
 
 
 def test_hex_color_parsing():
-    assert StreamDeckPlugin._hex_to_rgb("#ff0000") == (255, 0, 0)
-    assert StreamDeckPlugin._hex_to_rgb("00ff00") == (0, 255, 0)
-    assert StreamDeckPlugin._hex_to_rgb("#0f0") == (0, 255, 0)
-    assert StreamDeckPlugin._hex_to_rgb("junk") == (0, 0, 0)
-    assert StreamDeckPlugin._hex_to_rgb(None) == (0, 0, 0)
-    assert StreamDeckPlugin._lighten_hex("#000000", 0.25) == "#3f3f3f"
+    assert hex_to_rgb("#ff0000") == (255, 0, 0)
+    assert hex_to_rgb("00ff00") == (0, 255, 0)
+    assert hex_to_rgb("#0f0") == (0, 255, 0)
+    assert hex_to_rgb("junk") == (0, 0, 0)
+    assert hex_to_rgb(None) == (0, 0, 0)
+    assert lighten_hex("#000000", 0.25) == "#3f3f3f"
 
 
 @pytest.mark.asyncio

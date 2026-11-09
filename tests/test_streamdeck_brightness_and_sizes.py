@@ -38,6 +38,7 @@ from control_surfaces.streamdeck.deck_profile import (  # noqa: E402
     panel_size,
     strip_format,
 )
+from control_surfaces.streamdeck.looks import hex_to_rgb, lighten_hex, touch_key_color  # noqa: E402
 from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
 
 try:
@@ -494,8 +495,7 @@ def test_a_deck_has_an_info_screen_when_its_screen_reports_a_width():
     ("junk", None, True, False, "#333333"),
 ])
 def test_a_touch_keys_color_with_its_marks(bg, mark, nav, held, expect):
-    plugin, _state, _logs = _plugin()
-    assert plugin._touch_key_color(bg, mark, nav, held) == expect
+    assert touch_key_color(bg, mark, nav, held) == expect
 
 
 @pytest.mark.parametrize("color, rgb", [
@@ -504,7 +504,7 @@ def test_a_touch_keys_color_with_its_marks(bg, mark, nav, held, expect):
     ("##123456", (18, 52, 86)),
 ])
 def test_a_hex_color_reads_as_rgb_or_black(color, rgb):
-    assert StreamDeckPlugin._hex_to_rgb(color) == rgb
+    assert hex_to_rgb(color) == rgb
 
 
 @pytest.mark.parametrize("color, amount, expect", [
@@ -512,4 +512,4 @@ def test_a_hex_color_reads_as_rgb_or_black(color, rgb):
     ("#808080", 0.5, "#bfbfbf"), ("xyz", 0.2, "#333333"), ("bad", 0.2, "#c8bbe3"),
 ])
 def test_lightening_blends_toward_white(color, amount, expect):
-    assert StreamDeckPlugin._lighten_hex(color, amount) == expect
+    assert lighten_hex(color, amount) == expect
