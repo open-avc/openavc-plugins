@@ -7,8 +7,9 @@ Button presses execute macros; button images update based on system state.
 Supported models: Neo, Mini, MK.2/Original V2, XL, Plus, Pedal, and over the
 network the Network Dock and the Stream Deck Studio (net_deck.py).
 
-Beside this module: conditions.py (the rule visible_when, auto_page and
-auto_brightness are judged by), config_check.py (what validate_config
+Beside this module: brightness.py (the level a deck shows, from its rules or
+its unit's base, and when idle dim lowers it), conditions.py (the rule
+visible_when, auto_page and auto_brightness are judged by), config_check.py (what validate_config
 reports), declared_decks.py (the virtual and network decks the config
 declares, and the writes to a network deck's entry), dials.py (what a dial
 gesture runs, and the touch strip's zones), key_entries.py (which config entry
@@ -36,7 +37,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from .conditions import coerce_numeric, eval_condition, reads_as_on
+from .brightness import base_level, clamp_level, idle_dim_setting, rule_levels
+from .conditions import eval_condition, reads_as_on
 from .config_check import config_problems
 from .context_actions import action_for, deck_action_args, simulated_inputs
 from .declared_decks import (
@@ -2295,38 +2297,14 @@ class StreamDeckPlugin:
     # ──── Brightness (auto rules + idle dim) ────
 
     async def _current_brightness_level(self, session):
-        """Return the active brightness: the first matching ``auto_brightness``
-        rule's level, else the base ``brightness`` config value. Clamped 0-100."""
+        """The level a deck shows now (brightness.py): its first
+        ``auto_brightness`` rule whose ``when`` holds, else its unit's own
+        base level."""
         rules = self._deck_config(session).get("auto_brightness", [])
-        if isinstance(rules, list):
-            for rule in rules:
-                if not isinstance(rule, dict):
-                    continue
-                when = rule.get("when")
-                level = coerce_numeric(rule.get("level"))
-                if when is None or level is None:
-                    continue
-                if await self._eval_condition(when):
-                    return max(0, min(100, int(level)))
-        base = coerce_numeric(self._unit_brightness(session))
-        return max(0, min(100, int(base if base is not None else 70)))
-
-    def _unit_brightness(self, session):
-        """Base brightness for one deck.
-
-        A unit property, not a layout property: ``deck_settings[serial]``
-        wins, then the flat plugin-wide ``brightness``, then 70. Never read
-        from a ``decks[serial]`` layout override — a deck shouldn't need its
-        own layout just to sit at a different brightness.
-        """
-        settings = self.api.config.get("deck_settings")
-        if isinstance(settings, dict):
-            entry = settings.get(session.serial)
-            if isinstance(entry, dict):
-                level = coerce_numeric(entry.get("brightness"))
-                if level is not None:
-                    return level
-        return self.api.config.get("brightness", 70)
+        for when, level in rule_levels(rules):
+            if await self._eval_condition(when):
+                return clamp_level(level)
+        return base_level(self.api.config, session.serial)
 
     def _set_deck_brightness(self, session, level):
         """Apply a brightness level to a deck (best-effort)."""
@@ -2344,22 +2322,21 @@ class StreamDeckPlugin:
         self._set_deck_brightness(session, await self._current_brightness_level(session))
 
     async def _check_idle_dim(self, session):
-        """Dim a deck when no input has arrived for ``idle_dim.after_seconds``.
+        """Dim a deck once no input has arrived for its ``idle_dim`` delay
+        (brightness.idle_dim_setting), to its idle level.
 
         Runs on the watchdog tick. Any key/dial/touch input wakes the deck via
         ``_note_input``.
         """
-        cfg = self._deck_config(session).get("idle_dim")
-        if not isinstance(cfg, dict) or session.idle_dimmed:
+        if session.idle_dimmed:
             return
-        after = coerce_numeric(cfg.get("after_seconds"))
-        level = coerce_numeric(cfg.get("level"))
-        if after is None or after <= 0 or level is None:
+        setting = idle_dim_setting(self._deck_config(session).get("idle_dim"))
+        if setting is None:
             return
-        now = asyncio.get_event_loop().time()
-        if now - session.last_input >= after:
+        after, level = setting
+        if asyncio.get_event_loop().time() - session.last_input >= after:
             session.idle_dimmed = True
-            self._set_deck_brightness(session, max(0, min(100, int(level))))
+            self._set_deck_brightness(session, clamp_level(level))
 
     async def _note_input(self, session):
         """Record user input: resets the idle timer and wakes a dimmed deck."""
