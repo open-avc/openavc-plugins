@@ -18,6 +18,7 @@ Run from the openavc-plugins root: pytest tests/test_dante_pins.py -v
 """
 
 import copy
+import json
 import sys
 import types
 from pathlib import Path
@@ -827,6 +828,23 @@ async def test_one_subscription_refuses_unknown_devices_and_reads_ok():
     assert api.calls == [_mutation("dev-002", [_sub(2, "MIC-01", "01")], False)]
 
 
+async def test_a_subscription_request_body_keeps_its_field_order():
+    plugin, api = _plugin(answers=[_OK])
+    await plugin._set_subscription("dev-002", 2, "MIC-01", "01")
+    await plugin._set_subscriptions_batch("dev-003", [_sub(1, "", "")])
+    plugin._devices = _devices()
+    plugin._domain_id = "d1"
+    await plugin._clear_all_subscriptions()
+    bodies = [json.dumps(c[2]) for c in api.calls if c[0] == "post"]
+    assert bodies == [json.dumps(c[2]) for c in [
+        _mutation("dev-002", [_sub(2, "MIC-01", "01")], False),
+        _mutation("dev-003", [_sub(1, "", "")], True),
+        _mutation("dev-002", [_sub(1, "", ""), _sub(3, "", "")], True),
+    ]]
+    assert list(api.calls[0][2]["variables"]["input"]["subscriptions"][0]) == [
+        "rxChannelIndex", "subscribedDevice", "subscribedChannel"]
+
+
 @pytest.mark.parametrize("answer", [_NOT_OK, {"data": {}}, {"data": {"DeviceRxChannelsSubscriptionSet": {}}},
                                     {"errors": [{"message": "no"}]}])
 async def test_one_subscription_not_confirmed_is_false(answer):
@@ -1290,11 +1308,22 @@ async def test_an_unroute_request_by_matrix_row_or_by_name(payload, expected, lo
     ("MIC-01.1", "rx", (None, None)),
     ("amp_01.a.2", "rx", (None, None)),
     ("mic_01. 2 ", "rx", ("MIC-01", 2)),
+    ("amp_01_a.0", "rx", ("AMP 01.a", 0)),
 ])
 async def test_a_matrix_reference_names_a_device_and_a_channel(ref, direction, expected):
     plugin, api = _plugin()
     plugin._devices = _devices()
     assert plugin._resolve_matrix_ref(ref, direction) == expected
+
+
+async def test_a_reference_with_no_dot_names_nothing_and_reads_no_device():
+    plugin, api = _plugin()
+    plugin._devices = {
+        "a": {"id": "a", "name": "", "txChannels": [{"index": 5, "name": "L"}]},
+        "b": {"id": "b", "name": None},
+    }
+    assert plugin._resolve_matrix_ref("5", "rx") == (None, None)
+    assert plugin._resolve_matrix_ref("5", "tx") == (None, None)
 
 
 async def test_two_devices_with_the_same_key_resolve_to_the_first_even_without_the_channel():
