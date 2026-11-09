@@ -25,9 +25,17 @@ Two rules worth knowing before changing this:
 from dataclasses import dataclass
 
 from .conditions import condition_state_keys
-from .config_check import unwrap_binding
-from .key_entries import entries_on_page, global_buttons, objects, page_buttons, press_actions
+from .key_entries import (
+    entries_on_page,
+    global_buttons,
+    objects,
+    page_buttons,
+    press_actions,
+    unwrap_binding,
+)
 
+# The live sources every display element reads: keys, strip zones and info
+# items alike. A field only keys read goes into ``button_keys``, not here.
 _SOURCE_FIELDS = ("label_source", "value_source")
 
 

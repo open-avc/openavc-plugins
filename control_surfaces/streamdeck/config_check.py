@@ -23,6 +23,7 @@ import json
 
 from .conditions import KNOWN_OPERATORS, coerce_numeric
 from .declared_decks import endpoint_key, network_endpoint, virtual_serial
+from .key_entries import unwrap_binding
 from .virtual_deck import VIRTUAL_MODELS
 
 _KNOWN_ACTIONS = ("macro", "device.command", "state.set", "navigate")
@@ -39,20 +40,6 @@ _SOURCE_FIELDS = ("label_source", "value_source", "key")
 # state (its id is "streamdeck"), the rule _apply_state_set enforces when it
 # runs.
 _WRITABLE_PREFIXES = ("var.", "plugin.streamdeck.")
-
-
-def unwrap_binding(value):
-    """The first action of a key's press, release or hold binding.
-
-    The Stream Deck view stores each as a list so a key can run several
-    actions in turn; the first carries the key's mode and its settings. A
-    single action object is read as itself; anything else is None.
-    """
-    if isinstance(value, list) and len(value) > 0:
-        return value[0] if isinstance(value[0], dict) else None
-    if isinstance(value, dict):
-        return value
-    return None
 
 
 # ──── Shared pieces ────

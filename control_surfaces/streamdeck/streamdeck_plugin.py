@@ -27,9 +27,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .conditions import coerce_numeric, eval_condition, reads_as_on
-from .config_check import config_problems, unwrap_binding
+from .config_check import config_problems
 from .declared_decks import network_deck_entries, virtual_deck_entries
-from .key_entries import action_list, assignment_for, global_buttons, press_actions
+from .key_entries import (
+    action_list,
+    assignment_for,
+    global_buttons,
+    press_actions,
+    unwrap_binding,
+)
 from .deck_classes import net_deck_class
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck

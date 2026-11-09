@@ -940,6 +940,19 @@ async def test_the_value_line_unit_rules_and_an_unset_source():
 
 
 @pytest.mark.asyncio
+async def test_bindings_that_are_not_an_object_draw_the_entry_as_it_is():
+    config = {"buttons": [{"index": 0, "label": "Plain", "icon": "mic",
+                           "bg_color": "#123456", "value_source": "var.v",
+                           "unit": "%", "bindings": ["not", "an", "object"]}]}
+    plugin, state, session, calls = _render_rig(config)
+    state.set("var.v", 7, source="test")
+    await plugin._render_button(session, 0)
+    image, _ = _drawn(calls)
+    assert image == {"label": "Plain", "bg": "#123456", "fg": "#e0e0e0", "icon": "mic",
+                     "value": "7%", "meter": None}
+
+
+@pytest.mark.asyncio
 async def test_an_unset_value_source_draws_no_value_line():
     config = {"buttons": [{"index": 0, "value_source": "var.unset", "unit": "dB",
                            "meter": {}}]}

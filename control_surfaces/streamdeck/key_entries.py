@@ -28,6 +28,23 @@ def action_list(value):
     return objects(value)
 
 
+def unwrap_binding(value):
+    """The first action of a key's press, release or hold binding: the one
+    that carries the key's mode and its settings. A single action object is
+    read as itself; a list whose first entry is not an object reads as None.
+
+    Not the same reading as ``press_actions(...)[0]``, which skips entries
+    that are not objects: a press that starts with one runs its first object
+    as the key's mode, but that action's toggle key is neither watched nor
+    drawn as a toggle label.
+    """
+    if isinstance(value, list) and len(value) > 0:
+        return value[0] if isinstance(value[0], dict) else None
+    if isinstance(value, dict):
+        return value
+    return None
+
+
 def press_actions(bindings):
     """A key's ``press`` binding as a list of actions. The first one carries
     the key's mode and its toggle and hold settings; a tap key fires them all
