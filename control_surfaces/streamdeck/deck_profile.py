@@ -16,14 +16,17 @@ a deck. A new geometry field is one entry in ``deck_geometry`` and, when the
 status card needs it before a deck attaches, one in UNCONNECTED_GEOMETRY.
 
 The identity is read before the geometry, and a deck that fails mid-read
-raises out of the open: the plugin tells a network deck's link the serial it
-saw between the two reads, so a deck whose layout cannot be read has still
-been recorded on its link.
+raises out of the open: a network deck's link is told the serial it reported
+between the two reads (``tell_link_serial``), so a deck whose layout cannot
+be read has still been recorded on its link.
 """
 
 from dataclasses import dataclass
 
 from .virtual_deck import VirtualDeck
+
+# The serial of a deck that reports none.
+UNKNOWN_SERIAL = "unknown"
 
 # The geometry keys a status card reads, as published before any deck.
 UNCONNECTED_GEOMETRY = (
@@ -49,11 +52,6 @@ class DeckIdentity:
     address: str
     transport: str
 
-    @property
-    def serial_known(self):
-        """False when the deck reported no serial."""
-        return self.serial != "unknown"
-
 
 def deck_identity(deck):
     """What an open deck reports about itself: its transport (``virtual``,
@@ -72,7 +70,7 @@ def deck_identity(deck):
         device_id = f"deck-{id(deck)}"
     return DeckIdentity(
         device_id=device_id,
-        serial=deck.get_serial_number() or "unknown",
+        serial=deck.get_serial_number() or UNKNOWN_SERIAL,
         model=deck.deck_type(),
         is_virtual=is_virtual,
         is_network=is_network,
@@ -81,12 +79,16 @@ def deck_identity(deck):
     )
 
 
-def network_link(deck, identity):
-    """The link a network deck came up on, or None for any other deck or
-    one that has no link."""
-    if not identity.is_network:
-        return None
-    return getattr(getattr(deck, "device", None), "link", None)
+def tell_link_serial(deck, identity):
+    """Record the serial a network deck reported on the link it came up on;
+    the watchdog persists it to the deck's config entry so discovery can
+    follow the deck if its address changes later (DHCP renumbering). Nothing
+    for any other deck, a deck with no link, or one that reported no serial."""
+    if not identity.is_network or identity.serial == UNKNOWN_SERIAL:
+        return
+    link = getattr(getattr(deck, "device", None), "link", None)
+    if link is not None:
+        link.observed_serial = identity.serial
 
 
 def deck_geometry(deck, identity):

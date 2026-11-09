@@ -54,10 +54,11 @@ from .deck_answers import answer_address, answer_serial, scan_listing
 from .deck_classes import net_deck_class
 from .deck_profile import (
     UNCONNECTED_GEOMETRY,
+    UNKNOWN_SERIAL,
     connected_line,
     deck_geometry,
     deck_identity,
-    network_link,
+    tell_link_serial,
 )
 from .dials import (
     declared_zones,
@@ -153,7 +154,7 @@ class _DeckSession:
     def __init__(self, deck):
         self.deck = deck
         self.device_id = None      # HID path — stable while attached
-        self.serial = "unknown"
+        self.serial = UNKNOWN_SERIAL
         self.model = ""
         self.geometry = {}         # key_count/rows/columns/dials/touch/screens
         self.transport = ""        # virtual / network / usb, once opened
@@ -874,12 +875,7 @@ class StreamDeckPlugin:
 
         session = _DeckSession(deck)
         identity = deck_identity(deck)
-        link = network_link(deck, identity)
-        if link is not None and identity.serial_known:
-            # Recorded on the link; the watchdog persists it to the config
-            # entry so discovery can follow the deck if its address changes
-            # later (DHCP renumbering).
-            link.observed_serial = identity.serial
+        tell_link_serial(deck, identity)
         session.take_profile(identity, deck_geometry(deck, identity))
 
         self._sessions[session.device_id] = session

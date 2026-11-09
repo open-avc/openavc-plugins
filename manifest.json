@@ -52,7 +52,7 @@
         "control_surfaces/streamdeck/context_actions.py": "b75c22c4abfdeb763d61ebd3f3e59f8cfe1d30beef01fbd7af15b683e8004e38",
         "control_surfaces/streamdeck/deck_answers.py": "3a23c6e98a7ca02c92a1076f00de2df329669e11d1b7765e60ad639920730b4c",
         "control_surfaces/streamdeck/deck_classes.py": "95da51584067966b21b5a2309ea09af31ec5854b17c6708141cbcfa761e59558",
-        "control_surfaces/streamdeck/deck_profile.py": "4d529172b6031178cc676542807d63d6638d90a1d2e91af14e89344f01d3ccc9",
+        "control_surfaces/streamdeck/deck_profile.py": "ef2cf2594e980df25192eb81a6abe002f2f0dbb294a7438cd58cc8dbf227bfd6",
         "control_surfaces/streamdeck/declared_decks.py": "ec08023700e3176dba8b77cdaf1ce77bda04de6b130c04faa25a99e060d388d0",
         "control_surfaces/streamdeck/dials.py": "e8300403a6b5533769be896c0dab269d16b9aa03ee10041808052af04961f783",
         "control_surfaces/streamdeck/fonts/DejaVuSans.ttf": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
@@ -63,7 +63,7 @@
         "control_surfaces/streamdeck/looks.py": "20689dfea5d9c0cd05e5c469ab6601cc0d84ac7a89331ffce66ce9cf3ee8c1f0",
         "control_surfaces/streamdeck/net_deck.py": "bc8b366f9a2edf9ac7659af96c7085fa38610c796378fe00e6ea8c5774698a38",
         "control_surfaces/streamdeck/plugin.json": "569135b47bfaa3f3f60ee448960d157cf261ae37f8207bcd864a3ff5447d26ae",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "ea1bc8566cf376c9a2228775c92e07ad4710f1759e8d4217b421951cb2f92422",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "52d09138aff1c8f26c69631ac3d7adbce0b2800cd411984700ed980a3e5a86ae",
         "control_surfaces/streamdeck/virtual_deck.py": "61e9cd9663a73eb1c7068ea0d7d8ce67718f0fa696f24617358db6bbb4a39aef",
         "control_surfaces/streamdeck/watch_keys.py": "3351a6e6f9dce2fc4d9c0c9e9526ea2cc2821343fd5bd1e50e0a32e71553ff75"
       }
