@@ -1332,3 +1332,43 @@ async def test_a_start_that_fails_after_registering_still_stops_the_sidecar(monk
     assert entries[-1] == ("supervisor_stop",)
     assert ("register_router", {"panel_paths": _PANEL_PATHS}) in entries
     assert plugin._supervisor is None and plugin._encoder_deadline is None
+
+
+# ──── The login-replaced warning on every door that writes a record ────
+
+
+@pytest.mark.asyncio
+async def test_a_load_whose_address_login_replaces_the_fields_says_so_before_registering():
+    plugin, entries = _plugin()
+    plugin.api._config = {"streams": [
+        _stream("cam", rtsp_url="rtsp://new:pw@h/x", username="old", password="old"),
+    ]}
+    await plugin._load_streams()
+    moved = _stream("cam", rtsp_url="rtsp://h/x", username="new", password="pw")
+    assert entries == [
+        _REPLACED,
+        _add("cam", "rtsp://new:pw@h/x"),
+        ("save", [moved]),
+    ]
+
+
+def test_an_add_whose_address_login_replaces_the_typed_one_says_so_before_saving():
+    plugin, entries = _plugin()
+    r = _client(plugin).post("/streams", json={
+        "name": "Cam", "rtsp_url": "rtsp://v:pw@h", "username": "u", "codec_hint": "h264",
+    })
+    assert r.status_code == 200
+    assert entries[:2] == [
+        _REPLACED,
+        ("save", [_stream("cam", name="Cam", rtsp_url="rtsp://h", username="v", password="pw")]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_configured_stream_with_no_name_is_listed_by_its_id():
+    plugin, entries = _plugin([_stream("a", name=""), {"stream_id": "b"}])
+    await plugin._publish_stream_list()
+    assert _listing_write(entries) == [[
+        {"value": "a", "label": "a", "mode": "webrtc"},
+        {"value": "b", "label": "b", "mode": "webrtc"},
+    ]]
