@@ -1199,3 +1199,58 @@ async def test_poll_stamps_a_join_with_the_wall_clock_second(monkeypatch):
     await plugin._poll()
     assert plugin._presence == {"al": 1_700_000_123}
     assert json.loads(plugin.api.state["presenters"])[0]["since"] == 1_700_000_123
+
+
+@pytest.mark.asyncio
+async def test_poll_announces_joins_before_leaves():
+    log = _Log()
+    plugin = _plugin()
+    plugin.api = _RecordingApi(log, plugin.api._config)
+    plugin._presence = {"bob": 1, "cy": 2}
+    plugin._labels = {"bob": "Bob B"}
+
+    async def scan():
+        return {"al", "zed", "cy"}
+
+    plugin._scan_presenters = scan
+    await plugin._poll()
+    events = [e[1:] for e in log if e[0] == "event"]
+    assert events == [
+        ("presenter_joined", {"name": "al", "label": "al"}),
+        ("presenter_joined", {"name": "zed", "label": "zed"}),
+        ("presenter_left", {"name": "bob", "label": "Bob B"}),
+    ]
+    assert plugin._labels == {}
+
+
+def test_render_config_warns_when_the_join_host_does_not_resolve(monkeypatch):
+    log = _Log()
+    plugin = _plugin(config={"join_address": "no-such-host.invalid"})
+    plugin.api = _RecordingApi(log, plugin.api._config)
+
+    def fail(*args, **kwargs):
+        raise socket.gaierror("name resolution failed")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    plugin._render_config()
+    assert plugin.api.logged == [(
+        "warning",
+        "join_address 'no-such-host.invalid' does not resolve from this machine; "
+        "advertising the detected LAN address 192.0.2.10 to WebRTC clients instead",
+    )]
+
+
+def test_output_conflict_names_a_display_without_a_label_by_its_id(monkeypatch):
+    client, _plugin_, _log = _recording_plugin(
+        displays=[{**_LOCAL, "label": ""}], monkeypatch=monkeypatch
+    )
+    r = client.post("/displays", json={"label": "X", "local_output": "MON-1"})
+    assert (r.status_code, r.json()["detail"]) == (409, "That output is already showing display 'lobby'.")
+
+
+@pytest.mark.asyncio
+async def test_kiosk_sync_takes_browser_displays_only():
+    plugin = _plugin(displays=[{**_STREAM, "local_output": "MON-2"}, _LOCAL])
+    plugin._kiosk = _FakeKiosk()
+    await plugin._sync_kiosks()
+    assert list(plugin._kiosk.synced[-1]) == ["lobby"]
