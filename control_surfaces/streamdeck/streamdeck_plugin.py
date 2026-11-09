@@ -10,9 +10,11 @@ network the Network Dock and the Stream Deck Studio (net_deck.py).
 Beside this module: conditions.py (the rule visible_when, auto_page and
 auto_brightness are judged by), config_check.py (what validate_config
 reports), declared_decks.py (the virtual and network decks the config
-declares), key_entries.py (which config entry a key runs, and the actions a
-binding holds), virtual_deck.py (a deck that exists only in software) and
-watch_keys.py (which state keys a deck reads, and what each one redraws).
+declares, and the writes to a network deck's entry), dials.py (what a dial
+gesture runs, and the touch strip's zones), key_entries.py (which config entry
+a key runs, and the actions a binding holds), virtual_deck.py (a deck that
+exists only in software) and watch_keys.py (which state keys a deck reads, and
+what each one redraws).
 """
 
 import asyncio
