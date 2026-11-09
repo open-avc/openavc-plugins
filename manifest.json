@@ -87,9 +87,9 @@
         "integrations/video_panel/plugin.json": "3460b61a236bf49bed8862014b4ef793737bd139b56fe7c8ec33bb3c03697044",
         "integrations/video_panel/preview_sources.py": "a750823f25d11c7944d0ca1fd7b6e37f573eb073ae8941135498e37fb4304231",
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
-        "integrations/video_panel/stream_records.py": "c68c75f8e676ac4a559fc4002a43eb652ac41c65da06aa9c583cda620ceb2b9a",
+        "integrations/video_panel/stream_records.py": "4bb5308af97f62a653cc1ec261cc1a07ad99d3ec842ffd762955d1050460db49",
         "integrations/video_panel/transcode.py": "93aa973202b67a2131321e96f328f39701a27b10b3b006088a8ed9f2ac7ca6be",
-        "integrations/video_panel/video_panel_plugin.py": "894bc049e1ea997dfb34e37dca9e29f7355cca3802c12760e29c054346690419"
+        "integrations/video_panel/video_panel_plugin.py": "385c689b37c2da3dd25d3c1f2b5266bd67f04a14680fba8ed6f85e73c95467c0"
       }
     }
   }

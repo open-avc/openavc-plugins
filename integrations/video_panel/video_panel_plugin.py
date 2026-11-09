@@ -32,13 +32,14 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-# Sibling module. The plugin loader execs this file with the plugin directory on
-# sys.path (so the flat import resolves) but not as a package, so a relative
-# import would fail there. Test/CI code imports the plugin by its package path
-# (integrations.video_panel.video_panel_plugin), where the flat name isn't on
-# the path but the relative import is. Try both so the plugin loads either way.
-# A lazy import inside a method would fail under the loader (the path entry is
-# removed after load), so this stays at module top level.
+# Sibling modules. OpenAVC (from 0.37.0, this plugin's floor) imports a plugin
+# as its own package, plugin_<folder>, without putting its folder on sys.path,
+# so the relative import is the one that runs there, as it does in the tests,
+# which import the plugin by its package path
+# (integrations.video_panel.video_panel_plugin). The flat import is for a
+# loader that execs this file with the plugin directory on sys.path instead.
+# Either way it stays at module top level: such a loader removes the path entry
+# after load, so a lazy import inside a method would fail under it.
 try:
     from sidecar import NO_WINDOW, SidecarSupervisor
 except ImportError:  # pragma: no cover - exercised only via package-path import
@@ -264,37 +265,10 @@ _BROWSER_VIDEO_CODECS = ("H264",)
 _VIDEO_CODECS = ("H264", "H265", "VP8", "VP9", "AV1", "M-JPEG", "MPEG-4 Video")
 
 
-class StreamIn(BaseModel):
-    """Add/edit payload for a video stream. The IDE Video Streams form posts this."""
-
-    name: str
-    stream_id: str | None = None
-    rtsp_url: str
-    username: str = ""
-    password: str = ""
-    codec_hint: str = "auto"      # auto | h264 | h265
-    transcode: str = "auto"       # auto | always | never
-    hardware_accel: str = "auto"  # auto | none | qsv | nvenc | vaapi | v4l2m2m
-
-
 class ReportIn(BaseModel):
     """A tile's account of why it has no picture, posted when playback fails."""
 
     reason: str
-    stream_id: str = ""
-
-
-class ProbeIn(BaseModel):
-    """Probe payload — tests an RTSP URL before it is saved as a stream.
-
-    ``password`` is the saved-login marker to test with a stream's saved
-    one: the stream named by ``stream_id``, or, from a Programmer that does
-    not send one, the stream with the same address and username
-    (``stream_records.password_for_test``)."""
-
-    rtsp_url: str
-    username: str = ""
-    password: str = ""
     stream_id: str = ""
 
 
@@ -514,9 +488,9 @@ class VideoPanelPlugin:
         self._hls_client = None
         self._streams = []  # configured stream dicts (the source of truth)
         self._encoder_cache = {}  # hardware_accel value -> resolved ffmpeg encoder
-        # Auto-discovered preview sources, keyed by derived stream id:
-        #   {stream_id: {"label", "url", "format", "device", "group", "status"}}
-        # Everything in here is playable. An OFFLINE source stays in it on
+        # Auto-discovered preview sources, keyed by derived stream id, as
+        # preview_sources.scan returns them (its _playable writes each one;
+        # this plugin reads "url" and "format"). Everything in here is playable. An OFFLINE source stays in it on
         # purpose -- a camera that is switched off is still the camera a page
         # is being built against, and hiding it is how one silently vanishes.
         self._discovered = {}
@@ -524,9 +498,8 @@ class VideoPanelPlugin:
         # or `unavailable`. Listed in the picker with what is missing, never
         # offered to the panel, and deliberately NOT in _discovered -- that map
         # is what the play routes check, and a source with no URL must not
-        # reach them.
-        #   {stream_id: {"label", "device", "group", "status", "detail",
-        #                "setup_field"}}
+        # reach them. Written by preview_sources.scan, read only by its
+        # picker_rows.
         self._unusable = {}
         # Discovered previews we've registered a MediaMTX path for, sid->url.
         self._discovered_sidecar = {}
@@ -1250,11 +1223,11 @@ class VideoPanelPlugin:
             return await self._list_streams()
 
         @router.post("/streams")
-        async def add_stream(data: StreamIn):
+        async def add_stream(data: stream_records.StreamIn):
             return await self._add_stream(data)
 
         @router.put("/streams/{stream_id}")
-        async def edit_stream(stream_id: str, data: StreamIn):
+        async def edit_stream(stream_id: str, data: stream_records.StreamIn):
             return await self._edit_stream(stream_id, data)
 
         @router.delete("/streams/{stream_id}")
@@ -1262,7 +1235,7 @@ class VideoPanelPlugin:
             return await self._delete_stream(stream_id)
 
         @router.post("/streams/probe")
-        async def probe_stream(body: ProbeIn):
+        async def probe_stream(body: stream_records.ProbeIn):
             return await self._probe_stream(body)
 
         @router.get("/streams/{stream_id}/snapshot.jpg")

@@ -11,7 +11,9 @@ into the address moves into the fields on every door that writes a record
 (the load at start, an add, an edit), and is put back into the address only
 when the source is dialled. The password itself never leaves the plugin: the
 Programmer is shown :data:`SAVED_LOGIN` in its place and sends that string
-back to mean "keep the saved one", on a save and on a Test.
+back to mean "keep the saved one", on a save and on a Test. The two forms that
+carry a stream's fields in, :class:`StreamIn` (an add or edit) and
+:class:`ProbeIn` (a Test), are defined here beside the rules that read them.
 
 The add and edit routes refuse with the HTTP status and the sentence the
 plugin page shows (the statuses are part of the rule, hence HTTPException
@@ -23,6 +25,7 @@ import re
 from urllib.parse import quote, unquote
 
 from fastapi import HTTPException
+from pydantic import BaseModel
 
 # What a stream's password reads as anywhere outside this plugin: the stream
 # list the Programmer draws, and what it sends back for "keep the saved one".
@@ -39,9 +42,36 @@ except ImportError:  # OpenAVC before the login file
 # keep them to a portable, URL-safe character set.
 ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
-# The three playback settings. Each reads as "auto" when the form leaves it
-# empty.
+# The three playback settings, StreamIn's last three fields. Each reads as
+# "auto" when the form leaves it empty.
 SETTINGS = ("codec_hint", "transcode", "hardware_accel")
+
+
+class StreamIn(BaseModel):
+    """Add/edit payload for a video stream. The IDE Video Streams form posts this."""
+
+    name: str
+    stream_id: str | None = None
+    rtsp_url: str
+    username: str = ""
+    password: str = ""
+    codec_hint: str = "auto"      # auto | h264 | h265
+    transcode: str = "auto"       # auto | always | never
+    hardware_accel: str = "auto"  # auto | none | qsv | nvenc | vaapi | v4l2m2m
+
+
+class ProbeIn(BaseModel):
+    """Probe payload — tests an RTSP URL before it is saved as a stream.
+
+    ``password`` is :data:`SAVED_LOGIN` to test with a stream's saved one:
+    the stream named by ``stream_id``, or, from a Programmer that does not
+    send one, the stream with the same address and username
+    (:func:`password_for_test`)."""
+
+    rtsp_url: str
+    username: str = ""
+    password: str = ""
+    stream_id: str = ""
 
 
 def _trimmed(value):
