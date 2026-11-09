@@ -15,6 +15,7 @@ gesture runs, and the touch strip's zones), key_entries.py (which config entry
 a key runs, and the actions a binding holds), looks.py (what a key, a strip
 zone or an info item shows: the value line, the meter, the feedback style),
 context_actions.py (what a context action or a simulated input asks for),
+deck_answers.py (what a network deck's discovery answer says),
 virtual_deck.py (a deck that exists only in software) and watch_keys.py (which
 state keys a deck reads, and what each one redraws).
 """
@@ -48,6 +49,7 @@ from .key_entries import (
     press_actions,
     unwrap_binding,
 )
+from .deck_answers import answer_address, answer_serial, scan_listing
 from .deck_classes import net_deck_class
 from .dials import (
     declared_zones,
@@ -124,11 +126,6 @@ def _patch_hidapi_search():
         return original_load(self, deps_paths)
 
     LibUSBHIDAPI.Library._load_hidapi_library = _extended_load
-
-
-def _advertised_sn(result):
-    """The serial a discovery result advertises, as text ("" for none)."""
-    return str((result.get("txt") or {}).get("sn", ""))
 
 
 class _DeckSession:
@@ -1157,11 +1154,10 @@ class StreamDeckPlugin:
         except Exception as e:
             self.api.log(f"Network deck discovery failed: {e}", level="warning")
             return
-        found = next((r for r in results if _advertised_sn(r) in serials), None)
+        found = next((r for r in results if answer_serial(r) in serials), None)
         if found is None:
             return
-        new_host = found.get("ip")
-        new_port = found.get("port") or NET_DEFAULT_PORT
+        new_host, new_port = answer_address(found)
         if not new_host or f"{new_host}:{new_port}" == key:
             return
 
@@ -1175,7 +1171,7 @@ class StreamDeckPlugin:
         updated, changed = edit_network_decks(self.api.config.get("network_decks"), move)
         if changed:
             self.api.log(
-                f"Network deck {_advertised_sn(found)} answered at "
+                f"Network deck {answer_serial(found)} answered at "
                 f"{new_host}:{new_port} (was {key}); following it"
             )
             await self._save_network_decks(updated)
@@ -1187,7 +1183,8 @@ class StreamDeckPlugin:
         await self.api.save_config(config)
 
     def _build_ext_router(self):
-        """FastAPI router serving the live-mirror images.
+        """FastAPI router for the IDE: the live-mirror images, and the Add
+        network deck dialog's scan and connection test.
 
         ``GET /api/plugins/streamdeck/ext/live/{serial}/{item}`` returns the
         most recent rendered image for a key (``key_<n>``), the touchscreen
@@ -1212,76 +1209,57 @@ class StreamDeckPlugin:
 
         @router.post("/network/scan")
         async def network_scan():
-            """Find network decks on the LAN. Returns browse_available=False
-            where multicast discovery can't run (older cores, Docker bridge
-            networks) — the manual add-by-address path always works."""
-            entries = self._network_deck_entries()
-            configured_keys = {e["key"] for e in entries}
-            configured_hosts = {e["host"] for e in entries}
-            browse = getattr(self.api, "mdns_browse", None)
-            if not callable(browse):
-                return {"browse_available": False, "found": []}
-            try:
-                results = await browse([NET_MDNS_SERVICE], duration=4.0)
-            except Exception as e:
-                self.api.log(f"Network deck scan failed: {e}", level="warning")
-                return {"browse_available": False, "found": []}
-            found = []
-            for r in results:
-                service = str(r.get("service_type") or "")
-                if not service.startswith("_elg."):
-                    continue
-                host = r.get("ip") or ""
-                if not host:
-                    continue
-                port = r.get("port") or NET_DEFAULT_PORT
-                txt = r.get("txt") or {}
-                found.append({
-                    "host": host,
-                    "port": port,
-                    "name": r.get("instance_name") or r.get("hostname") or host,
-                    "serial": str(txt.get("sn", "")),
-                    "kind": (
-                        "Network Dock"
-                        if str(txt.get("dt", "")) == "215"
-                        else "Stream Deck"
-                    ),
-                    "already_added": (
-                        f"{host}:{port}" in configured_keys
-                        or host in configured_hosts
-                    ),
-                })
-            return {"browse_available": True, "found": found}
+            return await self._scan_network()
 
         @router.post("/network/test")
         async def network_test(payload: dict):
-            """Try a TCP connection to host:port (the manual-add Test button)."""
-            host = str(payload.get("host", "")).strip()
-            try:
-                port = int(payload.get("port", NET_DEFAULT_PORT))
-            except (TypeError, ValueError):
-                return {"success": False, "error": "invalid port"}
-            if not host or not (0 < port < 65536):
-                return {"success": False, "error": "enter a host or IP address"}
-            try:
-                ip = self.api.local_address(host)
-            except ConnectionError as e:
-                # The adapter chosen in Reach devices through has no address;
-                # the sentence names it and says where to change it.
-                return {"success": False, "error": str(e)}
-            try:
-                _reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(
-                        host, port, local_addr=(ip, 0) if ip else None
-                    ),
-                    timeout=3.0,
-                )
-            except Exception as e:
-                return {"success": False, "error": classify_net_error(e)}
-            writer.close()
-            return {"success": True}
+            return await self._test_network_address(payload)
 
         return router
+
+    async def _scan_network(self):
+        """Find network decks on the LAN (deck_answers.scan_listing).
+        ``browse_available`` is False where multicast discovery can't run
+        (older cores, Docker bridge networks); the manual add-by-address
+        path always works."""
+        entries = self._network_deck_entries()
+        browse = getattr(self.api, "mdns_browse", None)
+        if not callable(browse):
+            return {"browse_available": False, "found": []}
+        try:
+            results = await browse([NET_MDNS_SERVICE], duration=4.0)
+        except Exception as e:
+            self.api.log(f"Network deck scan failed: {e}", level="warning")
+            return {"browse_available": False, "found": []}
+        return {"browse_available": True, "found": scan_listing(results, entries)}
+
+    async def _test_network_address(self, payload):
+        """Try a TCP connection to host:port (the manual-add Test button),
+        from the adapter Reach devices through names."""
+        host = str(payload.get("host", "")).strip()
+        try:
+            port = int(payload.get("port", NET_DEFAULT_PORT))
+        except (TypeError, ValueError):
+            return {"success": False, "error": "invalid port"}
+        if not host or not (0 < port < 65536):
+            return {"success": False, "error": "enter a host or IP address"}
+        try:
+            ip = self.api.local_address(host)
+        except ConnectionError as e:
+            # The adapter chosen in Reach devices through has no address;
+            # the sentence names it and says where to change it.
+            return {"success": False, "error": str(e)}
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    host, port, local_addr=(ip, 0) if ip else None
+                ),
+                timeout=3.0,
+            )
+        except Exception as e:
+            return {"success": False, "error": classify_net_error(e)}
+        writer.close()
+        return {"success": True}
 
     def _mirror_enabled(self, session):
         """Virtual decks always mirror; physical decks only while a Live View
