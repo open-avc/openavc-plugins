@@ -1015,3 +1015,81 @@ async def test_deck_names_that_are_not_a_map_name_no_deck():
     del session.address
     await plugin._publish_deck_state()
     assert ("A.name", "") in writes and ("A.address", "") in writes
+
+
+# ──── A press's alternate action ────
+
+
+def _press_rig(monkeypatch, is_on=False):
+    plugin, _state, _logs = _plugin()
+    session = _session(plugin)
+    ran = []
+
+    async def execute(s, action, source):
+        ran.append((action, source))
+
+    async def toggle_is_on(press):
+        return is_on
+
+    async def render(s, index):
+        ran.append(("render", index))
+    plugin._execute_action = execute
+    plugin._toggle_is_on = toggle_is_on
+    plugin._render_button = render
+    monkeypatch.setattr(sd_module.asyncio, "sleep", _noop_sleep)
+    return plugin, session, ran
+
+
+_OFF = {"action": "macro", "macro": "off"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_on, off_action, runs_off", [
+    (True, _OFF, True),
+    (False, _OFF, False),
+    (True, {}, False),
+    (True, None, False),
+    (True, "macro", False),
+    (True, ["macro"], False),
+])
+async def test_a_toggle_runs_its_off_action_only_as_an_object_while_on(
+    monkeypatch, is_on, off_action, runs_off
+):
+    plugin, session, ran = _press_rig(monkeypatch, is_on)
+    press = {"action": "macro", "macro": "on", "mode": "toggle"}
+    if off_action is not None:
+        press["off_action"] = off_action
+    await plugin._press_toggle(session, 2, True, [press])
+    assert ran == [(_OFF if runs_off else press, "key 2")]
+
+
+@pytest.mark.asyncio
+async def test_a_toggle_release_runs_nothing(monkeypatch):
+    plugin, session, ran = _press_rig(monkeypatch, True)
+    await plugin._press_toggle(session, 2, False, [{"off_action": _OFF}])
+    assert ran == []
+
+
+_HOLD = {"action": "macro", "macro": "held"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held_for, hold_action, runs_hold", [
+    (1.0, _HOLD, True),
+    (0.1, _HOLD, False),
+    (1.0, {}, False),
+    (1.0, None, False),
+    (1.0, "macro", False),
+])
+async def test_a_tap_hold_runs_its_hold_action_only_as_an_object_held_long(
+    monkeypatch, held_for, hold_action, runs_hold
+):
+    plugin, session, ran = _press_rig(monkeypatch)
+    press = {"action": "macro", "macro": "tap", "hold_threshold_ms": 500}
+    if hold_action is not None:
+        press["hold_action"] = hold_action
+    loop = asyncio.get_event_loop()
+    session.press_times[3] = loop.time() - held_for
+    await plugin._press_tap_hold(session, 3, False, [press])
+    assert ran == [(_HOLD if runs_hold else press, "key 3")]
+    assert 3 not in session.press_times
