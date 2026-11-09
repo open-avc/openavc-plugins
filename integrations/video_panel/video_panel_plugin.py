@@ -2,15 +2,21 @@
 
 Shows H.264 / H.265 video streams (IP cameras and any other RTSP/RTMP/SRT
 source) on the touch panel. The plugin bundles MediaMTX as a sidecar that pulls
-each source's feed and republishes it as browser-playable WebRTC (WHEP). The
-sidecar binds to localhost only; the panel reaches it through OpenAVC's own HTTP
-server, so stream traffic inherits the platform's authentication.
+each source's feed and republishes it as browser-playable WebRTC (WHEP), or as
+HLS for a viewer who arrived over the cloud tunnel. The sidecar binds to
+localhost only; the panel reaches it through OpenAVC's own HTTP server, so
+stream traffic inherits the platform's authentication.
 
-This module owns the sidecar lifecycle and the plugin's state. Stream
-management UI and WHEP playback are layered on in later parts of the plugin.
+This module brings the sidecar up and keeps it serving every stream's paths,
+answers the plugin page's and the panel's routes, and holds the plugin's
+state. What a configured stream record holds, and its login, is
+stream_records.py; the sources devices offer for preview, and the stream
+picker's rows, are preview_sources.py; the sidecar process itself is
+sidecar.py, and ffmpeg's encoder choice and command line are transcode.py.
 """
 
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -225,6 +231,18 @@ _REMOTE_BLOCKED_DETAIL = (
 # WHEP session secrets are MediaMTX-minted UUIDs; constrain to a URL-safe set
 # before they're spliced into the proxied sidecar URL.
 _SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
+
+
+def _path_available(item):
+    """Whether MediaMTX reports a path as serving. `ready` is deprecated in
+    MediaMTX 1.18.x in favour of `available`; prefer the new field, fall back
+    for older builds."""
+    return bool(item.get("available", item.get("ready", False)))
+
+
+def _live_by_name(items):
+    """path name -> whether it is serving, from a paths/list reply's items."""
+    return {item["name"]: _path_available(item) for item in items if item.get("name")}
 
 
 def _no_such_stream(stream_id):
@@ -540,24 +558,8 @@ class VideoPanelPlugin:
     async def start(self, api):
         self.api = api
 
-        self._mediamtx_bin = self._resolve_dep(self._binary_name("mediamtx"))
-        if self._mediamtx_bin is None:
-            msg = (
-                "MediaMTX binary not found in plugin_repo/.deps/. Native "
-                "dependencies install when the plugin is installed from the "
-                "community repository; reinstall the Video Panel plugin."
-            )
-            await self.api.state_set("running", False)
-            await self.api.state_set("error", msg)
-            raise PluginRefusal(msg)
-
-        # ffmpeg is bundled for HEVC transcode/snapshots used by later parts of
-        # the plugin; resolve it now so the path is ready, but it's not invoked
-        # by the passthrough path.
-        self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
-        self._ensure_executable(self._mediamtx_bin)
-        if self._ffmpeg_bin is not None:
-            self._ensure_executable(self._ffmpeg_bin)
+        if not self._find_binaries():
+            raise await self._refusal_no_mediamtx()
 
         self._auth_pass = self._load_or_create_auth()
         self._config_path = self.api.data_dir / "mediamtx.yml"
@@ -569,14 +571,7 @@ class VideoPanelPlugin:
 
         busy = await self._port_already_in_use()
         if busy:
-            msg = (
-                f"Port {busy} on this machine is already in use, so the video "
-                "server cannot start. Another copy of it is most likely still "
-                "running. Stop it, then start the Video Panel plugin again."
-            )
-            await self.api.state_set("error", msg)
-            await self.api.state_set("sidecar", "failed")
-            raise PluginRefusal(msg)
+            raise await self._refusal_port_taken(busy)
 
         self._supervisor = SidecarSupervisor(
             [str(self._mediamtx_bin), str(self._config_path)],
@@ -589,44 +584,12 @@ class VideoPanelPlugin:
 
         self._encoder_deadline = time.monotonic() + _ENCODER_BUDGET
         try:
-            await self._supervisor.start()
-            if not await self._wait_until_ready():
-                raise RuntimeError(
-                    f"MediaMTX did not respond on {_API_HOST}:{_API_PORT} "
-                    f"within {int(_READY_TIMEOUT)}s"
-                )
-            await self.api.state_set("running", True)
-            # media_paths arrived in platform 0.31.0. Asked for by signature
-            # rather than by version, and rather than by catching the TypeError
-            # an older platform would raise -- the router is built before this
-            # and a TypeError out of THAT would look identical.
-            #
-            # Feature-detected instead of gated because the plugin has to stay
-            # installable: an older platform simply rate-limits remote video,
-            # which is the state it was already in, and a panel in the room
-            # never touches these routes at all.
-            import inspect
-
-            router = self._build_router()
-            kwargs = {"panel_paths": list(_PANEL_PATHS)}
-            if "media_paths" in inspect.signature(self.api.register_router).parameters:
-                kwargs["media_paths"] = list(_MEDIA_PATHS)
-            self.api.register_router(router, **kwargs)
-            await self._load_streams()
-            await self._publish_streams()
-            await self._setup_discovery()
-            self.api.create_periodic_task(
-                self._poll_statuses, interval_seconds=_STATUS_POLL_SECONDS, name="status_poll"
-            )
-            self.api.log(
-                f"Video Panel started: MediaMTX {_MEDIAMTX_VERSION} on "
-                f"{_API_HOST}:{_API_PORT}, {len(self._streams)} stream(s)"
-            )
+            await self._bring_up()
         except BaseException:
             # Don't leave an orphaned sidecar if start() fails partway --
             # BaseException, not Exception, because the likeliest way out of
             # here is a cancellation: the platform caps start() and everything
-            # above this line waits on something external. A CancelledError
+            # in the bring-up waits on something external. A CancelledError
             # walked straight past an `except Exception` and left MediaMTX
             # running on all five ports, with nothing supervising it and the
             # next start crash-looping against it.
@@ -634,6 +597,88 @@ class VideoPanelPlugin:
             raise
         finally:
             self._encoder_deadline = None
+
+    def _find_binaries(self):
+        """Find MediaMTX and FFmpeg in plugin_repo/.deps/ and make both
+        executable; False, looking no further, when MediaMTX is missing.
+
+        FFmpeg may be missing: it is bundled for HEVC transcoding, the Test
+        probe and snapshots, and the passthrough path never invokes it.
+        """
+        self._mediamtx_bin = self._resolve_dep(self._binary_name("mediamtx"))
+        if self._mediamtx_bin is None:
+            return False
+        self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
+        self._ensure_executable(self._mediamtx_bin)
+        if self._ffmpeg_bin is not None:
+            self._ensure_executable(self._ffmpeg_bin)
+        return True
+
+    async def _refusal_no_mediamtx(self):
+        """Mark the plugin not running for a missing MediaMTX; the refusal
+        start() raises."""
+        msg = (
+            "MediaMTX binary not found in plugin_repo/.deps/. Native "
+            "dependencies install when the plugin is installed from the "
+            "community repository; reinstall the Video Panel plugin."
+        )
+        await self.api.state_set("running", False)
+        await self.api.state_set("error", msg)
+        return PluginRefusal(msg)
+
+    async def _refusal_port_taken(self, port):
+        """Mark the sidecar failed for a port another process holds; the
+        refusal start() raises. (`running` is already false: start() wrote it
+        before it looked.)"""
+        msg = (
+            f"Port {port} on this machine is already in use, so the video "
+            "server cannot start. Another copy of it is most likely still "
+            "running. Stop it, then start the Video Panel plugin again."
+        )
+        await self.api.state_set("error", msg)
+        await self.api.state_set("sidecar", "failed")
+        return PluginRefusal(msg)
+
+    async def _bring_up(self):
+        """Everything after the sidecar is created, in order. start() stops
+        the sidecar if any of it fails or is cancelled."""
+        await self._supervisor.start()
+        if not await self._wait_until_ready():
+            raise RuntimeError(
+                f"MediaMTX did not respond on {_API_HOST}:{_API_PORT} "
+                f"within {int(_READY_TIMEOUT)}s"
+            )
+        await self.api.state_set("running", True)
+        self.api.register_router(self._build_router(), **self._router_options())
+        await self._load_streams()
+        await self._publish_streams()
+        await self._setup_discovery()
+        self.api.create_periodic_task(
+            self._poll_statuses, interval_seconds=_STATUS_POLL_SECONDS, name="status_poll"
+        )
+        self.api.log(
+            f"Video Panel started: MediaMTX {_MEDIAMTX_VERSION} on "
+            f"{_API_HOST}:{_API_PORT}, {len(self._streams)} stream(s)"
+        )
+
+    def _router_options(self):
+        """The routes a room panel may reach, and, where the platform takes
+        it, the routes that carry a stream.
+
+        media_paths arrived in platform 0.31.0. Asked for by signature
+        rather than by version, and rather than by catching the TypeError
+        an older platform would raise -- the router is built before this
+        and a TypeError out of THAT would look identical.
+
+        Feature-detected instead of gated because the plugin has to stay
+        installable: an older platform simply rate-limits remote video,
+        which is the state it was already in, and a panel in the room
+        never touches these routes at all.
+        """
+        options = {"panel_paths": list(_PANEL_PATHS)}
+        if "media_paths" in inspect.signature(self.api.register_router).parameters:
+            options["media_paths"] = list(_MEDIA_PATHS)
+        return options
 
     async def _stop_sidecar_now(self):
         """Stop the sidecar even while this task is being cancelled.
@@ -964,14 +1009,7 @@ class VideoPanelPlugin:
 
     async def _live_status_map(self):
         data = await self._api_get("/v3/paths/list")
-        live = {}
-        if data:
-            for item in data.get("items", []):
-                name = item.get("name")
-                if name:
-                    # `ready` is deprecated in 1.18.x in favour of `available`.
-                    live[name] = bool(item.get("available", item.get("ready", False)))
-        return live
+        return _live_by_name(data.get("items", [])) if data else {}
 
     async def _publish_streams(self):
         await self._publish_stream_list()
@@ -997,14 +1035,8 @@ class VideoPanelPlugin:
             await self.api.state_set("running", False)
             return
         await self.api.state_set("running", True)
-        live = {}
         items = data.get("items", []) or []
-        for item in items:
-            name = item.get("name")
-            if name:
-                # `ready` is deprecated in MediaMTX 1.18.x in favour of
-                # `available`; prefer the new field, fall back for older builds.
-                live[name] = bool(item.get("available", item.get("ready", False)))
+        live = _live_by_name(items)
         for s in self._streams:
             stream_id = s["stream_id"]
             await self.api.state_set(
@@ -1080,7 +1112,7 @@ class VideoPanelPlugin:
             sid = item.get("name")
             if not sid or sid not in self._discovered_sidecar:
                 continue
-            available = bool(item.get("available", item.get("ready", False)))
+            available = _path_available(item)
             readers = len(item.get("readers") or [])
             if available or not readers:
                 self._warned_unreachable.discard(sid)
