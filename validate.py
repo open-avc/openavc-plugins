@@ -445,51 +445,72 @@ def _unknown(values, allowed):
 
 
 def validate_config_schema(config_schema, result):
-    """Validate a CONFIG_SCHEMA dict."""
+    """Validate a CONFIG_SCHEMA dict, a group's fields included."""
     if not isinstance(config_schema, dict):
         result.error("CONFIG_SCHEMA must be a dict")
         return
-
     for field_id, field_def in config_schema.items():
-        if not isinstance(field_def, dict):
-            result.error(f"CONFIG_SCHEMA field '{field_id}' must be a dict")
-            continue
+        _check_schema_field(field_id, field_def, result)
 
-        # A login. Only a real True marks one; "true" or 1 would read as
-        # marked here and be treated as an ordinary setting by OpenAVC.
-        if "secret" in field_def and not isinstance(field_def["secret"], bool):
-            result.error(f"CONFIG_SCHEMA field '{field_id}' has 'secret' that is not true or false")
 
-        if "type" not in field_def:
-            result.error(f"CONFIG_SCHEMA field '{field_id}' missing 'type'")
-            continue
+def _check_schema_field(field_id, field_def, result):
+    """One settings field: a dict, its secret flag, its type, then what its
+    type needs."""
+    if not isinstance(field_def, dict):
+        result.error(f"CONFIG_SCHEMA field '{field_id}' must be a dict")
+        return
+    # A login. Only a real True marks one; "true" or 1 would read as
+    # marked here and be treated as an ordinary setting by OpenAVC.
+    if "secret" in field_def and not isinstance(field_def["secret"], bool):
+        result.error(f"CONFIG_SCHEMA field '{field_id}' has 'secret' that is not true or false")
+    if "type" not in field_def:
+        result.error(f"CONFIG_SCHEMA field '{field_id}' missing 'type'")
+        return
+    field_type = field_def["type"]
+    if field_type not in VALID_CONFIG_TYPES:
+        result.error(f"CONFIG_SCHEMA field '{field_id}' has invalid type '{field_type}': must be one of {sorted(VALID_CONFIG_TYPES)}")
+    type_check = _TYPE_CHECKS.get(field_type)
+    if type_check is not None:
+        type_check(field_id, field_def, result)
 
-        field_type = field_def["type"]
-        if field_type not in VALID_CONFIG_TYPES:
-            result.error(f"CONFIG_SCHEMA field '{field_id}' has invalid type '{field_type}': must be one of {sorted(VALID_CONFIG_TYPES)}")
 
-        if field_type == "select" and "options" not in field_def:
-            result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'select' but missing 'options' list")
+def _check_select(field_id, field_def, result):
+    if "options" not in field_def:
+        result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'select' but missing 'options' list")
 
-        if field_type == "group":
-            if "fields" not in field_def:
-                result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'group' but missing 'fields' dict")
-            elif isinstance(field_def["fields"], dict):
-                # Recursively validate group fields
-                validate_config_schema(field_def["fields"], result)
 
-        if field_type == "mapping_list" and "item_schema" not in field_def:
-            result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'mapping_list' but missing 'item_schema'")
-        elif field_type == "mapping_list" and isinstance(field_def.get("item_schema"), dict):
-            # A mapping_list row has no id, so OpenAVC has nothing to keep a
-            # row's login under. A list of logins is declared in CONFIG_SECRETS.
-            for column_id, column in field_def["item_schema"].items():
-                if isinstance(column, dict) and "secret" in column:
-                    result.error(
-                        f"CONFIG_SCHEMA field '{field_id}' column '{column_id}' has 'secret': "
-                        "a mapping_list row has no id to keep a login under. Keep the list "
-                        "outside CONFIG_SCHEMA and declare it in CONFIG_SECRETS."
-                    )
+def _check_group(field_id, field_def, result):
+    if "fields" not in field_def:
+        result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'group' but missing 'fields' dict")
+    elif isinstance(field_def["fields"], dict):
+        validate_config_schema(field_def["fields"], result)
+
+
+def _check_mapping_list(field_id, field_def, result):
+    """A mapping_list needs its item_schema, and no column of it may be a
+    login: a mapping_list row has no id, so OpenAVC has nothing to keep a
+    row's login under. A list of logins is declared in CONFIG_SECRETS."""
+    if "item_schema" not in field_def:
+        result.error(f"CONFIG_SCHEMA field '{field_id}' is type 'mapping_list' but missing 'item_schema'")
+        return
+    item_schema = field_def["item_schema"]
+    if not isinstance(item_schema, dict):
+        return
+    for column_id, column in item_schema.items():
+        if isinstance(column, dict) and "secret" in column:
+            result.error(
+                f"CONFIG_SCHEMA field '{field_id}' column '{column_id}' has 'secret': "
+                "a mapping_list row has no id to keep a login under. Keep the list "
+                "outside CONFIG_SCHEMA and declare it in CONFIG_SECRETS."
+            )
+
+
+# What a settings field of each of these types needs besides its type.
+_TYPE_CHECKS = {
+    "select": _check_select,
+    "group": _check_group,
+    "mapping_list": _check_mapping_list,
+}
 
 
 _CONFIG_SECRETS_KEYS = {"id", "fields", "generated"}
@@ -503,37 +524,53 @@ def validate_config_secrets(config_secrets, config_schema, result):
         return
     schema_keys = set(config_schema) if isinstance(config_schema, dict) else set()
     for list_key, entry in config_secrets.items():
-        where = f"CONFIG_SECRETS['{list_key}']"
-        if not isinstance(list_key, str) or not list_key:
-            result.error(f"CONFIG_SECRETS has a key that is not a non-empty string: {list_key!r}")
-            continue
-        if list_key in schema_keys:
-            result.error(
-                f"{where}: '{list_key}' is also a CONFIG_SCHEMA field. Mark a schema field "
-                "with 'secret': True instead."
-            )
-        if not isinstance(entry, dict):
-            result.error(f"{where} must be a dict with 'id' and 'fields'")
-            continue
-        unknown = sorted(set(entry) - _CONFIG_SECRETS_KEYS)
-        if unknown:
-            result.error(f"{where} has unknown key(s) {unknown}: only 'id', 'fields' and 'generated'")
-        id_key = entry.get("id")
-        if not isinstance(id_key, str) or not id_key:
-            result.error(f"{where} needs 'id': the key in each item that holds its unique id")
-        fields = entry.get("fields")
-        if not isinstance(fields, list) or not fields:
-            result.error(f"{where} needs 'fields': a list of the keys in each item that hold a login")
-        else:
-            names = [f for f in fields if isinstance(f, str) and f]
-            if len(names) != len(fields):
-                result.error(f"{where}['fields'] must hold non-empty strings only")
-            if len(set(names)) != len(names):
-                result.error(f"{where}['fields'] names a key twice")
-            if isinstance(id_key, str) and id_key in names:
-                result.error(f"{where}: the id key '{id_key}' cannot also be a login")
-        if "generated" in entry and not isinstance(entry["generated"], bool):
-            result.error(f"{where}['generated'] must be true or false")
+        _check_secret_list(list_key, entry, schema_keys, result)
+
+
+def _check_secret_list(list_key, entry, schema_keys, result):
+    """One declared list: its config key, then its entry's keys, id, fields
+    and generated flag."""
+    where = f"CONFIG_SECRETS['{list_key}']"
+    if not isinstance(list_key, str) or not list_key:
+        result.error(f"CONFIG_SECRETS has a key that is not a non-empty string: {list_key!r}")
+        return
+    if list_key in schema_keys:
+        result.error(
+            f"{where}: '{list_key}' is also a CONFIG_SCHEMA field. Mark a schema field "
+            "with 'secret': True instead."
+        )
+    if not isinstance(entry, dict):
+        result.error(f"{where} must be a dict with 'id' and 'fields'")
+        return
+    unknown = sorted(set(entry) - _CONFIG_SECRETS_KEYS)
+    if unknown:
+        result.error(f"{where} has unknown key(s) {unknown}: only 'id', 'fields' and 'generated'")
+    id_key = entry.get("id")
+    if not _is_name(id_key):
+        result.error(f"{where} needs 'id': the key in each item that holds its unique id")
+    _check_secret_fields(entry.get("fields"), id_key, where, result)
+    if "generated" in entry and not isinstance(entry["generated"], bool):
+        result.error(f"{where}['generated'] must be true or false")
+
+
+def _check_secret_fields(fields, id_key, where, result):
+    """A list's 'fields': a non-empty list of distinct non-empty names, none of
+    them the id key."""
+    if not isinstance(fields, list) or not fields:
+        result.error(f"{where} needs 'fields': a list of the keys in each item that hold a login")
+        return
+    names = [f for f in fields if _is_name(f)]
+    if len(names) != len(fields):
+        result.error(f"{where}['fields'] must hold non-empty strings only")
+    if len(set(names)) != len(names):
+        result.error(f"{where}['fields'] names a key twice")
+    if isinstance(id_key, str) and id_key in names:
+        result.error(f"{where}: the id key '{id_key}' cannot also be a login")
+
+
+def _is_name(value):
+    """A non-empty string."""
+    return isinstance(value, str) and bool(value)
 
 
 def validate_extensions_schema(extensions, result):
@@ -547,35 +584,33 @@ def validate_extensions_schema(extensions, result):
     if not isinstance(extensions, dict):
         result.error("EXTENSIONS must be a dict")
         return
-
     for ext_type, ext_list in extensions.items():
-        if ext_type not in VALID_EXTENSION_TYPES:
-            result.error(
-                f"EXTENSIONS has unknown type '{ext_type}': must be one of "
-                f"{sorted(VALID_EXTENSION_TYPES)}"
-            )
-            continue
-        if not isinstance(ext_list, list):
-            result.error(f"EXTENSIONS['{ext_type}'] must be a list")
-            continue
+        _check_extension_list(ext_type, ext_list, result)
 
-        id_field = EXTENSION_ID_FIELD[ext_type]
-        seen = set()
-        for i, ext in enumerate(ext_list):
-            if not isinstance(ext, dict):
-                result.error(f"EXTENSIONS['{ext_type}'][{i}] must be a dict")
-                continue
-            ext_id = ext.get(id_field)
-            if not ext_id or not isinstance(ext_id, str):
-                result.error(
-                    f"EXTENSIONS['{ext_type}'][{i}] missing '{id_field}' (string)"
-                )
-                continue
-            if ext_id in seen:
-                result.error(
-                    f"EXTENSIONS['{ext_type}'] has duplicate {id_field} '{ext_id}'"
-                )
-            seen.add(ext_id)
+
+def _check_extension_list(ext_type, ext_list, result):
+    if ext_type not in VALID_EXTENSION_TYPES:
+        result.error(
+            f"EXTENSIONS has unknown type '{ext_type}': must be one of "
+            f"{sorted(VALID_EXTENSION_TYPES)}"
+        )
+        return
+    if not isinstance(ext_list, list):
+        result.error(f"EXTENSIONS['{ext_type}'] must be a list")
+        return
+    id_field = EXTENSION_ID_FIELD[ext_type]
+    seen = set()
+    for i, ext in enumerate(ext_list):
+        if not isinstance(ext, dict):
+            result.error(f"EXTENSIONS['{ext_type}'][{i}] must be a dict")
+            continue
+        ext_id = ext.get(id_field)
+        if not _is_name(ext_id):
+            result.error(f"EXTENSIONS['{ext_type}'][{i}] missing '{id_field}' (string)")
+            continue
+        if ext_id in seen:
+            result.error(f"EXTENSIONS['{ext_type}'] has duplicate {id_field} '{ext_id}'")
+        seen.add(ext_id)
 
 
 def validate_config_hook(source, file_name, result):
@@ -594,118 +629,152 @@ def validate_config_hook(source, file_name, result):
 
 
 def validate_plugin_dir(plugin_path, result):
-    """Validate a plugin directory."""
+    """Validate a plugin directory, reported in this order: its *_plugin.py
+    (PLUGIN_INFO, what its text shows, its declarations), its plugin.json
+    against PLUGIN_INFO, its README, and its category against its folder.
+    Without a module it can read, the one problem is all it reports."""
+    main_file = _main_module(plugin_path, result)
+    if main_file is None:
+        return
+    content = _read_module(main_file, result)
+    if content is None:
+        return
+    source = PluginSource(content)
+    plugin_info = _check_plugin_info(source, main_file.name, plugin_path, result)
+    _check_habits(content, main_file.name, result)
+    _check_declarations(source, main_file.name, result)
+    _check_plugin_json(plugin_path, plugin_info, result)
+    _check_readme(plugin_path, result)
+    _check_category_folder(plugin_path, plugin_info, result)
 
-    # Check for main plugin file
+
+def _main_module(plugin_path, result):
+    """The *_plugin.py the loader would find, or None; the first of several,
+    with a warning."""
     plugin_files = list(plugin_path.glob("*_plugin.py"))
     if not plugin_files:
         result.error("No *_plugin.py file found (plugin loader looks for this pattern)")
-        return
-
+        return None
     if len(plugin_files) > 1:
         result.warn(f"Multiple *_plugin.py files found: {[f.name for f in plugin_files]}")
+    return plugin_files[0]
 
-    main_file = plugin_files[0]
 
-    # Read and parse the plugin file
+def _read_module(main_file, result):
     try:
-        content = main_file.read_text(encoding="utf-8")
+        return main_file.read_text(encoding="utf-8")
     except Exception as e:
         result.error(f"Cannot read {main_file.name}: {e}")
-        return
+        return None
 
-    # Check for PLUGIN_INFO
-    if "PLUGIN_INFO" not in content:
-        result.error(f"{main_file.name}: missing PLUGIN_INFO class attribute")
 
-    # Try to extract and validate PLUGIN_INFO
-    source = PluginSource(content)
+def _check_plugin_info(source, file_name, plugin_path, result):
+    """PLUGIN_INFO: there, readable, valid, and named for its folder. Returns
+    what could be read of it (None when nothing could; an empty dict is not
+    validated)."""
+    if "PLUGIN_INFO" not in source.content:
+        result.error(f"{file_name}: missing PLUGIN_INFO class attribute")
     plugin_info, unresolved = source.plugin_info()
     if plugin_info is None:
-        result.warn(f"{main_file.name}: could not read PLUGIN_INFO statically -- "
+        result.warn(f"{file_name}: could not read PLUGIN_INFO statically -- "
                     "it is not being validated. Declare it as a dict literal.")
     if unresolved:
-        result.warn(f"{main_file.name}: PLUGIN_INFO values built at runtime are not "
+        result.warn(f"{file_name}: PLUGIN_INFO values built at runtime are not "
                     f"validated: {sorted(unresolved)}")
     if plugin_info:
         validate_plugin_info(plugin_info, result, unresolved=unresolved)
+        _check_folder_name(plugin_info, plugin_path, result)
+    return plugin_info
 
-        # Check ID matches directory name
-        plugin_id = plugin_info.get("id", "")
-        dir_name = plugin_path.name
-        if plugin_id and plugin_id != dir_name:
-            result.warn(f"Plugin ID '{plugin_id}' doesn't match directory name '{dir_name}'")
 
-    # Check for start/stop methods
-    if "async def start(" not in content and "def start(" not in content:
-        result.error(f"{main_file.name}: missing start() method")
-    if "async def stop(" not in content and "def stop(" not in content:
-        result.error(f"{main_file.name}: missing stop() method")
+def _check_folder_name(plugin_info, plugin_path, result):
+    plugin_id = plugin_info.get("id", "")
+    if plugin_id and plugin_id != plugin_path.name:
+        result.warn(f"Plugin ID '{plugin_id}' doesn't match directory name '{plugin_path.name}'")
 
-    # Check for common mistakes
+
+def _check_habits(content, file_name, result):
+    """What the module's text shows, found as text anywhere in it (a comment
+    counts): a start and a stop method (``async def start(`` contains
+    ``def start(``), and the two calls that misbehave in a plugin."""
+    for method in ("start", "stop"):
+        if f"def {method}(" not in content:
+            result.error(f"{file_name}: missing {method}() method")
     if "asyncio.create_task(" in content:
-        result.warn(f"{main_file.name}: uses asyncio.create_task() instead of api.create_task() -- tasks won't be auto-cancelled on stop")
-
+        result.warn(f"{file_name}: uses asyncio.create_task() instead of api.create_task() -- tasks won't be auto-cancelled on stop")
     if "time.sleep(" in content:
-        result.error(f"{main_file.name}: uses time.sleep() which blocks the event loop. Use asyncio.sleep() instead.")
+        result.error(f"{file_name}: uses time.sleep() which blocks the event loop. Use asyncio.sleep() instead.")
 
-    # Check for CONFIG_SCHEMA. Followed through `CONFIG_SCHEMA = CONFIG_SCHEMA`
-    # to a module-level dict, which a class-body literal read alone skipped.
-    config_schema = None
-    if "CONFIG_SCHEMA" in content:
-        config_schema = source.literal("CONFIG_SCHEMA")
-        if config_schema is not None:
-            validate_config_schema(config_schema, result)
 
-    # Check for CONFIG_SECRETS (the config lists whose items hold a login).
-    if "CONFIG_SECRETS" in content:
-        config_secrets = source.literal("CONFIG_SECRETS")
-        if config_secrets is None:
-            result.warn(f"{main_file.name}: could not read CONFIG_SECRETS statically -- "
-                        "it is not being validated. Declare it as a dict literal.")
-        else:
-            validate_config_secrets(config_secrets, config_schema, result)
-
-    # Check for EXTENSIONS (UI extensions). Best-effort: only literal dicts can
-    # be checked; ones built at runtime are skipped.
-    if "EXTENSIONS" in content:
+def _check_declarations(source, file_name, result):
+    """CONFIG_SCHEMA, CONFIG_SECRETS, EXTENSIONS and validate_config, each
+    read only when its name appears in the text. Only a literal can be checked;
+    CONFIG_SECRETS alone says when it could not be read."""
+    config_schema = _checked_config_schema(source, result)
+    if "CONFIG_SECRETS" in source.content:
+        _check_config_secrets(source, config_schema, file_name, result)
+    if "EXTENSIONS" in source.content:
         extensions = source.class_literal("EXTENSIONS")
         if extensions is not None:
             validate_extensions_schema(extensions, result)
+    if "validate_config" in source.content:
+        validate_config_hook(source, file_name, result)
 
-    if "validate_config" in content:
-        validate_config_hook(source, main_file.name, result)
 
-    # Check for plugin.json
+def _checked_config_schema(source, result):
+    """CONFIG_SCHEMA, validated, or None when it is absent or not a literal."""
+    if "CONFIG_SCHEMA" not in source.content:
+        return None
+    config_schema = source.literal("CONFIG_SCHEMA")
+    if config_schema is not None:
+        validate_config_schema(config_schema, result)
+    return config_schema
+
+
+def _check_config_secrets(source, config_schema, file_name, result):
+    config_secrets = source.literal("CONFIG_SECRETS")
+    if config_secrets is None:
+        result.warn(f"{file_name}: could not read CONFIG_SECRETS statically -- "
+                    "it is not being validated. Declare it as a dict literal.")
+    else:
+        validate_config_secrets(config_secrets, config_schema, result)
+
+
+def _check_plugin_json(plugin_path, plugin_info, result):
+    """plugin.json: there, JSON, valid as a manifest, and agreeing with what
+    could be read of PLUGIN_INFO."""
     plugin_json_path = plugin_path / "plugin.json"
     if not plugin_json_path.exists():
         result.error("Missing plugin.json manifest file")
-    else:
-        try:
-            with open(plugin_json_path, encoding="utf-8") as f:
-                manifest = json.load(f)
-            validate_plugin_info(manifest, result, source="plugin.json")
+        return
+    try:
+        with open(plugin_json_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except json.JSONDecodeError as e:
+        result.error(f"plugin.json is invalid JSON: {e}")
+        return
+    validate_plugin_info(manifest, result, source="plugin.json")
+    if plugin_info:
+        for field in _disagreements(plugin_info, manifest):
+            result.error(
+                f"Mismatch: PLUGIN_INFO.{field}='{plugin_info[field]}' "
+                f"vs plugin.json.{field}='{manifest[field]}'"
+            )
 
-            if plugin_info:
-                for field in _disagreements(plugin_info, manifest):
-                    result.error(
-                        f"Mismatch: PLUGIN_INFO.{field}='{plugin_info[field]}' "
-                        f"vs plugin.json.{field}='{manifest[field]}'"
-                    )
-        except json.JSONDecodeError as e:
-            result.error(f"plugin.json is invalid JSON: {e}")
 
-    # Check for README.md
-    readme_path = plugin_path / "README.md"
-    if not readme_path.exists():
+def _check_readme(plugin_path, result):
+    if not (plugin_path / "README.md").exists():
         result.warn("Missing README.md (recommended for community plugins)")
 
-    # Check category matches directory
-    if plugin_info and "category" in plugin_info:
-        parent_dir = plugin_path.parent.name
-        expected = CATEGORY_DIRS.get(parent_dir)
-        if expected and plugin_info["category"] != expected:
-            result.warn(f"Category '{plugin_info['category']}' doesn't match directory '{parent_dir}/' (expected '{expected}')")
+
+def _check_category_folder(plugin_path, plugin_info, result):
+    """A plugin in a category folder declares that folder's category."""
+    if not plugin_info or "category" not in plugin_info:
+        return
+    parent_dir = plugin_path.parent.name
+    expected = CATEGORY_DIRS.get(parent_dir)
+    if expected and plugin_info["category"] != expected:
+        result.warn(f"Category '{plugin_info['category']}' doesn't match directory '{parent_dir}/' (expected '{expected}')")
 
 
 def validate_index_json(repo_root, results):
@@ -864,63 +933,70 @@ def _named_dirs(repo_root, targets):
 
 
 def main():
+    args = _parse_args()
+    repo_root = Path(__file__).parent
+    results = [_validated(plugin_path)
+               for plugin_path in find_plugin_dirs(repo_root, args.plugins if args.plugins else None)]
+    if args.check_index:
+        validate_index_json(repo_root, results)
+    for result in results:
+        _print_result(result, _relative(result.plugin_path, repo_root), args.verbose)
+    total_errors = _print_summary(results)
+    sys.exit(1 if total_errors > 0 else 0)
+
+
+def _parse_args():
     parser = argparse.ArgumentParser(description="Validate OpenAVC plugin packages")
     parser.add_argument("plugins", nargs="*", help="Specific plugin directories to validate (default: all)")
     parser.add_argument("--check-index", action="store_true", help="Also validate index.json consistency")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show passing checks")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    repo_root = Path(__file__).parent
 
-    plugin_dirs = find_plugin_dirs(repo_root, args.plugins if args.plugins else None)
-    results = []
+def _validated(plugin_path):
+    result = ValidationResult(plugin_path)
+    validate_plugin_dir(plugin_path, result)
+    return result
 
-    for plugin_path in plugin_dirs:
-        result = ValidationResult(plugin_path)
-        validate_plugin_dir(plugin_path, result)
-        results.append(result)
 
-    if args.check_index:
-        validate_index_json(repo_root, results)
+def _relative(path, repo_root):
+    """`path` from the repository root, or as it is when it lies outside."""
+    try:
+        return path.relative_to(repo_root)
+    except ValueError:
+        return path
 
-    # Print results
-    total_errors = 0
-    total_warnings = 0
-    total_plugins = len(results)
-    passed_plugins = 0
 
-    for result in results:
-        rel_path = result.plugin_path
-        try:
-            rel_path = result.plugin_path.relative_to(repo_root)
-        except ValueError:
-            pass
+def _print_result(result, rel_path, verbose):
+    """A failed result's FAIL line and errors; a passed one's PASS line only
+    when verbose. Then its warnings; a passed result's each get a WARN line
+    above them when not verbose."""
+    if result.passed:
+        if verbose:
+            print(f"  PASS  {rel_path}")
+    else:
+        print(f"  FAIL  {rel_path}")
+        for err in result.errors:
+            print(f"        ERROR: {err}")
+    for warn in result.warnings:
+        if result.passed and not verbose:
+            print(f"  WARN  {rel_path}")
+        print(f"        WARNING: {warn}")
 
-        if result.passed:
-            passed_plugins += 1
-            if args.verbose:
-                print(f"  PASS  {rel_path}")
-        else:
-            print(f"  FAIL  {rel_path}")
-            for err in result.errors:
-                print(f"        ERROR: {err}")
-                total_errors += 1
 
-        for warn in result.warnings:
-            if result.passed and not args.verbose:
-                print(f"  WARN  {rel_path}")
-            print(f"        WARNING: {warn}")
-            total_warnings += 1
-
-    # Summary
+def _print_summary(results):
+    """The closing lines; returns the number of errors."""
+    total = len(results)
+    passed = sum(1 for result in results if result.passed)
+    errors = sum(len(result.errors) for result in results)
+    warnings = sum(len(result.warnings) for result in results)
     print()
-    print(f"Validated {total_plugins} plugin(s): {passed_plugins} passed, {total_plugins - passed_plugins} failed")
-    if total_errors:
-        print(f"  {total_errors} error(s)")
-    if total_warnings:
-        print(f"  {total_warnings} warning(s)")
-
-    sys.exit(1 if total_errors > 0 else 0)
+    print(f"Validated {total} plugin(s): {passed} passed, {total - passed} failed")
+    if errors:
+        print(f"  {errors} error(s)")
+    if warnings:
+        print(f"  {warnings} warning(s)")
+    return errors
 
 
 if __name__ == "__main__":
