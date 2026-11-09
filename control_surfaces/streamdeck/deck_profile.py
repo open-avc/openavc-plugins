@@ -20,6 +20,14 @@ LCD keys are 0-7 and its two touch keys 8 and 9); ``key_total``,
 ``lcd_key_indexes``, ``touch_key_indexes`` and ``is_touch_key`` read that
 numbering from the deck.
 
+A touch strip and an info screen say their size through the deck's format
+readers, read three ways on purpose: the strip's zones are laid out on the
+width the deck reports, a 0 included, or 800 when it cannot say
+(``strip_width``); the strip's renders take its format with both sides as
+reported (``strip_format``); an overlay and the info screen draw only where
+both sides are above 0 (``panel_size``). A deck has an info screen when its
+screen reports a width above 0 (``deck_geometry``).
+
 The identity is read before the geometry, and a deck that fails mid-read
 raises out of the open: a network deck's link is told the serial it reported
 between the two reads (``tell_link_serial``), so a deck whose layout cannot
@@ -32,6 +40,9 @@ from .virtual_deck import VirtualDeck
 
 # The serial of a deck that reports none.
 UNKNOWN_SERIAL = "unknown"
+
+# The width a touch strip's zones are laid out on when the deck cannot say.
+DEFAULT_STRIP_WIDTH = 800
 
 # The geometry keys a status card reads, as published before any deck.
 UNCONNECTED_GEOMETRY = (
@@ -145,6 +156,38 @@ def is_touch_key(deck, index):
     """True for an index past a deck's LCD keys and within its touch keys."""
     first = deck.key_count()
     return first <= index < first + deck.touch_key_count()
+
+
+def strip_width(deck):
+    """The width a touch strip's zones are laid out on: the deck's own, 0
+    included, or 800 when it cannot say."""
+    try:
+        return deck.touchscreen_image_format()["size"][0]
+    except Exception:
+        return DEFAULT_STRIP_WIDTH
+
+
+def strip_format(deck):
+    """The touch strip's format and its width and height, as ``(format,
+    width, height)``, both sides as the deck reports them: the renders draw
+    and send what they are told. None when the deck cannot say."""
+    try:
+        fmt = deck.touchscreen_image_format()
+        width, height = fmt["size"]
+    except Exception:
+        return None
+    return fmt, width, height
+
+
+def panel_size(deck, format_reader):
+    """A touch strip's or info screen's ``(width, height)``, from the deck's
+    ``touchscreen_image_format`` or ``screen_image_format``; None when the
+    deck lacks the reader, it raises, or either side is 0."""
+    try:
+        width, height = getattr(deck, format_reader)()["size"]
+    except Exception:
+        return None
+    return (width, height) if width and height else None
 
 
 def connected_line(identity, geometry):

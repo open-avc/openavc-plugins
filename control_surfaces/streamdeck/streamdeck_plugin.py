@@ -21,7 +21,7 @@ elements, and when the touch strip or the info screen is idle and shows the
 clock), context_actions.py (what a context action or a simulated input asks for),
 deck_answers.py (what a network deck's discovery answer says),
 deck_profile.py (what a deck says about itself when it opens: its transport,
-serial, model and geometry), pages.py (how many pages a deck has, and which
+serial, model and geometry, and how big its touch strip and info screen are), pages.py (how many pages a deck has, and which
 page a value names), virtual_deck.py (a deck that exists only in software)
 and watch_keys.py (which state keys a deck reads, and what each one
 redraws).
@@ -68,6 +68,9 @@ from .deck_profile import (
     is_touch_key,
     key_total,
     lcd_key_indexes,
+    panel_size,
+    strip_format,
+    strip_width,
     tell_link_serial,
     touch_key_indexes,
 )
@@ -1494,7 +1497,7 @@ class StreamDeckPlugin:
         (``_OVERLAY_ON_STRIP`` or ``_OVERLAY_ON_SCREEN``), sized as the deck
         reports; None when the deck has none or cannot say its size."""
         format_reader, inset, min_font = where
-        size = self._panel_size(deck, format_reader)
+        size = panel_size(deck, format_reader)
         if size is None:
             return None
         panel = Image.new("RGB", size, _OVERLAY_BACKGROUND)
@@ -1502,17 +1505,6 @@ class StreamDeckPlugin:
             panel, overlay_panel_slot(text, size, inset, min_font), "#ffffff"
         )
         return panel
-
-    @staticmethod
-    def _panel_size(deck, format_reader):
-        """A touch strip's or info screen's (width, height), from the deck's
-        ``touchscreen_image_format`` or ``screen_image_format``; None when
-        the deck lacks the reader, it raises, or either side is 0."""
-        try:
-            width, height = getattr(deck, format_reader)()["size"]
-        except Exception:
-            return None
-        return (width, height) if width and height else None
 
     # ──── Key Handling ────
 
@@ -1875,10 +1867,7 @@ class StreamDeckPlugin:
         readout with no more config."""
         if not session.deck:
             return []
-        try:
-            width = session.deck.touchscreen_image_format()["size"][0]
-        except Exception:
-            width = 800
+        width = strip_width(session.deck)
         return lay_out_zones(self._deck_config(session), session.deck.dial_count, width)
 
     def _zone_at(self, session, x):
@@ -2126,7 +2115,7 @@ class StreamDeckPlugin:
         deck = session.deck
         if not self._strip_ready(session):
             return
-        strip = self._strip_format(deck)
+        strip = strip_format(deck)
         if strip is None:
             return
         _fmt, width, height = strip
@@ -2140,19 +2129,6 @@ class StreamDeckPlugin:
         """True when the touch strip can be drawn now: an attached deck with a
         screen and a strip, and no show_message overlay owning the display."""
         return session.drawable and session.deck.is_touch() and not session.overlay_active
-
-    @staticmethod
-    def _strip_format(deck):
-        """The touch strip's format and its width and height, as
-        ``(format, width, height)``; None when the deck cannot say. Unlike
-        ``_panel_size`` (the overlay's reader) a side of 0 comes back as the
-        deck reports it: the renders draw and send what they are told."""
-        try:
-            fmt = deck.touchscreen_image_format()
-            width, height = fmt["size"]
-        except Exception:
-            return None
-        return fmt, width, height
 
     async def _strip_body(self, session, img):
         """What the strip shows, drawn on ``img`` (the strip's size, in its
@@ -2229,7 +2205,7 @@ class StreamDeckPlugin:
         if self._strip_idle_mode(session):
             await self._render_touchscreen(session)
             return
-        strip = self._strip_format(deck)
+        strip = strip_format(deck)
         if strip is None:
             return
         fmt, width, height = strip
@@ -2271,7 +2247,7 @@ class StreamDeckPlugin:
             return
         if session.overlay_active:
             return  # a show_message overlay owns the display right now
-        size = self._panel_size(deck, "screen_image_format")
+        size = panel_size(deck, "screen_image_format")
         if size is None:
             return  # this deck has no info screen
         width, height = size

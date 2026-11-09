@@ -33,7 +33,11 @@ if str(_PLUGINS_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGINS_ROOT))
 
 from control_surfaces.streamdeck import streamdeck_plugin as sd_module  # noqa: E402
-from control_surfaces.streamdeck.deck_profile import deck_geometry  # noqa: E402
+from control_surfaces.streamdeck.deck_profile import (  # noqa: E402
+    deck_geometry,
+    panel_size,
+    strip_format,
+)
 from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
 
 try:
@@ -436,8 +440,8 @@ def test_a_session_with_no_deck_has_no_zones():
 
 def test_the_renders_read_the_strips_format_and_both_sides_as_reported():
     fmt = {"size": (800, 0), "flip": (True, False), "rotation": 90}
-    assert StreamDeckPlugin._strip_format(_Deck(strip_format=fmt)) == (fmt, 800, 0)
-    plain = StreamDeckPlugin._strip_format(_Deck(strip=(0, 0)))
+    assert strip_format(_Deck(strip_format=fmt)) == (fmt, 800, 0)
+    plain = strip_format(_Deck(strip=(0, 0)))
     assert plain[1:] == (0, 0) and plain[0]["size"] == (0, 0)
 
 
@@ -448,12 +452,12 @@ def test_the_renders_read_the_strips_format_and_both_sides_as_reported():
     _Deck(strip_format={"size": None}),
 ])
 def test_the_renders_get_no_format_from_a_strip_that_cannot_say_it(deck):
-    assert StreamDeckPlugin._strip_format(deck) is None
+    assert strip_format(deck) is None
 
 
 @pytest.mark.parametrize("reader", ["touchscreen_image_format", "screen_image_format"])
 def test_the_overlay_and_info_screen_size_needs_both_sides(reader):
-    size = StreamDeckPlugin._panel_size
+    size = panel_size
     assert size(_Deck(strip=(640, 80), screen=(640, 80)), reader) == (640, 80)
     for side in ((0, 80), (640, 0), (0, 0)):
         assert size(_Deck(strip=side, screen=side), reader) is None
