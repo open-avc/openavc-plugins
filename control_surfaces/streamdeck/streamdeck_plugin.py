@@ -2182,34 +2182,56 @@ class StreamDeckPlugin:
         redraw partially.
         """
         deck = session.deck
-        if not session.drawable or not deck.is_touch():
+        if not self._strip_ready(session):
             return
-        if session.overlay_active:
-            return  # a show_message overlay owns the display right now
-        try:
-            width, height = deck.touchscreen_image_format()["size"]
-        except Exception:
+        strip = self._strip_format(deck)
+        if strip is None:
             return
-
+        _fmt, width, height = strip
         bg = self._deck_setting(session, "button_color", "#1a1a2e")
-        img = Image.new("RGB", (width, height), bg)
-
-        idle = self._strip_idle_mode(session)
-        if idle:
-            if idle == "clock":
-                fg = self._deck_setting(session, "text_color", "#e0e0e0")
-                self._draw_clock(img, width, height, fg)
-            if session.flash_zones:
-                # Touch acknowledgment while idle: lighten the whole strip.
-                overlay = Image.new("RGB", img.size, (255, 255, 255))
-                img = Image.blend(img, overlay, 0.18)
-        else:
-            for zone in self._touch_zones(session):
-                await self._draw_strip_zone(session, img, zone, height)
-
+        img = await self._strip_body(session, Image.new("RGB", (width, height), bg))
         session.strip_image = img
         self._mirror(session, "touchscreen", img)
         self._send_strip_image(deck, img, failure="Error setting touchscreen image")
+
+    def _strip_ready(self, session):
+        """True when the touch strip can be drawn now: an attached deck with a
+        screen and a strip, and no show_message overlay owning the display."""
+        return session.drawable and session.deck.is_touch() and not session.overlay_active
+
+    @staticmethod
+    def _strip_format(deck):
+        """The touch strip's format and its width and height, as
+        ``(format, width, height)``; None when the deck cannot say."""
+        try:
+            fmt = deck.touchscreen_image_format()
+            width, height = fmt["size"]
+        except Exception:
+            return None
+        return fmt, width, height
+
+    async def _strip_body(self, session, img):
+        """What the strip shows, drawn on ``img`` (the strip's size, in its
+        background): its zones, or with nothing configured the idle content,
+        lightened as a whole while a touch flashes. Returns the image to
+        send."""
+        idle = self._strip_idle_mode(session)
+        if not idle:
+            for zone in self._touch_zones(session):
+                await self._draw_strip_zone(session, img, zone, img.height)
+            return img
+        self._draw_idle(session, img, idle)
+        if not session.flash_zones:
+            return img
+        return Image.blend(img, Image.new("RGB", img.size, (255, 255, 255)), 0.18)
+
+    def _draw_idle(self, session, img, idle):
+        """An idle strip's or info screen's content on ``img``: the clock in
+        the deck's text color, or nothing for ``"blank"``."""
+        if idle == "clock":
+            width, height = img.size
+            fg = self._deck_setting(session, "text_color", "#e0e0e0")
+            self._draw_clock(img, width, height, fg)
 
     def _schedule_strip_render(self, session, zones=None):
         """Coalesce strip redraws (~40 ms debounce): collect dirty zones,
@@ -2243,24 +2265,21 @@ class StreamDeckPlugin:
 
     async def _render_strip_zone(self, session, zone_index):
         """Redraw one zone into the cached strip image and ship only that
-        region to the deck (the hardware accepts partial-region updates)."""
+        region to the deck (the hardware accepts partial-region updates). The
+        whole strip redraws instead when a region cannot be sent alone: an
+        idle strip (no zone regions; also how the idle touch flash draws and
+        clears), a flipped or rotated format (a region would land in the wrong
+        place), or a zone the strip no longer has."""
         deck = session.deck
-        if not session.drawable or not deck.is_touch():
-            return
-        if session.overlay_active or session.strip_image is None:
+        if not self._strip_ready(session) or session.strip_image is None:
             return
         if self._strip_idle_mode(session):
-            # Idle clock/blank has no zone regions — repaint the whole strip
-            # (this is also how the idle touch flash draws and clears).
             await self._render_touchscreen(session)
             return
-        try:
-            fmt = deck.touchscreen_image_format()
-            width, height = fmt["size"]
-        except Exception:
+        strip = self._strip_format(deck)
+        if strip is None:
             return
-        # A flipped/rotated native format transforms whole-image coordinates;
-        # partial regions would land in the wrong place, so redraw fully.
+        fmt, width, height = strip
         if fmt.get("flip", (False, False)) != (False, False) or fmt.get("rotation", 0):
             await self._render_touchscreen(session)
             return
@@ -2268,7 +2287,12 @@ class StreamDeckPlugin:
         if not 0 <= zone_index < len(zones):
             await self._render_touchscreen(session)
             return
-        zone = zones[zone_index]
+        await self._send_zone_region(session, zones[zone_index], width, height)
+
+    async def _send_zone_region(self, session, zone, width, height):
+        """Draw ``zone`` into the cached strip image, mirror the whole strip,
+        and send the zone's columns clipped to the strip's ``width``; nothing
+        is sent for a zone wholly off the strip."""
         img = session.strip_image
         await self._draw_strip_zone(session, img, zone, height)
         self._mirror(session, "touchscreen", img)
@@ -2277,7 +2301,7 @@ class StreamDeckPlugin:
         if zw <= 0:
             return
         region = img.crop((zx, 0, zx + zw, height))
-        self._send_strip_image(deck, region, x=zx, failure="Error setting touchscreen region")
+        self._send_strip_image(session.deck, region, x=zx, failure="Error setting touchscreen region")
 
     # ──── Info strip (decks with a secondary info screen) ────
 
@@ -2341,14 +2365,12 @@ class StreamDeckPlugin:
         img = Image.new("RGB", (width, height), bg)
 
         idle = self._info_idle_mode(session)
-        if idle == "clock":
-            fg = self._deck_setting(session, "text_color", "#e0e0e0")
-            self._draw_clock(img, width, height, fg)
-        elif idle is None:
+        if idle is None:
             cfg = self._deck_config(session).get("info_strip")
             for element in self._info_strip_items(cfg, width):
                 await self._draw_strip_zone(session, img, element, height)
-        # idle == "blank": leave the plain background
+        else:
+            self._draw_idle(session, img, idle)
 
         self._mirror(session, "screen", img)
         self._send_screen_image(deck, img, failure="Error setting info strip image")
