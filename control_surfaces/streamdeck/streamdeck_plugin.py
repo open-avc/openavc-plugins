@@ -756,23 +756,10 @@ class StreamDeckPlugin:
             # The config under any in-flight press just changed — end hold
             # repeats now rather than trusting the (possibly re-bound)
             # release to find them. A still-held key simply re-presses.
-            for task_id in list(session.hold_tasks.values()):
-                self.api.cancel_task(task_id)
-            session.hold_tasks.clear()
-            for sub_id in session.feedback_subs:
-                try:
-                    await self.api.state_unsubscribe(sub_id)
-                except Exception:
-                    pass
-            session.feedback_subs = []
+            self._end_hold_repeats(session)
+            await self._drop_feedback_subscriptions(session)
             await self._setup_feedback_subscriptions(session)
-
-            max_pages = self._effective_page_count(session)
-            if session.current_page >= max_pages:
-                await self._change_page(session, max_pages - 1)
-            target = await self._evaluate_auto_page(session)
-            if target is not None and target != session.current_page:
-                await self._change_page(session, target)
+            await self._settle_page(session)
 
             await self._apply_active_brightness(session)
             await self._render_all_buttons(session)
@@ -781,6 +768,32 @@ class StreamDeckPlugin:
 
         await self._publish_deck_state()
         return True
+
+    async def _settle_page(self, session):
+        """After a config change: a page past the new last page moves to the
+        last one, then the first matching auto_page rule's page, if any,
+        is shown."""
+        max_pages = self._effective_page_count(session)
+        if session.current_page >= max_pages:
+            await self._change_page(session, max_pages - 1)
+        target = await self._evaluate_auto_page(session)
+        if target is not None and target != session.current_page:
+            await self._change_page(session, target)
+
+    def _end_hold_repeats(self, session):
+        """Cancel every hold-repeat a deck has running."""
+        for task_id in list(session.hold_tasks.values()):
+            self.api.cancel_task(task_id)
+        session.hold_tasks.clear()
+
+    async def _drop_feedback_subscriptions(self, session):
+        """End a deck's state subscriptions; one already gone is skipped."""
+        for sub_id in session.feedback_subs:
+            try:
+                await self.api.state_unsubscribe(sub_id)
+            except Exception:
+                pass
+        session.feedback_subs = []
 
     # ──── Device Management ────
 
@@ -934,30 +947,58 @@ class StreamDeckPlugin:
         never re-opens it); newly attached decks are recognized by their HID
         path and opened. Periodic ticks never overlap, but an ``_opening``
         guard is kept so a slow open can't be re-entered.
+
+        Each tick tends the decks it holds before it looks for new ones, so a
+        deck lost this tick frees its path for a deck found at it.
         """
         if self._opening:
             return
 
         declared_virtual = self._virtual_deck_entries()
-        declared_serials = {entry["serial"] for entry in declared_virtual}
+        await self._tend_held_decks({entry["serial"] for entry in declared_virtual})
 
-        # Health-check the decks we hold; tear down any that went away (or
-        # virtual decks no longer declared in config). The healthy ticks
-        # double as each deck's idle-dim clock.
+        new_decks = self._unheld_usb_decks() + self._unmade_virtual_decks(declared_virtual)
+        # Network decks: reconnect configured units (with backoff) and add
+        # any decks whose connection came up since the last tick. It appends
+        # as it goes, so a deck it added before failing is still opened.
+        try:
+            await self._reconcile_network_decks(new_decks)
+        except Exception as e:
+            self.api.log(f"Network deck reconcile error: {e}", level="warning")
+
+        if new_decks:
+            await self._open_decks(new_decks)
+
+    async def _tend_held_decks(self, declared_serials):
+        """Run each held deck's tick, or tear it down when it went away."""
         for session in list(self._sessions.values()):
-            try:
-                healthy = session.deck.is_open() and session.deck.connected()
-            except Exception:
-                healthy = False
-            if session.is_virtual and session.serial not in declared_serials:
-                healthy = False
-            if healthy:
-                await self._check_idle_dim(session)
-                await self._tick_clock(session)
+            if self._still_held(session, declared_serials):
+                await self._tick_held_deck(session)
             else:
                 await self._handle_deck_lost(session)
 
-        # Open any attached decks we don't hold yet (matched by HID path).
+    @staticmethod
+    def _still_held(session, declared_serials):
+        """True while a deck is open and connected, and, for a virtual deck,
+        still declared in the config."""
+        try:
+            healthy = session.deck.is_open() and session.deck.connected()
+        except Exception:
+            healthy = False
+        if session.is_virtual and session.serial not in declared_serials:
+            healthy = False
+        return healthy
+
+    async def _tick_held_deck(self, session):
+        """What a held deck does on each watchdog tick: the idle-dim clock,
+        then the idle clock's minute."""
+        await self._check_idle_dim(session)
+        await self._tick_clock(session)
+
+    def _unheld_usb_decks(self):
+        """The attached decks the plugin does not hold yet, matched by HID
+        path; a deck whose path cannot be read is never held, so it is
+        offered again each tick. Empty when the library cannot enumerate."""
         try:
             decks = StreamDeck.DeviceManager().enumerate()
         except Exception:
@@ -970,26 +1011,19 @@ class StreamDeckPlugin:
                 device_id = None
             if device_id is None or device_id not in self._sessions:
                 new_decks.append(deck)
+        return new_decks
 
-        # Materialize declared virtual decks that aren't running yet.
-        for entry in declared_virtual:
-            if f"virtual:{entry['serial']}" not in self._sessions:
-                new_decks.append(
-                    VirtualDeck(
-                        entry["model"], entry["serial"], VIRTUAL_MODELS[entry["model"]]
-                    )
-                )
+    def _unmade_virtual_decks(self, declared_virtual):
+        """A deck for each declared virtual deck that is not running yet."""
+        return [
+            VirtualDeck(entry["model"], entry["serial"], VIRTUAL_MODELS[entry["model"]])
+            for entry in declared_virtual
+            if f"virtual:{entry['serial']}" not in self._sessions
+        ]
 
-        # Network decks: reconnect configured units (with backoff) and collect
-        # any decks whose connection came up since the last tick.
-        try:
-            await self._reconcile_network_decks(new_decks)
-        except Exception as e:
-            self.api.log(f"Network deck reconcile error: {e}", level="warning")
-
-        if not new_decks:
-            return
-
+    async def _open_decks(self, new_decks):
+        """Open each deck in turn under the ``_opening`` guard; one that fails
+        is logged and the rest still open."""
         self._opening = True
         try:
             for deck in new_decks:
@@ -1013,19 +1047,11 @@ class StreamDeckPlugin:
             level="warning",
         )
 
-        for task_id in list(session.hold_tasks.values()):
-            self.api.cancel_task(task_id)
-        session.hold_tasks.clear()
+        self._end_hold_repeats(session)
         session.press_times.clear()
         session.dial_press_times.clear()
         session.dial_turned.clear()
-
-        for sub_id in session.feedback_subs:
-            try:
-                await self.api.state_unsubscribe(sub_id)
-            except Exception:
-                pass
-        session.feedback_subs = []
+        await self._drop_feedback_subscriptions(session)
 
         self._sessions.pop(session.device_id, None)
         try:
