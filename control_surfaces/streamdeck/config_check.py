@@ -23,10 +23,9 @@ import json
 
 from .conditions import KNOWN_OPERATORS, coerce_numeric
 from .declared_decks import endpoint_key, network_endpoint, virtual_serial
-from .key_entries import unwrap_binding
+from .key_entries import ACTION_KINDS, unwrap_binding
 from .virtual_deck import VIRTUAL_MODELS
 
-_KNOWN_ACTIONS = ("macro", "device.command", "state.set", "navigate")
 _KNOWN_MODES = ("tap", "toggle", "hold_repeat", "tap_hold")
 _LAYOUT_LISTS = ("buttons", "global_buttons", "auto_page", "dials", "auto_brightness")
 _DIAL_ACTIONS = (
@@ -153,11 +152,11 @@ def _slot_problems(index, path, noun):
 
 
 def _kind_problems(kind, path):
-    if kind in (None, "") or kind in _KNOWN_ACTIONS:
+    if kind in (None, "") or kind in ACTION_KINDS:
         return []
     return [
         f"{path}: action {_shown(kind)} is not one a deck runs "
-        f"({', '.join(_KNOWN_ACTIONS)}), so it does nothing."
+        f"({', '.join(ACTION_KINDS)}), so it does nothing."
     ]
 
 

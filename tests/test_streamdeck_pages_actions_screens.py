@@ -865,3 +865,8 @@ async def test_an_overlay_draws_nothing_without_a_screen_pil_or_a_key_size(pil, 
     monkeypatch.setattr(sd_module, "Image", None)
     await plugin._draw_overlay(session, "Hi")
     assert session.deck.sent == []
+
+
+def test_every_action_type_the_deck_runs_has_one_runner_and_no_other_does():
+    from control_surfaces.streamdeck.key_entries import ACTION_KINDS
+    assert tuple(StreamDeckPlugin._ACTION_RUNNERS) == ACTION_KINDS

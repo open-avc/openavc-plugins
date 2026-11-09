@@ -10,8 +10,13 @@ deck watches and the keys a state change redraws cannot disagree about it.
 A binding (``press``, a dial's ``cw``, a zone's ``touch``...) is stored as a
 list of actions, or as a single action object; ``action_list`` reads either.
 Entries and actions that are not objects are skipped, never an error: the
-config check (config_check.py) is what reports them.
+config check (config_check.py) is what reports them. ``ACTION_KINDS`` are the
+action types a deck runs: the plugin has one runner for each, and the config
+check reports any other type.
 """
+
+# The action types a deck runs, in the order the config check lists them.
+ACTION_KINDS = ("macro", "device.command", "state.set", "navigate")
 
 
 def objects(value):

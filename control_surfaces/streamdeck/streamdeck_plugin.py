@@ -1680,55 +1680,72 @@ class StreamDeckPlugin:
                 await self._execute_action(session, action, source)
 
     async def _execute_action(self, session, action_binding, source):
-        """Execute a single surface action binding.
-
-        Supports the documented surface action set: ``macro``,
-        ``device.command``, ``state.set`` (scoped like the panel plugin
-        bridge), and ``navigate`` (deck page: next/previous or a page index).
+        """Run one action binding by its type: one runner for each of
+        ``ACTION_KINDS`` (``_ACTION_RUNNERS``); any other type does nothing.
         ``source`` only labels log lines (e.g. ``key 3``, ``dial 0``).
         """
-        action = action_binding.get("action", "")
+        kind = action_binding.get("action", "")
+        runner = self._ACTION_RUNNERS.get(kind) if isinstance(kind, str) else None
+        if runner is not None:
+            await runner(self, session, action_binding, source)
 
-        if action == "navigate":
-            page_id = action_binding.get("page", "")
-            if page_id == "__next_page__":
-                await self._change_page(session, session.current_page + 1)
-            elif page_id == "__prev_page__":
-                await self._change_page(session, session.current_page - 1)
-            else:
-                # A specific page index (int or numeric string).
-                try:
-                    await self._change_page(session, int(page_id))
-                except (TypeError, ValueError):
-                    pass
+    async def _run_navigate(self, session, action_binding, source):
+        """Change the deck's page: the next or previous one, or a page index
+        (an int or a numeric string)."""
+        page_id = action_binding.get("page", "")
+        if page_id == "__next_page__":
+            await self._change_page(session, session.current_page + 1)
+        elif page_id == "__prev_page__":
+            await self._change_page(session, session.current_page - 1)
+        else:
+            try:
+                await self._change_page(session, int(page_id))
+            except (TypeError, ValueError):
+                pass
 
-        elif action == "macro":
-            macro = action_binding.get("macro", "")
-            if macro:
-                try:
-                    await self.api.macro_execute(macro)
-                    self.api.log(f"Executed macro '{macro}' from {source}", level="debug")
-                except Exception as e:
-                    self.api.log(f"Error executing macro '{macro}': {e}", level="error")
+    async def _run_macro(self, session, action_binding, source):
+        """Run the binding's macro; a failure is logged, never raised."""
+        macro = action_binding.get("macro", "")
+        if not macro:
+            return
+        try:
+            await self.api.macro_execute(macro)
+            self.api.log(f"Executed macro '{macro}' from {source}", level="debug")
+        except Exception as e:
+            self.api.log(f"Error executing macro '{macro}': {e}", level="error")
 
-        elif action == "device.command":
-            device = action_binding.get("device", "")
-            command = action_binding.get("command", "")
-            params = action_binding.get("params")
-            if device and command:
-                try:
-                    await self.api.device_command(device, command, params if isinstance(params, dict) else None)
-                    self.api.log(f"Sent {command} to {device} from {source}", level="debug")
-                except Exception as e:
-                    self.api.log(f"Error sending command: {e}", level="error")
+    async def _run_device_command(self, session, action_binding, source):
+        """Send a device command, with its ``params`` when they are an object;
+        a failure is logged, never raised."""
+        device = action_binding.get("device", "")
+        command = action_binding.get("command", "")
+        if not (device and command):
+            return
+        params = action_binding.get("params")
+        try:
+            await self.api.device_command(device, command, params if isinstance(params, dict) else None)
+            self.api.log(f"Sent {command} to {device} from {source}", level="debug")
+        except Exception as e:
+            self.api.log(f"Error sending command: {e}", level="error")
 
-        elif action == "state.set":
-            key = action_binding.get("key", "")
-            if key:
-                try:
-                    await self._apply_state_set(key, action_binding.get("value"))
-                except Exception as e:
-                    self.api.log(f"Error setting state '{key}': {e}", level="error")
+    async def _run_state_set(self, session, action_binding, source):
+        """Write the binding's value through the deck's write rule
+        (``_apply_state_set``); a failure is logged, never raised."""
+        key = action_binding.get("key", "")
+        if not key:
+            return
+        try:
+            await self._apply_state_set(key, action_binding.get("value"))
+        except Exception as e:
+            self.api.log(f"Error setting state '{key}': {e}", level="error")
+
+    # What each action type runs, one runner per ACTION_KINDS entry.
+    _ACTION_RUNNERS = {
+        "macro": _run_macro,
+        "device.command": _run_device_command,
+        "state.set": _run_state_set,
+        "navigate": _run_navigate,
+    }
 
     async def _apply_state_set(self, key, value):
         """Write a state value, mirroring the panel plugin-bridge scope rule.
