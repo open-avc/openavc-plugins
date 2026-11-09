@@ -4,13 +4,17 @@ routing-matrix row or column read back to the channel it names.
 Each channel's keys are its device's name made into a key segment
 (``sanitize_id``) and the channel's index: ``tx.<device>.<index>`` for a
 transmit channel; ``rx.<device>.<index>``, ``route.<device>.<index>`` and
-``route_info.<device>.<index>`` for a receive channel. The Programmer's routing
-matrix (``SURFACE_LAYOUT`` in dante_plugin.py) lists its rows from the rx keys
-and its columns from the tx keys, and a click sends back the text after
-``rx.`` or ``tx.``; ``resolve_ref`` reads that text by making each device's
-name into a segment again, so the two halves of the convention change here,
-together. A ``route`` value is DDM's summary of the subscription, lowercased
-("connected", "none", ...), and the matrix reads "none" as unrouted.
+``route_info.<device>.<index>`` for a receive channel. A ``route`` value is
+DDM's summary of the subscription, lowercased ("connected", "none", ...); a
+``route_info`` value names its source ("MIC-01 / 01"), blank when unrouted.
+
+The Programmer's routing matrix (``SURFACE_LAYOUT`` in dante_plugin.py) lists
+its rows from the rx keys and its columns from the tx keys, and a click sends
+back the text after ``rx.`` or ``tx.``; ``resolve_ref`` reads that text by
+making each device's name into a segment again, so writing a key and reading a
+click back are here side by side. The layout's cell pattern,
+``route.<row>.<col>``, names one key per crosspoint, which is not published:
+route status is published per receive channel only.
 
 A receive channel is routed when it names a source device (``source_of``):
 the published route text, the subscription count, a preset's snapshot and
@@ -71,8 +75,11 @@ def resolve_ref(devices, ref: str, direction: str) -> tuple[str | None, int | st
     the device has no transmit channel at that index. The first device whose
     name makes the segment is the one meant. (None, None) when nothing matches.
     """
-    segment, dot, index_text = ref.rpartition(".")
-    device = _device_at(devices, segment) if dot else None
+    parts = ref.rsplit(".", 1)
+    if len(parts) != 2:
+        return None, None
+    segment, index_text = parts
+    device = _device_at(devices, segment)
     index = _index(index_text) if device else None
     if index is None:
         return None, None

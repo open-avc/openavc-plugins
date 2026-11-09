@@ -14,7 +14,7 @@
     },
     "dante": {
       "files": {
-        "integrations/dante/channel_keys.py": "a3e8a6e8e796ee8545432da9d43dd29028e62f2277aa2b269c432f1abcda0893",
+        "integrations/dante/channel_keys.py": "3d1898ec7920ef2b28214db50e2bc88494452f4b6ab3af73a6cc0a954fbcdd67",
         "integrations/dante/dante_plugin.py": "cca68d0194673928ff63af61a956c974712d733e08752351d16423c00adfc9fd",
         "integrations/dante/plugin.json": "527714c5a84357d5b273ec115397e8c977bb0c7df05bb5c891a07faebe37616b",
         "integrations/dante/routing.py": "066197c6c3c32a4fd7739d6d1c8b3ad98d7891ee69f4691c5637f731f28433d4"

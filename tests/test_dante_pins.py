@@ -502,6 +502,46 @@ async def test_connect_whose_client_cannot_be_built_fails_with_nothing_to_close(
     ]
 
 
+async def test_a_configured_domain_is_taken_before_the_list_is_read():
+    plugin, api = _plugin()
+    answer = {"data": {"domains": [{"name": "no id"}]}}
+    with patch.dict(sys.modules, {"httpx": _httpx(api, [answer])}):
+        assert await plugin._connect({"ddm_url": "u", "api_key": "k", "domain_id": "d5"}) is False
+    assert api.calls[-3] == ("log", "error", "Failed to connect to DDM: 'id'")
+    assert (plugin._domain_id, plugin._domain_name) == ("d5", None)
+
+
+async def test_the_first_domain_s_id_is_taken_before_its_name_is_read():
+    plugin, api = _plugin()
+    answer = {"data": {"domains": [{"id": "d3"}]}}
+    with patch.dict(sys.modules, {"httpx": _httpx(api, [answer])}):
+        assert await plugin._connect({"ddm_url": "u", "api_key": "k"}) is False
+    assert api.calls[-3] == ("log", "error", "Failed to connect to DDM: 'name'")
+    assert (plugin._domain_id, plugin._domain_name) == ("d3", None)
+
+
+async def test_a_stop_while_the_domains_are_read_leaves_nothing_to_close_after():
+    plugin, api = _plugin()
+    module = types.ModuleType("httpx")
+
+    class StoppingClient(_Client):
+        async def post(self, path, json=None):
+            answer = await super().post(path, json)
+            await plugin.stop()
+            return answer
+
+    module.AsyncClient = lambda **kwargs: StoppingClient(api.calls, [_domains()])
+    with patch.dict(sys.modules, {"httpx": module}):
+        assert await plugin._connect({"ddm_url": "u", "api_key": "k"}) is False
+    assert api.calls == [
+        _DOMAINS_POST,
+        ("aclose",),
+        ("log", "info", "Dante DDM plugin stopped"),
+        ("log", "error", "No Dante domains found"),
+    ]
+    assert plugin._client is None
+
+
 async def test_connect_answered_with_an_http_error_fails():
     plugin, api = _plugin()
     with patch.dict(sys.modules, {"httpx": _httpx(api, [_Status("401")])}):
@@ -739,6 +779,23 @@ async def test_refresh_announces_a_device_replaced_by_another_though_the_count_i
     api.calls.clear()
     await plugin._refresh_state()
     assert api.calls[-1] == ("event", "devices.updated", {"device_count": 3})
+
+
+async def test_refresh_writes_as_it_reads_so_a_bad_device_fails_after_the_ones_before_it():
+    domain = _domain_body()
+    domain["devices"][1]["name"] = None
+    plugin, api = _plugin(answers=[_domain_answer(domain)])
+    plugin._domain_id = "d1"
+    plugin._state_keys = {"tx.old.1"}
+    with pytest.raises(AttributeError):
+        await plugin._refresh_state()
+    assert api.calls == [
+        _domain_post(),
+        ("state", "tx.mic_01.1", "MIC-01 / 01"),
+        ("state", "tx.mic_01.2", "MIC-01 / 02"),
+    ]
+    assert set(plugin._devices) == {"dev-001", "dev-002", "dev-003"}
+    assert plugin._state_keys == {"tx.old.1"}
 
 
 async def test_refresh_of_a_domain_with_no_device_list_counts_nothing_and_announces_the_change():
@@ -1041,6 +1098,22 @@ async def test_recall_whose_only_failure_is_a_missing_receiver_is_still_a_partia
     ]
 
 
+async def test_a_recall_reads_a_receivers_routes_only_once_it_is_found():
+    routes = [
+        {"tx_device": "A", "tx_channel": "1", "rx_device": "Gone", "rx_channel_index": "x"},
+        {"tx_device": "A", "tx_channel": "1", "rx_device": "AMP 01.a", "rx_channel_index": 2},
+        {"tx_device": "A", "tx_channel": "1", "rx_device": "Stage", "rx_channel_index": "y"},
+    ]
+    plugin, api = _plugin({"_presets": {"P": routes}}, answers=[_OK])
+    plugin._devices = _devices()
+    with pytest.raises(ValueError):
+        await plugin.recall_preset("P")
+    assert api.calls[4:] == [
+        ("log", "error", "Preset: Rx device not found: Gone"),
+        _mutation("dev-002", [_sub(2, "A", "1")], True),
+    ]
+
+
 async def test_presets_that_are_not_a_mapping_read_as_none():
     plugin, api = _plugin({"_presets": [["Meeting"]]})
     assert plugin._parse_presets() == {}
@@ -1103,6 +1176,15 @@ async def test_save_keeps_the_other_settings_and_shows_the_new_preset():
         ("state", "preset_dirty", False),
         ("log", "info", "Saved preset: New (2 routes)"),
     ]
+    assert json.dumps(api.calls[0][1]) == json.dumps(
+        {"connection": {"api_key": "k"}, "_presets": {"Old": [], "New": _SNAP}})
+
+
+async def test_a_first_preset_saved_goes_after_the_other_settings():
+    plugin, api = _plugin({"x": 1, "connection": {"api_key": "k"}})
+    await plugin._handle_save_preset({"name": "A"})
+    assert list(api.calls[0][1]) == ["x", "connection", "_presets"]
+
 
 
 @pytest.mark.parametrize("payload, message", [
@@ -1147,6 +1229,7 @@ async def test_delete_removes_it_and_shows_no_preset():
         ("state", "preset_dirty", False),
         ("log", "info", "Deleted preset: Old"),
     ]
+    assert list(api.calls[0][1]) == ["_presets", "x"]
 
 
 @pytest.mark.parametrize("payload, message", [
@@ -1324,6 +1407,16 @@ async def test_a_reference_with_no_dot_names_nothing_and_reads_no_device():
     }
     assert plugin._resolve_matrix_ref("5", "rx") == (None, None)
     assert plugin._resolve_matrix_ref("5", "tx") == (None, None)
+
+
+@pytest.mark.parametrize("payload", [{"row": 1, "col": 2}, {"row": None}])
+async def test_a_matrix_reference_that_is_not_text_raises_before_doing_anything(payload):
+    plugin, api = _plugin()
+    plugin._devices = _devices()
+    with pytest.raises(AttributeError, match="rsplit"):
+        await plugin._on_action("plugin.dante.action.unroute" if "col" not in payload
+                                else "plugin.dante.action.route", payload)
+    assert api.calls == []
 
 
 async def test_two_devices_with_the_same_key_resolve_to_the_first_even_without_the_channel():
