@@ -59,13 +59,13 @@
         "control_surfaces/streamdeck/fonts/LICENSE": "25f744fa9dd47ff9d3a6fb7fc43f1077dbdc981a043339275bc3cf804d383104",
         "control_surfaces/streamdeck/fonts/lucide-info.json": "951a23c65a08f084d8e0153fb2a9febc48f65cfeecddebdccb43fe20f773935d",
         "control_surfaces/streamdeck/fonts/lucide.ttf": "0ff17e4ce16364d2dae72689336262960e7d5067cfcdb07ca283465a2a34af48",
-        "control_surfaces/streamdeck/key_entries.py": "45f23b48291af7a7d4dfbfb1c2cfbf6945b1257c0b56d233e2442ec6cd958792",
-        "control_surfaces/streamdeck/layouts.py": "475af57c4163efbb0e58d25cfe217045463a756eed6e084aec807d95b231b6c8",
+        "control_surfaces/streamdeck/key_entries.py": "a671e31aaf6fb294f5344a4ba59615e0fd25e0e05591afb3cc3da88b9e4b299a",
+        "control_surfaces/streamdeck/layouts.py": "4dd1a09f9d04e51bfa0ce66892b03676301be8d18ea407e51f06e4773c70d6dc",
         "control_surfaces/streamdeck/looks.py": "890f4aa765677c48734d92f636155a1bce1ba4c08245329eea9bd0df383fe13b",
         "control_surfaces/streamdeck/net_deck.py": "bc8b366f9a2edf9ac7659af96c7085fa38610c796378fe00e6ea8c5774698a38",
         "control_surfaces/streamdeck/pages.py": "8af0d49a3cc6928f38648bfeb9c82ef7e4a166355a19051bf1619e4e74525bdb",
         "control_surfaces/streamdeck/plugin.json": "d96b0442e88b1a26d380c8ff06f6d82a6b85f9f1e16ff321defd4bc07ff49152",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "b24fd025a610259875834fe5043b764808d2675e6a5a1668c3db2a389aeb9f5f",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "4ffaa33ef9c8061df1f9c1568a286f68d9dab6b471fc3b7df3ba479f1e9f1b83",
         "control_surfaces/streamdeck/virtual_deck.py": "61e9cd9663a73eb1c7068ea0d7d8ce67718f0fa696f24617358db6bbb4a39aef",
         "control_surfaces/streamdeck/watch_keys.py": "3351a6e6f9dce2fc4d9c0c9e9526ea2cc2821343fd5bd1e50e0a32e71553ff75"
       }

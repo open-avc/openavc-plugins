@@ -42,12 +42,13 @@ class IconSpot(NamedTuple):
 
 class Layout(NamedTuple):
     """Where a look's parts go: the icon (None without one), the text slots
-    in drawing order, and the meter bar as (left, top, right, bottom), both
-    edges inclusive, or None without a meter."""
+    in drawing order, and the meter as ``(bar, (fraction, color))`` with the
+    bar (left, top, right, bottom), both edges inclusive, or None without a
+    meter."""
 
     icon: IconSpot | None
     texts: tuple
-    meter_bar: tuple | None
+    meter: tuple | None
 
 
 def key_layout(size, look, has_icon):
@@ -56,12 +57,12 @@ def key_layout(size, look, has_icon):
     its icon rendered, not whether it names one."""
     width, height = size
     usable_h = height - 10 if look.meter else height
-    bar = (3, height - 8, width - 4, height - 3) if look.meter else None
+    meter = ((3, height - 8, width - 4, height - 3), look.meter) if look.meter else None
     if has_icon:
         icon, texts = _key_icon_and_text(width, usable_h, look.value_text or look.label)
     else:
         icon, texts = None, _key_texts(look, width, usable_h)
-    return Layout(icon, texts, bar)
+    return Layout(icon, texts, meter)
 
 
 def _key_icon_and_text(width, usable_h, text):
@@ -107,8 +108,8 @@ def zone_layout(span, height, look, has_icon):
         icon = IconSpot(zx + 8, max(2, (text_bottom - size) // 2), size)
         text_x = zx + 8 + size + 6
     texts = _zone_texts(look, (text_x, zx + zw - 4 - text_x, text_bottom), height)
-    bar = (zx + 8, height - 14, zx + zw - 9, height - 7) if look.meter else None
-    return Layout(icon, texts, bar)
+    bar = (zx + 8, height - 14, zx + zw - 9, height - 7)
+    return Layout(icon, texts, (bar, look.meter) if look.meter else None)
 
 
 def _zone_texts(look, area, height):

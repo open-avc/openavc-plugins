@@ -46,12 +46,12 @@ from .declared_decks import (
     virtual_deck_entries,
 )
 from .key_entries import (
-    VARIABLE_PREFIX,
     action_list,
     assignment_for,
     objects,
     press_actions,
     unwrap_binding,
+    variable_name,
     write_door,
 )
 from .deck_answers import answer_address, answer_serial, scan_listing
@@ -1768,7 +1768,7 @@ class StreamDeckPlugin:
         if door == "state":
             await self.api.state_set(key, value)
         elif door == "variable":
-            await self.api.variable_set(key[len(VARIABLE_PREFIX):], value)
+            await self.api.variable_set(variable_name(key), value)
         else:
             self.api.log(
                 f"Ignoring state.set to '{key}': a surface button may only write "
@@ -2086,7 +2086,7 @@ class StreamDeckPlugin:
         draw.rectangle([zx, 0, zx + zw - 1, height - 1], fill=look.bg_color)
         icon_img = self._render_icon(look.icon, look.text_color, 72) if look.icon else None
         layout = zone_layout((zx, zw), height, look, icon_img is not None)
-        self._paint_layout(img, layout, look, icon_img)
+        self._paint_layout(img, layout, look.text_color, icon_img)
         if zone.get("index") in session.flash_zones:
             self._lighten_zone(img, zx, zw, height)
         if zx > 0:
@@ -2202,7 +2202,9 @@ class StreamDeckPlugin:
     @staticmethod
     def _strip_format(deck):
         """The touch strip's format and its width and height, as
-        ``(format, width, height)``; None when the deck cannot say."""
+        ``(format, width, height)``; None when the deck cannot say. Unlike
+        ``_panel_size`` (the overlay's reader) a side of 0 comes back as the
+        deck reports it: the renders draw and send what they are told."""
         try:
             fmt = deck.touchscreen_image_format()
             width, height = fmt["size"]
@@ -2287,9 +2289,9 @@ class StreamDeckPlugin:
         if not 0 <= zone_index < len(zones):
             await self._render_touchscreen(session)
             return
-        await self._send_zone_region(session, zones[zone_index], width, height)
+        await self._redraw_zone_region(session, zones[zone_index], width, height)
 
-    async def _send_zone_region(self, session, zone, width, height):
+    async def _redraw_zone_region(self, session, zone, width, height):
         """Draw ``zone`` into the cached strip image, mirror the whole strip,
         and send the zone's columns clipped to the strip's ``width``; nothing
         is sent for a zone wholly off the strip."""
@@ -2726,21 +2728,20 @@ class StreamDeckPlugin:
         img = Image.new("RGB", (width, height), look.bg_color)
         icon_img = self._render_icon(look.icon, look.text_color, width) if look.icon else None
         layout = key_layout((width, height), look, icon_img is not None)
-        self._paint_layout(img, layout, look, icon_img)
+        self._paint_layout(img, layout, look.text_color, icon_img)
         return img
 
-    def _paint_layout(self, img, layout, look, icon_img):
+    def _paint_layout(self, img, layout, text_color, icon_img):
         """Paint a layout (layouts.py) onto ``img``: the rendered icon resized
-        into its spot, each text slot in the look's text color, then the
-        meter bar."""
+        into its spot, each text slot in ``text_color``, then the meter."""
         spot = layout.icon
         if spot is not None:
             icon = icon_img.resize((spot.size, spot.size), Image.LANCZOS)
             img.paste(icon, (spot.x, spot.y), icon)
         for slot in layout.texts:
-            self._paste_label(img, slot, look.text_color)
-        if layout.meter_bar is not None:
-            self._draw_meter_bar(img, layout.meter_bar, look.meter)
+            self._paste_label(img, slot, text_color)
+        if layout.meter is not None:
+            self._draw_meter_bar(img, *layout.meter)
 
     @staticmethod
     def _draw_meter_bar(img, bar, meter):

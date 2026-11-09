@@ -21,7 +21,7 @@ check reports a key it refuses.
 ACTION_KINDS = ("macro", "device.command", "state.set", "navigate")
 
 # What a user variable's state key starts with; the variable's name follows.
-VARIABLE_PREFIX = "var."
+_VARIABLE_PREFIX = "var."
 
 
 def objects(value):
@@ -110,6 +110,12 @@ def write_door(key, plugin_id):
     the panel's plugin bridge keeps too). ``key`` must be text."""
     if key.startswith(f"plugin.{plugin_id}."):
         return "state"
-    if key.startswith(VARIABLE_PREFIX):
+    if key.startswith(_VARIABLE_PREFIX):
         return "variable"
     return None
+
+
+def variable_name(key):
+    """The user variable a ``"variable"`` key (``write_door``) names: the
+    key after ``var.``."""
+    return key[len(_VARIABLE_PREFIX):]
