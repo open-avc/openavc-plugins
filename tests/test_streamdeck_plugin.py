@@ -49,6 +49,10 @@ from control_surfaces.streamdeck.virtual_deck import VIRTUAL_MODELS  # noqa: E40
 from control_surfaces.streamdeck.key_entries import press_actions  # noqa: E402
 from control_surfaces.streamdeck.watch_keys import button_watches_key  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
+from control_surfaces.streamdeck.looks import (  # noqa: E402
+    METER_DEFAULT_COLOR,
+    meter_fill,
+)
 import control_surfaces.streamdeck.net_deck as net_deck  # noqa: E402
 
 try:
@@ -1185,24 +1189,24 @@ async def test_touch_flash_marks_zone_and_clear_redraws(monkeypatch):
 def test_meter_resolution_rules():
     plugin, _state = _make_plugin({})
     # Explicit meter with explicit bounds.
-    assert plugin._resolve_meter({"min": 0, "max": 200}, 50) == (
-        0.25, plugin._METER_DEFAULT_COLOR)
+    assert meter_fill({"min": 0, "max": 200}, 50) == (
+        0.25, METER_DEFAULT_COLOR)
     # Bounds default from the surrounding adjust when the meter is implicit.
-    assert plugin._resolve_meter(
+    assert meter_fill(
         None, 25, {"key": "var.v", "min": 0, "max": 50}) == (
-        0.5, plugin._METER_DEFAULT_COLOR)
+        0.5, METER_DEFAULT_COLOR)
     # Implicit meter with no adjust bounds never draws.
-    assert plugin._resolve_meter(None, 25, {"key": "var.v"}) is None
-    assert plugin._resolve_meter(None, 25, None) is None
+    assert meter_fill(None, 25, {"key": "var.v"}) is None
+    assert meter_fill(None, 25, None) is None
     # Explicit meter without bounds anywhere defaults to 0..100.
-    assert plugin._resolve_meter({}, 50) == (0.5, plugin._METER_DEFAULT_COLOR)
-    assert plugin._resolve_meter(True, 150) == (1.0, plugin._METER_DEFAULT_COLOR)
+    assert meter_fill({}, 50) == (0.5, METER_DEFAULT_COLOR)
+    assert meter_fill(True, 150) == (1.0, METER_DEFAULT_COLOR)
     # meter: false always disables; non-numeric values never draw.
-    assert plugin._resolve_meter(False, 50, {"min": 0, "max": 100}) is None
-    assert plugin._resolve_meter({}, "HDMI 1") is None
-    assert plugin._resolve_meter({}, None) is None
+    assert meter_fill(False, 50, {"min": 0, "max": 100}) is None
+    assert meter_fill({}, "HDMI 1") is None
+    assert meter_fill({}, None) is None
     # Clamping below min.
-    assert plugin._resolve_meter({"min": 10, "max": 20}, 5)[0] == 0.0
+    assert meter_fill({"min": 10, "max": 20}, 5)[0] == 0.0
 
 
 def test_meter_threshold_colors():
@@ -1214,9 +1218,9 @@ def test_meter_threshold_colors():
             {"above": 95, "color": "#ff0000"},
         ],
     }
-    assert plugin._resolve_meter(meter, 50)[1] == "#00ff00"
-    assert plugin._resolve_meter(meter, 85)[1] == "#ffaa00"
-    assert plugin._resolve_meter(meter, 99)[1] == "#ff0000"
+    assert meter_fill(meter, 50)[1] == "#00ff00"
+    assert meter_fill(meter, 85)[1] == "#ffaa00"
+    assert meter_fill(meter, 99)[1] == "#ff0000"
 
 
 @pytest.mark.asyncio
@@ -1236,7 +1240,7 @@ async def test_default_zone_carries_dial_display_fields():
     assert resolved["meter"] is None
     state.set("var.volume", 70, source="test")
     resolved = await plugin._resolve_display(zones[0], "#000", "#fff")
-    assert resolved["meter"] == (0.7, plugin._METER_DEFAULT_COLOR)
+    assert resolved["meter"] == (0.7, METER_DEFAULT_COLOR)
 
 
 @pytest.mark.asyncio
@@ -1256,7 +1260,7 @@ async def test_resolve_display_value_unit_and_feedback():
     resolved = await plugin._resolve_display(element, "#000", "#fff")
     assert resolved["value_text"] == "42 dB"
     assert resolved["bg"] == "#ff0000"          # clip active -> red zone
-    assert resolved["meter"] == (0.42, plugin._METER_DEFAULT_COLOR)
+    assert resolved["meter"] == (0.42, METER_DEFAULT_COLOR)
     state.set("device.amp.clip", False, source="test")
     resolved = await plugin._resolve_display(element, "#000", "#fff")
     assert resolved["bg"] == "#101010"

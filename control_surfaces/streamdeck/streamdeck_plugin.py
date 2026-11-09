@@ -12,7 +12,9 @@ auto_brightness are judged by), config_check.py (what validate_config
 reports), declared_decks.py (the virtual and network decks the config
 declares, and the writes to a network deck's entry), dials.py (what a dial
 gesture runs, and the touch strip's zones), key_entries.py (which config entry
-a key runs, and the actions a binding holds), virtual_deck.py (a deck that
+a key runs, and the actions a binding holds), looks.py (what a key, a strip
+zone or an info item shows: the value line, the meter, the feedback style),
+virtual_deck.py (a deck that
 exists only in software) and watch_keys.py (which state keys a deck reads, and
 what each one redraws).
 """
@@ -56,6 +58,7 @@ from .dials import (
     shows_on_strip,
     turn_route,
 )
+from .looks import meter_fill, styled, value_line
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
 from .watch_keys import deck_watch, keys_watching, zone_watches_key
@@ -2055,114 +2058,32 @@ class StreamDeckPlugin:
 
     # ──── Display elements (shared by zones, info items, and keys) ────
 
-    _METER_DEFAULT_COLOR = "#8ab493"
+    async def _live_label(self, element):
+        """An element's label: the value its ``label_source`` reads when that
+        is set, else its own ``label``."""
+        label = element.get("label", "")
+        if element.get("label_source"):
+            live = await self.api.state_get(element["label_source"])
+            if live is not None:
+                return str(live)
+        return label
 
-    @staticmethod
-    def _meter_bounds(meter, bounds_source):
-        """Resolve a meter's min/max: explicit > surrounding adjust > 0..100."""
-        meter = meter if isinstance(meter, dict) else {}
-        bounds = bounds_source if isinstance(bounds_source, dict) else {}
-        minimum = coerce_numeric(meter.get("min"))
-        maximum = coerce_numeric(meter.get("max"))
-        if minimum is None:
-            minimum = coerce_numeric(bounds.get("min"))
-        if maximum is None:
-            maximum = coerce_numeric(bounds.get("max"))
-        if minimum is None:
-            minimum = 0
-        if maximum is None:
-            maximum = 100
-        return (minimum, maximum) if maximum > minimum else (0, 100)
+    async def _live_value(self, element):
+        """An element's live value and its value line (looks.value_line), or
+        ``(None, "")`` without one."""
+        if not element.get("value_source"):
+            return None, ""
+        raw_value = await self.api.state_get(element["value_source"])
+        if raw_value is None:
+            return None, ""
+        return raw_value, value_line(raw_value, element.get("unit"))
 
-    def _resolve_meter(self, meter, raw_value, bounds_source=None):
-        """Resolve a meter config to ``(fill_fraction, color)`` or None.
-
-        A meter draws when explicitly enabled (``"meter": {}``/``true``), or
-        automatically when the surrounding adjust/drag_adjust declares both
-        bounds — so a volume dial gets a level bar with zero extra config.
-        ``"meter": false`` always disables; a non-numeric value never draws.
-        Color: the highest matching ``thresholds`` entry ({above, color})
-        wins, else ``color``, else the accent default.
-        """
-        if meter is False:
-            return None
-        explicit = meter is True or isinstance(meter, dict)
-        bounds = bounds_source if isinstance(bounds_source, dict) else {}
-        auto = (
-            coerce_numeric(bounds.get("min")) is not None
-            and coerce_numeric(bounds.get("max")) is not None
-        )
-        if not explicit and not auto:
-            return None
-        value = coerce_numeric(raw_value)
-        if value is None:
-            return None
-        minimum, maximum = self._meter_bounds(meter, bounds_source)
-        frac = max(0.0, min(1.0, (value - minimum) / (maximum - minimum)))
-        meter = meter if isinstance(meter, dict) else {}
-        color = meter.get("color") or self._METER_DEFAULT_COLOR
-        thresholds = meter.get("thresholds")
-        if isinstance(thresholds, list):
-            best = None
-            for rule in thresholds:
-                if not isinstance(rule, dict) or not rule.get("color"):
-                    continue
-                above = coerce_numeric(rule.get("above"))
-                if above is None or value < above:
-                    continue
-                if best is None or above > best[0]:
-                    best = (above, rule["color"])
-            if best:
-                color = best[1]
-        return frac, color
-
-    async def _apply_feedback_styles(self, feedback, label, icon, bg_color, text_color):
-        """Evaluate a feedback config and return the styled
-        ``(label, icon, bg_color, text_color)``.
-
-        The one conditional-styling path, shared by keys, touchscreen zones,
-        and info items: a multi-state ``states`` map keyed by the watched
-        value, or the simple active/inactive condition pair.
-        """
+    async def _styled_look(self, feedback, look):
+        """``look`` restyled by a feedback config (looks.styled), reading the
+        key it watches; without a key it reads nothing and keeps the look."""
         if not (isinstance(feedback, dict) and feedback.get("key")):
-            return label, icon, bg_color, text_color
-        value = await self.api.state_get(feedback["key"])
-
-        states = feedback.get("states")
-        if states and isinstance(states, dict):
-            state_str = str(value) if value is not None else ""
-            appearance = states.get(state_str) or states.get(
-                feedback.get("default_state", "")
-            )
-            if appearance and isinstance(appearance, dict):
-                bg_color = appearance.get("bg_color", bg_color) or bg_color
-                text_color = appearance.get("text_color", text_color) or text_color
-                if appearance.get("label"):
-                    label = appearance["label"]
-                if appearance.get("icon"):
-                    icon = appearance["icon"]
-            return label, icon, bg_color, text_color
-
-        condition = feedback.get("condition", {})
-        style_active = feedback.get("style_active", {})
-        style_inactive = feedback.get("style_inactive", {})
-        expected = condition.get("equals") if isinstance(condition, dict) else None
-        is_active = reads_as_on(value, expected)
-        if is_active and isinstance(style_active, dict):
-            bg_color = style_active.get("bg_color", bg_color) or bg_color
-            text_color = style_active.get("text_color", text_color) or text_color
-            if feedback.get("label_active"):
-                label = feedback["label_active"]
-            if style_active.get("icon"):
-                icon = style_active["icon"]
-        elif not is_active and isinstance(style_inactive, dict):
-            bg_color = style_inactive.get("bg_color", bg_color) or bg_color
-            text_color = style_inactive.get("text_color", text_color) or text_color
-            if feedback.get("label_inactive"):
-                label = feedback["label_inactive"]
-            if style_inactive.get("icon"):
-                icon = style_inactive["icon"]
-        return label, icon, bg_color, text_color
+            return look
+        return styled(feedback, await self.api.state_get(feedback["key"]), look)
 
     async def _resolve_display(self, element, default_bg, default_fg):
         """Resolve a display element (zone / info item) to drawables.
@@ -2172,33 +2093,18 @@ class StreamDeckPlugin:
         ``value_static`` for fixed text), ``meter`` (bounds defaulting from
         the element's drag_adjust), and ``feedback`` (conditional styling).
         """
-        label = element.get("label", "")
-        if element.get("label_source"):
-            live = await self.api.state_get(element["label_source"])
-            if live is not None:
-                label = str(live)
+        label = await self._live_label(element)
         icon = element.get("icon") or None
         bg = element.get("bg_color") or default_bg
         fg = element.get("text_color") or default_fg
-
-        raw_value = None
-        value_text = ""
         if element.get("value_static") is not None:
-            value_text = str(element["value_static"])
-        elif element.get("value_source"):
-            raw_value = await self.api.state_get(element["value_source"])
-            if raw_value is not None:
-                value_text = str(raw_value)
-                unit = str(element.get("unit") or "")
-                if unit:
-                    value_text += unit if unit == "%" else f" {unit}"
-
-        label, icon, bg, fg = await self._apply_feedback_styles(
-            element.get("feedback"), label, icon, bg, fg
+            raw_value, value_text = None, str(element["value_static"])
+        else:
+            raw_value, value_text = await self._live_value(element)
+        label, icon, bg, fg = await self._styled_look(
+            element.get("feedback"), (label, icon, bg, fg)
         )
-        meter = self._resolve_meter(
-            element.get("meter"), raw_value, element.get("drag_adjust")
-        )
+        meter = meter_fill(element.get("meter"), raw_value, element.get("drag_adjust"))
         return {
             "label": label, "icon": icon, "value_text": value_text,
             "bg": bg, "fg": fg, "meter": meter,
@@ -2804,39 +2710,22 @@ class StreamDeckPlugin:
         text_color = self._deck_setting(session, "text_color", "#e0e0e0")
         if not assignment:
             return _KeyLook("", None, bg_color, text_color, "", None)
-        label = assignment.get("label", "")
+        label = await self._live_label(assignment)
         icon = assignment.get("icon") or None
-        if assignment.get("label_source"):
-            live_label = await self.api.state_get(assignment["label_source"])
-            if live_label is not None:
-                label = str(live_label)
-        raw_value, value_text = await self._key_value(assignment)
+        raw_value, value_text = await self._live_value(assignment)
         # Keys have no surrounding adjust, so a key meter draws only when
         # enabled (bounds default to 0..100).
-        meter = self._resolve_meter(assignment.get("meter"), raw_value)
+        meter = meter_fill(assignment.get("meter"), raw_value)
         bg_color = assignment.get("bg_color") or bg_color
         text_color = assignment.get("text_color") or text_color
         bindings = assignment.get("bindings", {})
         if not isinstance(bindings, dict):
             return _KeyLook(label, icon, bg_color, text_color, value_text, meter)
         label = await self._toggle_label(bindings, label)
-        label, icon, bg_color, text_color = await self._apply_feedback_styles(
-            bindings.get("feedback"), label, icon, bg_color, text_color
+        label, icon, bg_color, text_color = await self._styled_look(
+            bindings.get("feedback"), (label, icon, bg_color, text_color)
         )
         return _KeyLook(label, icon, bg_color, text_color, value_text, meter)
-
-    async def _key_value(self, assignment):
-        """A key's live value and its value line (the unit after a space, but
-        a percent sign right after the number); nothing without one."""
-        if not assignment.get("value_source"):
-            return None, ""
-        raw_value = await self.api.state_get(assignment["value_source"])
-        if raw_value is None:
-            return None, ""
-        unit = str(assignment.get("unit") or "")
-        if not unit:
-            return raw_value, str(raw_value)
-        return raw_value, str(raw_value) + (unit if unit == "%" else f" {unit}")
 
     async def _toggle_label(self, bindings, label):
         """A toggle key's ``on_label`` while its toggle key reads on and its

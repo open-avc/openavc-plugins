@@ -17,7 +17,6 @@ No hardware: decks are stand-ins that answer only what these paths ask.
 Run from the openavc-plugins root: pytest tests/test_streamdeck_looks_and_requests.py -v
 """
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -34,6 +33,11 @@ if str(_PLUGINS_ROOT) not in sys.path:
 
 from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
+from control_surfaces.streamdeck.looks import (  # noqa: E402
+    METER_DEFAULT_COLOR,
+    meter_bounds,
+    meter_fill,
+)
 
 try:
     from openavc.core.plugin_api import PluginAPI
@@ -135,7 +139,7 @@ async def test_a_states_map_styles_by_the_value_as_text():
         "2": {"bg_color": "#222222", "text_color": "#333333",
               "label": "Two", "icon": "tv"},
     }}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == (
+    assert await plugin._styled_look(feedback, BASE) == (
         "Two", "tv", "#222222", "#333333")
 
 
@@ -146,13 +150,13 @@ async def test_a_states_map_falls_back_to_its_default_state_then_to_nothing():
     feedback = {"key": "var.src", "default_state": "off", "states": {
         "off": {"bg_color": "#000001"},
     }}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == (
+    assert await plugin._styled_look(feedback, BASE) == (
         "Label", "bolt", "#000001", "#eeeeee")
     # No default_state: the "" entry is the fallback a missing value also reads.
     feedback = {"key": "var.src", "states": {"x": {"bg_color": "#000002"}}}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
     feedback = {"key": "var.none", "states": {"": {"bg_color": "#000003"}}}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == (
+    assert await plugin._styled_look(feedback, BASE) == (
         "Label", "bolt", "#000003", "#eeeeee")
 
 
@@ -163,9 +167,9 @@ async def test_a_states_entry_keeps_what_it_leaves_empty_and_is_ignored_when_no_
     feedback = {"key": "var.src", "states": {
         "a": {"bg_color": "", "text_color": None, "label": "", "icon": ""},
     }}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
     feedback = {"key": "var.src", "states": {"a": "red"}}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
 
 
 @pytest.mark.asyncio
@@ -175,11 +179,11 @@ async def test_a_states_map_wins_over_the_condition_pair_and_an_empty_one_does_n
     pair = {"style_active": {"bg_color": "#00ff00"}, "label_active": "ON"}
     # A states map with no entry for the value styles nothing, pair or not.
     feedback = dict(pair, key="var.on", states={"x": {"bg_color": "#ff0000"}})
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
     # An empty map, or one that is not an object, reads the pair.
     for states in ({}, ["x"], None):
         feedback = dict(pair, key="var.on", states=states)
-        assert await plugin._apply_feedback_styles(feedback, *BASE) == (
+        assert await plugin._styled_look(feedback, BASE) == (
             "ON", "bolt", "#00ff00", "#eeeeee")
 
 
@@ -193,7 +197,7 @@ async def test_the_inactive_style_sets_its_colors_label_and_icon():
     feedback = {"key": "var.on", "label_inactive": "OFF",
                 "style_inactive": {"bg_color": "#440000", "text_color": "#cccccc",
                                    "icon": "power-off"}}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == (
+    assert await plugin._styled_look(feedback, BASE) == (
         "OFF", "power-off", "#440000", "#cccccc")
 
 
@@ -204,10 +208,10 @@ async def test_the_active_style_reads_the_condition_equals_and_the_label_sits_ou
     feedback = {"key": "var.src", "condition": {"equals": "hdmi2"},
                 "style_active": {"icon": "tv", "label": "ignored"},
                 "label_active": "HDMI 2"}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == (
+    assert await plugin._styled_look(feedback, BASE) == (
         "HDMI 2", "tv", "#111111", "#eeeeee")
     _set(state, {"var.src": "hdmi1"})
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
 
 
 @pytest.mark.asyncio
@@ -215,18 +219,18 @@ async def test_a_style_that_is_no_object_or_empty_fields_keep_the_look():
     plugin, state = _plugin()
     _set(state, {"var.on": True})
     feedback = {"key": "var.on", "style_active": "green", "label_active": "ON"}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
     _set(state, {"var.on": False})
     feedback = {"key": "var.on", "style_inactive": ["red"], "label_inactive": "OFF"}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
     feedback = {"key": "var.on", "style_inactive": {"bg_color": "", "text_color": ""},
                 "label_inactive": ""}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
     # A condition that is no object compares against nothing.
     _set(state, {"var.on": 1})
     feedback = {"key": "var.on", "condition": "1",
                 "style_active": {"bg_color": "#00ff00"}}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == (
+    assert await plugin._styled_look(feedback, BASE) == (
         "Label", "bolt", "#00ff00", "#eeeeee")
 
 
@@ -236,7 +240,7 @@ async def test_a_feedback_with_no_key_or_no_object_reads_no_state():
     reads = []
     _record(plugin.api, reads, "state_get")
     for feedback in (None, "var.on", {}, {"key": ""}, {"states": {"": {}}}):
-        assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+        assert await plugin._styled_look(feedback, BASE) == BASE
     assert reads == []
 
 
@@ -254,23 +258,23 @@ def test_a_meter_takes_the_highest_threshold_reached_in_any_order():
         {"above": 50, "color": "#00ffff"},
         {"above": 70, "color": ""},
     ]}
-    assert plugin._resolve_meter(meter, 60) == (0.6, "#ffff00")
-    assert plugin._resolve_meter(meter, 95) == (0.95, "#ff0000")
-    assert plugin._resolve_meter(meter, 49) == (0.49, "#0000ff")
-    assert plugin._resolve_meter(dict(meter, thresholds="x"), 95) == (0.95, "#0000ff")
+    assert meter_fill(meter, 60) == (0.6, "#ffff00")
+    assert meter_fill(meter, 95) == (0.95, "#ff0000")
+    assert meter_fill(meter, 49) == (0.49, "#0000ff")
+    assert meter_fill(dict(meter, thresholds="x"), 95) == (0.95, "#0000ff")
 
 
 def test_a_meter_bound_that_is_no_number_falls_back_and_a_reversed_pair_resets():
     plugin, _ = _plugin()
-    assert plugin._meter_bounds({"min": "a", "max": 50}, {"min": 10}) == (10, 50)
-    assert plugin._meter_bounds({"min": 60, "max": 50}, None) == (0, 100)
-    assert plugin._meter_bounds("x", {"min": 0, "max": 10}) == (0, 10)
-    assert plugin._resolve_meter({"color": ""}, 30, {"min": 0, "max": 60}) == (
-        0.5, plugin._METER_DEFAULT_COLOR)
+    assert meter_bounds({"min": "a", "max": 50}, {"min": 10}) == (10, 50)
+    assert meter_bounds({"min": 60, "max": 50}, None) == (0, 100)
+    assert meter_bounds("x", {"min": 0, "max": 10}) == (0, 10)
+    assert meter_fill({"color": ""}, 30, {"min": 0, "max": 60}) == (
+        0.5, METER_DEFAULT_COLOR)
     # Only one bound around it: no automatic meter.
-    assert plugin._resolve_meter(None, 30, {"min": 0}) is None
-    assert plugin._resolve_meter(None, 30, {"min": 0, "max": 60}) == (
-        0.5, plugin._METER_DEFAULT_COLOR)
+    assert meter_fill(None, 30, {"min": 0}) is None
+    assert meter_fill(None, 30, {"min": 0, "max": 60}) == (
+        0.5, METER_DEFAULT_COLOR)
 
 
 # ──── A display element (a zone or an info item) ────
@@ -300,7 +304,7 @@ async def test_a_fixed_value_wins_over_a_live_one_and_takes_no_unit_or_meter():
     resolved = await plugin._resolve_display(
         dict(element, value_static=None), "#000", "#fff")
     assert resolved["value_text"] == "40 dB" and resolved["meter"] == (
-        0.4, plugin._METER_DEFAULT_COLOR)
+        0.4, METER_DEFAULT_COLOR)
     resolved = await plugin._resolve_display(
         {"value_source": "var.level", "unit": "%"}, "#000", "#fff")
     assert resolved["value_text"] == "40%"
@@ -818,7 +822,7 @@ async def test_an_active_style_with_empty_colors_keeps_the_look():
     _set(state, {"var.on": True})
     feedback = {"key": "var.on",
                 "style_active": {"bg_color": "", "text_color": None, "icon": ""}}
-    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+    assert await plugin._styled_look(feedback, BASE) == BASE
 
 
 @pytest.mark.asyncio
