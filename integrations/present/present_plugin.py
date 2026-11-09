@@ -1026,11 +1026,15 @@ class PresentPlugin:
         display = None
         if display_records.ID_RE.fullmatch(display_id or ""):
             display = self._find_display(display_id)
-        supplied = (key or "").strip()
-        expected = (display or {}).get("display_key") or ""
-        if display is None or not supplied or not secrets.compare_digest(supplied, expected):
+        if display is None or not self._key_matches(key, display):
             raise HTTPException(401, "Invalid or missing display key")
         return display
+
+    @staticmethod
+    def _key_matches(key, display):
+        supplied = (key or "").strip()
+        expected = display.get("display_key") or ""
+        return bool(supplied) and secrets.compare_digest(supplied, expected)
 
     def _build_guest_router(self):
         guest = APIRouter()
@@ -1042,86 +1046,34 @@ class PresentPlugin:
         # it is checked at the POST /connect exchange, not the page serve.
         @guest.get("/")
         async def connect_page():
-            html = (_PLUGIN_DIR / "panel" / "connect.html").read_text(encoding="utf-8")
-            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+            return self._panel_page("connect.html")
 
         @guest.post("/connect")
         async def connect(data: ConnectIn):
-            code = (data.code or "").strip()
-            current = self._current_code()
-            if not code or not current or not secrets.compare_digest(code, current):
-                # 401 feeds the platform's brute-force accounting.
-                raise HTTPException(
-                    401, "That join code isn't right. Check the code on the display."
-                )
-            label = " ".join((data.name or "").split())[:_NAME_MAX_CHARS]
-            presenter = self._slugify_presenter(label)
-            if not presenter:
-                raise HTTPException(422, "Enter your name.")
-            if presenter == _AUTO:
-                raise HTTPException(422, "That name is reserved. Use a different name.")
-            if presenter in self._presence:
-                raise HTTPException(
-                    409,
-                    f'Someone is already presenting as "{self._label_for(presenter)}". '
-                    "Use a different name.",
-                )
-            self._labels[presenter] = label
-            # The scope binds the token to this ingest name: it can publish
-            # in/<presenter> and nothing else.
-            token, expires_at = self.api.mint_guest_token(
-                f"whip:{presenter}", ttl=_GUEST_TOKEN_TTL_SECONDS
-            )
-            return {
-                "token": token,
-                "expires_at": expires_at,
-                "presenter": presenter,
-                "label": label,
-                "space_name": await self._space_name(),
-            }
+            return await self._connect_guest(data)
 
         # ── WHIP (WebRTC publish) reverse proxy ──
         # The Connect page POSTs its SDP offer here with the guest token from
         # the /connect exchange; we forward to the sidecar's WHIP endpoint for
         # in/<presenter>. Signaling is loopback-only on the sidecar, and its
         # localhost "any" user carries publish (no read), so the proxied
-        # publish needs no credential injection. Same Location rewrite as the
-        # WHEP proxy below, so trickle/teardown come back through the token
-        # check.
+        # publish needs no credential injection.
         @guest.post("/whip/{presenter}")
         async def whip_publish(presenter: str, request: Request, token: str = ""):
-            self._validate_presenter(presenter)
-            self._require_guest_token(token, presenter)
-            resp = await self.api.proxy_to(
-                self._whip_url(presenter), request, allow_internal=True
-            )
-            location = resp.headers.get("location")
-            if location:
-                secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-                resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
-            return resp
+            self._check_publisher(presenter, token)
+            return await self._proxy_offer(self._whip_url(presenter), request)
 
         @guest.patch("/whip/{presenter}/{secret}")
         async def whip_trickle(
             presenter: str, secret: str, request: Request, token: str = ""
         ):
-            self._validate_presenter(presenter)
-            self._require_guest_token(token, presenter)
-            self._validate_secret(secret)
-            return await self.api.proxy_to(
-                self._whip_url(presenter, secret), request, allow_internal=True
-            )
+            return await self._whip_session(presenter, secret, request, token)
 
         @guest.delete("/whip/{presenter}/{secret}")
         async def whip_teardown(
             presenter: str, secret: str, request: Request, token: str = ""
         ):
-            self._validate_presenter(presenter)
-            self._require_guest_token(token, presenter)
-            self._validate_secret(secret)
-            return await self.api.proxy_to(
-                self._whip_url(presenter, secret), request, allow_internal=True
-            )
+            return await self._whip_session(presenter, secret, request, token)
 
         @guest.get("/display/{display_id}")
         async def display_page(display_id: str, key: str = ""):
@@ -1131,76 +1083,149 @@ class PresentPlugin:
                 # Friendly page for a human at the display, still a 401 so
                 # bad-key guessing throttles like any other guest failure.
                 return HTMLResponse(_DISPLAY_ERROR_HTML, status_code=401)
-            html = (_PLUGIN_DIR / "panel" / "display.html").read_text(encoding="utf-8")
-            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+            return self._panel_page("display.html")
 
         @guest.get("/displays/{display_id}/status")
         async def display_status(display_id: str, key: str = ""):
-            display = self._guest_display(display_id, key)
-            live = await self._scan_presenters()
-            if live is None:
-                raise HTTPException(503, "Media service is not running")
-            presenter = self._resolve_source(display["id"], live)
-            return {
-                "display": display["id"],
-                "label": display.get("label") or display["id"],
-                "space_name": await self._space_name(),
-                "state": "live" if presenter else "idle",
-                "presenter": presenter,
-                "presenter_label": self._label_for(presenter) if presenter else "",
-                "path": f"{_INGEST_PREFIX}/{presenter}" if presenter else "",
-                "code": self._current_code(),
-                # What the idle card tells guests to type — plugin-chosen, not
-                # derived from the display's own vantage (which is wrong on
-                # the server host and on multi-network installs).
-                "join_url": await self._join_url(),
-            }
+            return await self._display_status(self._guest_display(display_id, key))
 
         # ── WHEP (WebRTC playback) reverse proxy ──
         # The Display page's WHEP client POSTs an SDP offer here; we forward it
         # to the sidecar's WebRTC server (localhost, Basic-authed via the URL
-        # userinfo httpx applies) and return the SDP answer. MediaMTX answers
-        # with a path-absolute Location (/{path}/whep/{session}); left as-is
-        # the browser would resolve the follow-up PATCH/DELETE against the
-        # origin root, bypassing this mount. So we rewrite Location to sit
-        # under the incoming request path — the trickle and teardown then come
-        # back through here (and through the key check).
+        # userinfo httpx applies) and return the SDP answer.
         @guest.post("/whep/{display_id}/{presenter}")
         async def whep_offer(display_id: str, presenter: str, request: Request, key: str = ""):
-            self._guest_display(display_id, key)
-            self._validate_presenter(presenter)
-            resp = await self.api.proxy_to(
-                self._whep_url(presenter), request, allow_internal=True
-            )
-            location = resp.headers.get("location")
-            if location:
-                secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-                resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
-            return resp
+            self._check_viewer(display_id, key, presenter)
+            return await self._proxy_offer(self._whep_url(presenter), request)
 
         @guest.patch("/whep/{display_id}/{presenter}/{secret}")
         async def whep_trickle(
             display_id: str, presenter: str, secret: str, request: Request, key: str = ""
         ):
-            self._guest_display(display_id, key)
-            self._validate_presenter(presenter)
-            self._validate_secret(secret)
-            return await self.api.proxy_to(
-                self._whep_url(presenter, secret), request, allow_internal=True
-            )
+            return await self._whep_session(display_id, presenter, secret, request, key)
 
         @guest.delete("/whep/{display_id}/{presenter}/{secret}")
         async def whep_teardown(
             display_id: str, presenter: str, secret: str, request: Request, key: str = ""
         ):
-            self._guest_display(display_id, key)
-            self._validate_presenter(presenter)
-            self._validate_secret(secret)
-            return await self.api.proxy_to(
-                self._whep_url(presenter, secret), request, allow_internal=True
-            )
+            return await self._whep_session(display_id, presenter, secret, request, key)
 
         return guest
+
+    @staticmethod
+    def _panel_page(name):
+        """One of the plugin's own pages, never cached by the browser."""
+        html = (_PLUGIN_DIR / "panel" / name).read_text(encoding="utf-8")
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+    async def _connect_guest(self, data):
+        """The Connect page's exchange: the join code shown on the displays
+        and a name, for a guest token scoped to that presenter's ingest name."""
+        self._check_join_code(data.code)
+        label = " ".join((data.name or "").split())[:_NAME_MAX_CHARS]
+        presenter = self._new_presenter_name(label)
+        self._labels[presenter] = label
+        # The scope binds the token to this ingest name: it can publish
+        # in/<presenter> and nothing else.
+        token, expires_at = self.api.mint_guest_token(
+            f"whip:{presenter}", ttl=_GUEST_TOKEN_TTL_SECONDS
+        )
+        return {
+            "token": token,
+            "expires_at": expires_at,
+            "presenter": presenter,
+            "label": label,
+            "space_name": await self._space_name(),
+        }
+
+    def _check_join_code(self, code):
+        code = (code or "").strip()
+        current = self._current_code()
+        if not code or not current or not secrets.compare_digest(code, current):
+            # 401 feeds the platform's brute-force accounting.
+            raise HTTPException(
+                401, "That join code isn't right. Check the code on the display."
+            )
+
+    def _new_presenter_name(self, label):
+        """The ingest name for a guest typing ``label``, or the refusal."""
+        presenter = self._slugify_presenter(label)
+        if not presenter:
+            raise HTTPException(422, "Enter your name.")
+        if presenter == _AUTO:
+            raise HTTPException(422, "That name is reserved. Use a different name.")
+        if presenter in self._presence:
+            raise HTTPException(
+                409,
+                f'Someone is already presenting as "{self._label_for(presenter)}". '
+                "Use a different name.",
+            )
+        return presenter
+
+    async def _display_status(self, display):
+        """What a Display page polls: who it shows, and what its idle card says."""
+        live = await self._scan_presenters()
+        if live is None:
+            raise HTTPException(503, "Media service is not running")
+        presenter = self._resolve_source(display["id"], live)
+        return {
+            "display": display["id"],
+            "label": display.get("label") or display["id"],
+            "space_name": await self._space_name(),
+            "state": "live" if presenter else "idle",
+            "presenter": presenter,
+            "presenter_label": self._label_for(presenter) if presenter else "",
+            "path": f"{_INGEST_PREFIX}/{presenter}" if presenter else "",
+            "code": self._current_code(),
+            # What the idle card tells guests to type — plugin-chosen, not
+            # derived from the display's own vantage (which is wrong on
+            # the server host and on multi-network installs).
+            "join_url": await self._join_url(),
+        }
+
+    # ──── The WebRTC signalling proxy ────
+    # Each check runs before anything reaches the sidecar, in the order
+    # written. A publisher (WHIP) is checked by name, then token; a viewer
+    # (WHEP) by display key, then the presenter's name; a session's trickle
+    # and teardown also by the session id.
+
+    def _check_publisher(self, presenter, token):
+        self._validate_presenter(presenter)
+        self._require_guest_token(token, presenter)
+
+    def _check_viewer(self, display_id, key, presenter):
+        self._guest_display(display_id, key)
+        self._validate_presenter(presenter)
+
+    async def _proxy_offer(self, url, request):
+        """Forward an SDP offer to the sidecar and return its answer.
+
+        MediaMTX answers with a path-absolute Location (/{path}/whep/{session});
+        left as-is the browser would resolve the follow-up PATCH/DELETE
+        against the origin root, bypassing this mount. So Location is
+        rewritten to sit under the incoming request path: the trickle and
+        teardown then come back through here, and through the checks.
+        """
+        resp = await self.api.proxy_to(url, request, allow_internal=True)
+        location = resp.headers.get("location")
+        if location:
+            secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
+        return resp
+
+    async def _whip_session(self, presenter, secret, request, token):
+        self._check_publisher(presenter, token)
+        self._validate_secret(secret)
+        return await self.api.proxy_to(
+            self._whip_url(presenter, secret), request, allow_internal=True
+        )
+
+    async def _whep_session(self, display_id, presenter, secret, request, key):
+        self._check_viewer(display_id, key, presenter)
+        self._validate_secret(secret)
+        return await self.api.proxy_to(
+            self._whep_url(presenter, secret), request, allow_internal=True
+        )
 
     def _whep_url(self, presenter, secret=None):
         """Build the localhost sidecar WHEP URL, with read creds in the userinfo.
