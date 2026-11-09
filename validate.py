@@ -80,13 +80,14 @@ _CONFIG_SECRETS_KEYS = {"id", "fields", "generated"}
 
 # The two tables below have no OpenAVC table to compare with, so they are
 # checked by eye. The settings field types the Programmer's plugin settings
-# form draws:
+# form takes:
 VALID_CONFIG_TYPES = {
     "string", "text", "integer", "float", "boolean", "select", "color",
     "state_key", "macro_ref", "device_ref", "command_ref", "group", "mapping_list",
 }
 
-# "all", and the ids get_platform_id() in openavc/core/plugin_loader.py returns:
+# "all", and the ids get_platform_id() in openavc/core/plugin_loader.py returns
+# for a supported platform (it answers "unknown" for any other):
 VALID_PLATFORMS = {"all", "win_x64", "linux_x64", "linux_arm64"}
 
 # The list fields a manifest may carry: the field, what one value is called in
@@ -132,7 +133,8 @@ def is_safe_requirement(req):
     here so contributors learn at PR time. Extras ('pkg[extra]'), version
     specifiers, and environment markers are allowed. A copy of
     openavc/core/plugin_wheels.py's _is_safe_requirement (and _VCS_PREFIXES),
-    kept line for line with it so the two can be compared.
+    written the same way so the two can be compared; this one reads any value
+    as text (``str(req)``), where the platform's takes text only.
     """
     s = str(req).strip()
     if not s or s[0] in "-./\\":
@@ -189,7 +191,9 @@ def _module_level_assignments(tree):
 
 def _single_name(statement):
     """The name a ``NAME = value`` statement with exactly one target assigns,
-    or None."""
+    or None. Unlike a class body (``_assigned_names``), a module-level chain
+    ``A = B = value`` is not read, so an alias or constant defined that way is
+    not found."""
     if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
         target = statement.targets[0]
         if isinstance(target, ast.Name):
@@ -227,7 +231,8 @@ class PluginSource:
     """A plugin module's source, parsed once, and the way this validator reads
     each declaration in it without running it.
 
-    Three readings, each kept for the declaration that uses it:
+    Three readings of a declared value, each kept for the declarations that
+    use it, and ``config_hooks()`` for the validate_config methods:
 
     - ``plugin_info()``: PLUGIN_INFO a key at a time, a module constant
       resolved, so one value built at runtime leaves the rest checked.
@@ -660,13 +665,15 @@ def validate_plugin_dir(plugin_path, result):
     """Validate a plugin directory, reported in this order: its *_plugin.py
     (PLUGIN_INFO, what its text shows, its declarations), its plugin.json
     against PLUGIN_INFO, its README, and its category against its folder.
-    Without a module it can read, the one problem is all it reports."""
+    Without a module it can read, it stops there."""
     main_file = _main_module(plugin_path, result)
     if main_file is None:
         return
     content = _read_module(main_file, result)
     if content is None:
         return
+    if "PLUGIN_INFO" not in content:
+        result.error(f"{main_file.name}: missing PLUGIN_INFO class attribute")
     source = PluginSource(content)
     plugin_info = _check_plugin_info(source, main_file.name, plugin_path, result)
     _check_habits(content, main_file.name, result)
@@ -677,8 +684,8 @@ def validate_plugin_dir(plugin_path, result):
 
 
 def _main_module(plugin_path, result):
-    """The *_plugin.py the loader would find, or None; the first of several,
-    with a warning."""
+    """The first *_plugin.py the folder lists, or None; with several, a
+    warning naming them."""
     plugin_files = list(plugin_path.glob("*_plugin.py"))
     if not plugin_files:
         result.error("No *_plugin.py file found (plugin loader looks for this pattern)")
@@ -697,11 +704,9 @@ def _read_module(main_file, result):
 
 
 def _check_plugin_info(source, file_name, plugin_path, result):
-    """PLUGIN_INFO: there, readable, valid, and named for its folder. Returns
-    what could be read of it (None when nothing could; an empty dict is not
+    """PLUGIN_INFO: readable, valid, and named for its folder. Returns what
+    could be read of it (None when nothing could; an empty dict is not
     validated)."""
-    if "PLUGIN_INFO" not in source.content:
-        result.error(f"{file_name}: missing PLUGIN_INFO class attribute")
     plugin_info, unresolved = source.plugin_info()
     if plugin_info is None:
         result.warn(f"{file_name}: could not read PLUGIN_INFO statically -- "
@@ -968,7 +973,9 @@ def main():
     if args.check_index:
         validate_index_json(repo_root, results)
     for result in results:
-        _print_result(result, _relative(result.plugin_path, repo_root), args.verbose)
+        rel_path = _relative(result.plugin_path, repo_root)
+        _print_outcome(result, rel_path, args.verbose)
+        _print_warnings(result, rel_path, args.verbose)
     total_errors = _print_summary(results)
     sys.exit(1 if total_errors > 0 else 0)
 
@@ -993,11 +1000,6 @@ def _relative(path, repo_root):
         return path.relative_to(repo_root)
     except ValueError:
         return path
-
-
-def _print_result(result, rel_path, verbose):
-    _print_outcome(result, rel_path, verbose)
-    _print_warnings(result, rel_path, verbose)
 
 
 def _print_outcome(result, rel_path, verbose):

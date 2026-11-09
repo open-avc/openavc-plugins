@@ -1467,3 +1467,52 @@ def test_this_repository_validates():
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert " 0 failed" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# What is already recorded when a check raises
+# ---------------------------------------------------------------------------
+
+
+def test_a_parse_that_fails_other_than_on_syntax_raises_after_the_text_check(tmp_path, monkeypatch):
+    """Source too deep for the parser raises out of the run (RecursionError on
+    real input); the missing-PLUGIN_INFO error is already recorded by then."""
+    src = "class AcmeWidgetPlugin:\n    async def start(self):\n        pass\n"
+    folder = _plugin(tmp_path, source=src)
+
+    def too_deep(*_args, **_kwargs):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    import ast
+    import types
+    own_ast = types.ModuleType("ast")
+    own_ast.__dict__.update(ast.__dict__)
+    own_ast.parse = too_deep
+    monkeypatch.setattr(v, "ast", own_ast)
+    result = v.ValidationResult(folder)
+    with pytest.raises(RecursionError):
+        v.validate_plugin_dir(folder, result)
+    assert result.errors == ["acme_widget_plugin.py: missing PLUGIN_INFO class attribute"]
+    assert result.warnings == []
+
+
+def test_errors_found_before_a_plugin_json_that_is_not_an_object_stay(tmp_path):
+    src = GOOD_SOURCE + "\n# time.sleep(1)\n"
+    folder = _plugin(tmp_path, source=src, manifest=["id"], readme=False)
+    result = v.ValidationResult(folder)
+    with pytest.raises(AttributeError):
+        v.validate_plugin_dir(folder, result)
+    assert result.errors[0] == (
+        "acme_widget_plugin.py: uses time.sleep() which blocks the event loop. Use "
+        "asyncio.sleep() instead.")
+    assert sorted(result.errors[1:]) == sorted(
+        f"plugin.json: missing required field '{f}'" for f in v.REQUIRED_MANIFEST_FIELDS if f != "id")
+    assert result.warnings == []
+
+
+def test_index_json_adds_no_result_when_an_entry_raises(tmp_path):
+    (tmp_path / "index.json").write_text(json.dumps({"plugins": [_entry(), "acme"]}))
+    results = ["earlier"]
+    with pytest.raises(AttributeError):
+        v.validate_index_json(tmp_path, results)
+    assert results == ["earlier"]
