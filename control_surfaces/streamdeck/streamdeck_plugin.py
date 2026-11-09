@@ -122,8 +122,9 @@ def _patch_hidapi_search():
     LibUSBHIDAPI.Library._load_hidapi_library = _extended_load
 
 
-# How long a macro's result shows on its keys before they draw as usual.
-_MACRO_FLASH_SECONDS = {"done": 0.8, "error": 1.2}
+def _advertised_sn(result):
+    """The serial a discovery result advertises, as text ("" for none)."""
+    return str((result.get("txt") or {}).get("sn", ""))
 
 
 class _DeckSession:
@@ -188,23 +189,30 @@ class _DeckSession:
             or self.macro_marks.get((self.current_page, key_index))
         )
 
-    def mark_macro_run(self, page, key_index, mark, flash_ended):
-        """Set a key's macro run mark, or drop it for None. A result mark
-        (done, error) is a flash: ``flash_ended(page, key_index)`` is called
-        when it is over. A newer mark cancels the flash's end."""
-        spot = (page, key_index)
+    def mark_macro_run(self, spot, mark):
+        """Set the macro run mark of the key at ``spot`` (``(page, index)``),
+        or drop it for None; either way the end of a flash it showed is
+        cancelled."""
         handle = self.macro_clear_handles.pop(spot, None)
         if handle is not None:
             handle.cancel()
         if mark is None:
             self.macro_marks.pop(spot, None)
-            return
-        self.macro_marks[spot] = mark
-        seconds = _MACRO_FLASH_SECONDS.get(mark)
-        if seconds is not None:
-            self.macro_clear_handles[spot] = asyncio.get_event_loop().call_later(
-                seconds, flash_ended, page, key_index
-            )
+        else:
+            self.macro_marks[spot] = mark
+
+    def flash_macro_mark(self, spot, seconds, flash_ended):
+        """Show the mark at ``spot`` for ``seconds``, then call
+        ``flash_ended(page, index)``."""
+        self.macro_clear_handles[spot] = asyncio.get_event_loop().call_later(
+            seconds, flash_ended, *spot
+        )
+
+    def end_macro_flash(self, spot, drop_mark):
+        """A flash is over: forget its timer and, when ``drop_mark``, its mark.
+        True when a mark was dropped."""
+        self.macro_clear_handles.pop(spot, None)
+        return drop_mark and self.macro_marks.pop(spot, None) is not None
 
     def cancel_timers(self):
         """Cancel every timer and debounced task the deck has running: the
@@ -1071,12 +1079,12 @@ class StreamDeckPlugin:
         unrecorded = False
         for key, entry in declared.items():
             link = self._link_for(key, entry)
-            new_decks.extend(self._net_decks(await link.ensure(self._loop, self.api.log)))
+            self._add_net_decks(new_decks, await link.ensure(self._loop, self.api.log))
             await self.api.state_set(f"net.{link.state_key}.address", key)
             await self.api.state_set(f"net.{link.state_key}.status", link.status)
-            if unrecorded_serials(entry, link.observed_serial, link.advertised_serial):
+            if unrecorded_serials(entry, link.reported_serials()):
                 unrecorded = True
-            self._look_up_if_lost(key, link, link.answers_to(entry["serial"], entry["mdns_sn"]))
+            self._look_up_if_lost(key, link, link.answers_to(entry))
         if unrecorded:
             await self._persist_network_serials()
 
@@ -1095,24 +1103,23 @@ class StreamDeckPlugin:
         link = self._dock_links.get(key)
         if link is None:
             link = DockLink(entry["host"], entry["port"], self.api.local_address)
-            link.remember_serials(entry["serial"], entry["mdns_sn"])
+            link.remember_serials(entry)
             self._dock_links[key] = link
         return link
 
-    def _net_decks(self, transports):
-        """A deck object for each transport that came up and is not open yet,
-        of the class the library names for its product id."""
-        decks = []
+    def _add_net_decks(self, new_decks, transports):
+        """Add a deck object for each transport that came up and is not open
+        yet, of the class the library names for its product id."""
         for transport in transports:
             if transport.path() not in self._sessions:
                 cls = net_deck_class(transport.product_id(), StreamDeck)
                 if cls is not None:
-                    decks.append(cls(transport))
-        return decks
+                    new_decks.append(cls(transport))
 
     def _look_up_if_lost(self, key, link, serials):
         """Look a deck up by every serial it answers to, once per outage
-        (DockLink.claim_look_up), when discovery is available."""
+        (DockLink.claim_look_up, asked last: asking takes the claim), when
+        discovery is available."""
         if (
             serials
             and callable(getattr(self.api, "mdns_browse", None))
@@ -1130,9 +1137,7 @@ class StreamDeckPlugin:
 
         def record(entry, address):
             link = self._dock_links.get(address)
-            return link is not None and record_serials(
-                entry, link.observed_serial, link.advertised_serial
-            )
+            return link is not None and record_serials(entry, link.reported_serials())
 
         updated, changed = edit_network_decks(self.api.config.get("network_decks"), record)
         if changed:
@@ -1148,9 +1153,7 @@ class StreamDeckPlugin:
         except Exception as e:
             self.api.log(f"Network deck discovery failed: {e}", level="warning")
             return
-        found = next(
-            (r for r in results if str((r.get("txt") or {}).get("sn", "")) in serials), None
-        )
+        found = next((r for r in results if _advertised_sn(r) in serials), None)
         if found is None:
             return
         new_host = found.get("ip")
@@ -1168,7 +1171,7 @@ class StreamDeckPlugin:
         updated, changed = edit_network_decks(self.api.config.get("network_decks"), move)
         if changed:
             self.api.log(
-                f"Network deck {str(found['txt'].get('sn', ''))} answered at "
+                f"Network deck {_advertised_sn(found)} answered at "
                 f"{new_host}:{new_port} (was {key}); following it"
             )
             await self._save_network_decks(updated)
@@ -1927,7 +1930,7 @@ class StreamDeckPlugin:
             width = session.deck.touchscreen_image_format()["size"][0]
         except Exception:
             width = 800
-        return lay_out_zones(self._deck_config(session), session.deck.dial_count(), width)
+        return lay_out_zones(self._deck_config(session), session.deck.dial_count, width)
 
     def _zone_at(self, session, x):
         """Return the touchscreen zone containing pixel ``x``, or None."""
@@ -3353,6 +3356,8 @@ class StreamDeckPlugin:
         "done": "#22c55e",
         "error": "#ef4444",
     }
+    # How long a result shows on its keys before they draw as usual.
+    _MACRO_FLASH_SECONDS = {"done": 0.8, "error": 1.2}
 
     async def _on_macro_event(self, event_name, payload):
         """Mark keys whose bindings reference a macro that changed state."""
@@ -3369,10 +3374,13 @@ class StreamDeckPlugin:
     async def _apply_macro_mark_event(self, macro_id, mark):
         """Mark every key whose press runs ``macro_id``, on every deck, and
         redraw the ones showing."""
+        seconds = self._MACRO_FLASH_SECONDS.get(mark)
         for session in list(self._sessions.values()):
             flash_ended = functools.partial(self._end_macro_flash, session)
             for page, key_index in session.macro_keys.get(macro_id) or ():
-                session.mark_macro_run(page, key_index, mark, flash_ended)
+                session.mark_macro_run((page, key_index), mark)
+                if seconds is not None:
+                    session.flash_macro_mark((page, key_index), seconds, flash_ended)
                 if session.shows(page):
                     await self._render_button(session, key_index)
 
@@ -3382,10 +3390,8 @@ class StreamDeckPlugin:
     async def _clear_macro_mark(self, session, page, key_index):
         """A result flash is over: its key draws as usual again, unless the
         deck has gone."""
-        session.macro_clear_handles.pop((page, key_index), None)
-        if session.device_id not in self._sessions:
-            return
-        if session.macro_marks.pop((page, key_index), None) is not None and session.shows(page):
+        attached = session.device_id in self._sessions
+        if session.end_macro_flash((page, key_index), attached) and session.shows(page):
             await self._render_button(session, key_index)
 
     def _apply_macro_mark(self, image, mark):

@@ -137,10 +137,11 @@ def declared_zones(cfg):
 
 def lay_out_zones(cfg, dial_count, width):
     """The strip's zones with their pixel bounds and index: the declared
-    zones, else one under each dial. A zone with no ``x`` or ``w`` takes its
-    share of an even split of ``width``."""
+    zones, else one under each dial (``dial_count()`` is asked only then). A
+    zone with no ``x`` or ``w`` takes its share of an even split of
+    ``width``."""
     zones = declared_zones(cfg) or [
-        dial_zone(dial_entry(cfg, i) or {}) for i in range(dial_count)
+        dial_zone(dial_entry(cfg, i) or {}) for i in range(dial_count())
     ]
     if not zones:
         return []

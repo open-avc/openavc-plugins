@@ -141,22 +141,21 @@ def edit_network_decks(raw, edit):
     return updated, changed
 
 
-def unrecorded_serials(entry, own, advertised):
-    """The serials a deck reported that its entry does not hold yet, by field:
-    ``serial`` is the deck's own (its identity everywhere), ``mdns_sn`` the
-    one the unit advertises (a dock's alias, kept only to find the deck
-    again). They are different strings for the same deck: never collapse
-    them, or the deck cards twice."""
+def unrecorded_serials(entry, reported):
+    """The serials a deck ``reported`` (by entry field, DockLink.reported_serials)
+    that its entry does not hold yet. ``serial`` is the deck's own (its
+    identity everywhere), ``mdns_sn`` the one the unit advertises (a dock's
+    alias, kept only to find the deck again): different strings for the same
+    deck, never collapsed, or the deck cards twice."""
     return {
-        field: value
-        for field, value in (("serial", own), ("mdns_sn", advertised))
+        field: value for field, value in reported.items()
         if value and entry.get(field) != value
     }
 
 
-def record_serials(entry, own, advertised):
+def record_serials(entry, reported):
     """Write the serials a deck reported onto its entry; True when that
     changed it."""
-    changes = unrecorded_serials(entry, own, advertised)
+    changes = unrecorded_serials(entry, reported)
     entry.update(changes)
     return bool(changes)

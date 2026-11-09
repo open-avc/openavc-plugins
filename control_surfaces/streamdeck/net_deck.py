@@ -605,23 +605,32 @@ class DockLink:
         self._connecting = False
         self._resolve_attempted = False
 
-    def remember_serials(self, serial, mdns_sn):
-        """Start from the serials the deck's config entry recorded on an
-        earlier connect, so discovery can find it before it answers."""
-        if serial:
-            self.observed_serial = serial
-        if mdns_sn:
-            self.advertised_serial = mdns_sn
+    def reported_serials(self):
+        """The serials this deck reported, under the ``network_decks`` entry
+        fields that record them: ``serial`` its own, ``mdns_sn`` the one the
+        unit advertises."""
+        return {"serial": self.observed_serial, "mdns_sn": self.advertised_serial}
 
-    def answers_to(self, *recorded):
-        """Every serial this deck answers to: its own, the one it advertises,
-        and any ``recorded`` on its config entry."""
-        return {s for s in (self.observed_serial, self.advertised_serial, *recorded) if s}
+    def remember_serials(self, entry):
+        """Start from the serials a declared entry recorded on an earlier
+        connect (declared_decks.py), so discovery can find the deck before it
+        answers."""
+        if entry["serial"]:
+            self.observed_serial = entry["serial"]
+        if entry["mdns_sn"]:
+            self.advertised_serial = entry["mdns_sn"]
+
+    def answers_to(self, entry):
+        """Every serial this deck answers to: the ones it reported and the ones
+        its declared entry recorded."""
+        recorded = (entry["serial"], entry["mdns_sn"])
+        return {s for s in (*self.reported_serials().values(), *recorded) if s}
 
     def claim_look_up(self):
         """True once per outage, from the third failed connect in a row: the
         caller then looks the deck up by serial. The next good connect allows
-        another."""
+        another. Asking takes the claim, so ask after every other condition
+        for the look-up holds."""
         if self.fail_count < 3 or self._resolve_attempted:
             return False
         self._resolve_attempted = True
