@@ -51,6 +51,13 @@ from .key_entries import (
 )
 from .deck_answers import answer_address, answer_serial, scan_listing
 from .deck_classes import net_deck_class
+from .deck_profile import (
+    UNCONNECTED_GEOMETRY,
+    connected_line,
+    deck_geometry,
+    deck_identity,
+    network_link,
+)
 from .dials import (
     declared_zones,
     dial_entry,
@@ -106,6 +113,12 @@ def _lazy_import():
         _patch_hidapi_search()
 
 
+def _names_hid_library(error):
+    """True for an error that names the native HID library (hidapi): the
+    plugin cannot reach a USB deck until it is installed."""
+    return "hid" in str(error).lower()
+
+
 def _patch_hidapi_search():
     """Extend HIDAPI library search to find .so files bundled in .deps/."""
     try:
@@ -142,6 +155,9 @@ class _DeckSession:
         self.serial = "unknown"
         self.model = ""
         self.geometry = {}         # key_count/rows/columns/dials/touch/screens
+        self.transport = ""        # virtual / network / usb, once opened
+        self.is_network = False
+        self.address = ""          # a network deck's host:port
         self.current_page = 0
         self.pressed_keys = set()  # keys currently held (momentary highlight)
         self.hold_tasks = {}       # key_index -> periodic task ID (hold-repeat)
@@ -170,6 +186,18 @@ class _DeckSession:
         self.macro_marks = {}           # (page, key_index) -> running|done|error
         self.macro_clear_handles = {}   # (page, key_index) -> flash-clear timer
         self.input_seq = 0              # monotonic counter for the input echo
+
+    def take_profile(self, identity, geometry):
+        """Hold what the deck said about itself when it opened
+        (deck_profile.py)."""
+        self.device_id = identity.device_id
+        self.serial = identity.serial
+        self.model = identity.model
+        self.is_virtual = identity.is_virtual
+        self.is_network = identity.is_network
+        self.address = identity.address
+        self.transport = identity.transport
+        self.geometry = geometry
 
     @property
     def drawable(self):
@@ -613,52 +641,60 @@ class StreamDeckPlugin:
         """Initialize and connect to the Stream Deck."""
         self.api = api
         self._loop = asyncio.get_event_loop()
-
-        # Lazy-import after DLL paths are set up by plugin loader
-        try:
-            _lazy_import()
-        except ImportError as e:
-            if "hidapi" in str(e).lower() or "hid" in str(e).lower():
-                raise PluginRefusal(self._hidapi_error_message()) from e
-            raise PluginRefusal(
-                "Failed to import Stream Deck library. "
-                "Make sure the 'streamdeck' and 'pillow' packages are installed."
-            ) from e
+        self._import_libraries()
 
         # Load Lucide icon font for button icon rendering
         self._load_icon_font()
         # Load the bundled text font for legible labels on every platform
         self._load_text_font()
 
-        # Set initial state (geometry keys are filled in by _open_deck once a
-        # deck is detected; the Surface Configurator falls back to the static
-        # SURFACE_LAYOUT while connected is false)
+        await self._publish_unconnected()
+        self._check_hid_library()
+        await self._wire_up()
+
+    def _import_libraries(self):
+        """Import the StreamDeck library and Pillow, after the plugin loader
+        has set up the .deps/ DLL search path; refused with what to install
+        when either is missing."""
+        try:
+            _lazy_import()
+        except ImportError as e:
+            if _names_hid_library(e):
+                raise PluginRefusal(self._hidapi_error_message()) from e
+            raise PluginRefusal(
+                "Failed to import Stream Deck library. "
+                "Make sure the 'streamdeck' and 'pillow' packages are installed."
+            ) from e
+
+    async def _publish_unconnected(self):
+        """What the plugin publishes before any deck is attached. The geometry
+        keys are filled in by _open_deck once a deck is detected; the Surface
+        Configurator falls back to the static SURFACE_LAYOUT while connected
+        is false."""
         await self.api.state_set("connected", False)
         await self.api.state_set("model", "")
         await self.api.state_set("serial", "")
         await self.api.state_set("current_page", 0)
-        await self.api.state_set("key_count", 0)
-        await self.api.state_set("rows", 0)
-        await self.api.state_set("columns", 0)
-        await self.api.state_set("dial_count", 0)
-        await self.api.state_set("touch_key_count", 0)
-        await self.api.state_set("has_touchscreen", False)
-        await self.api.state_set("has_info_screen", False)
+        for key, value in UNCONNECTED_GEOMETRY:
+            await self.api.state_set(key, value)
         await self.api.state_set("deck_count", 0)
         await self.api.state_set("deck_serials", "")
 
-        # Validate HIDAPI is loadable now, so a missing native library fails
-        # the plugin with a clear message instead of silently looping in the
-        # watchdog below.
+    def _check_hid_library(self):
+        """Enumerate once now, so a missing native HID library fails the
+        plugin with a clear message instead of silently looping in the
+        watchdog. Any other enumerate error is raised as it is."""
         try:
             StreamDeck.DeviceManager().enumerate()
         except Exception as e:
-            if "hidapi" in str(e).lower() or "hid" in str(e).lower():
+            if _names_hid_library(e):
                 raise PluginRefusal(self._hidapi_error_message()) from e
             raise
 
-        # Subscribe to context actions (independent of any connected deck, and
-        # kept across reconnects).
+    async def _wire_up(self):
+        """Subscribe to context actions and macro events, serve the routes,
+        and start the watchdog. The subscriptions are the plugin's, not a
+        deck's: they outlive every reconnect."""
         await self.api.event_subscribe(
             "plugin.streamdeck.action.*", self._on_context_action
         )
@@ -823,55 +859,14 @@ class StreamDeckPlugin:
         deck.reset()
 
         session = _DeckSession(deck)
-        session.is_virtual = isinstance(deck, VirtualDeck)
-        net_device = getattr(deck, "device", None)
-        session.is_network = bool(getattr(net_device, "is_network", False))
-        session.address = net_device.address if session.is_network else ""
-        session.transport = (
-            "virtual" if session.is_virtual
-            else "network" if session.is_network
-            else "usb"
-        )
-        try:
-            session.device_id = deck.id()
-        except Exception:
-            session.device_id = f"deck-{id(deck)}"
-        session.serial = deck.get_serial_number() or "unknown"
-        session.model = deck.deck_type()
-        if session.is_network and getattr(net_device, "link", None) is not None:
-            if session.serial and session.serial != "unknown":
-                # Recorded on the link; the watchdog persists it to the
-                # config entry so discovery can follow the deck if its
-                # address changes later (DHCP renumbering).
-                net_device.link.observed_serial = session.serial
-
-        # Geometry comes from the live hardware, not a static model table, so
-        # any deck the library enumerates renders correctly — including models
-        # added after this plugin was written.
-        rows, columns = deck.key_layout()
-        try:
-            # A secondary info screen reports a non-zero size (e.g. Neo 248x58)
-            has_info_screen = deck.screen_image_format()["size"][0] > 0
-        except Exception:
-            has_info_screen = False
-        try:
-            is_visual = bool(deck.is_visual())
-        except Exception:
-            is_visual = True
-        session.geometry = {
-            "key_count": deck.key_count(),
-            "rows": rows,
-            "columns": columns,
-            "dial_count": deck.dial_count(),
-            "touch_key_count": deck.touch_key_count(),
-            "has_touchscreen": deck.is_touch(),
-            "has_info_screen": has_info_screen,
-            # False for display-less decks (foot pedals): keys fire actions
-            # but nothing renders, so the editor skips display-only flows.
-            "visual": is_visual,
-            "virtual": session.is_virtual,
-            "transport": session.transport,
-        }
+        identity = deck_identity(deck)
+        link = network_link(deck, identity)
+        if link is not None and identity.serial_known:
+            # Recorded on the link; the watchdog persists it to the config
+            # entry so discovery can follow the deck if its address changes
+            # later (DHCP renumbering).
+            link.observed_serial = identity.serial
+        session.take_profile(identity, deck_geometry(deck, identity))
 
         self._sessions[session.device_id] = session
 
@@ -879,9 +874,32 @@ class StreamDeckPlugin:
         # auto_brightness rule), and start the idle timer fresh.
         session.last_input = asyncio.get_event_loop().time()
         deck.set_brightness(await self._current_brightness_level(session))
+        self._wire_callbacks(session)
 
-        # Wire callbacks, each bound to this deck's session (async variants —
-        # they fire on our event loop)
+        # Publish the detected hardware to state. The Surface Configurator
+        # prefers these keys over the static SURFACE_LAYOUT while connected,
+        # so the editor always draws the surface that's actually plugged in.
+        await self._publish_deck_state()
+
+        self.api.log(connected_line(identity, session.geometry))
+        await self.api.event_emit(
+            "connected", {"model": session.model, "serial": session.serial}
+        )
+
+        # Subscribe to state changes for feedback, visibility, and auto-page keys
+        await self._setup_feedback_subscriptions(session)
+        await self._show_opening_page(session)
+
+        # Render all buttons for the current page, then the secondary displays
+        await self._render_all_buttons(session)
+        await self._render_touchscreen(session)
+        await self._render_info_strip(session)
+
+    def _wire_callbacks(self, session):
+        """Bind a deck's key, dial and touch callbacks to its session, the
+        dial and touch ones only where the deck has them (async variants:
+        they fire on the plugin's loop)."""
+        deck = session.deck
         deck.set_key_callback_async(
             functools.partial(self._on_key_change, session), loop=self._loop
         )
@@ -895,41 +913,17 @@ class StreamDeckPlugin:
                 loop=self._loop,
             )
 
-        # Publish the detected hardware to state. The Surface Configurator
-        # prefers these keys over the static SURFACE_LAYOUT while connected,
-        # so the editor always draws the surface that's actually plugged in.
-        await self._publish_deck_state()
-
-        geometry = session.geometry
-        touch_keys = geometry["touch_key_count"]
-        extras = ", touchscreen" if geometry["has_touchscreen"] else ""
-        if touch_keys:
-            extras += f", {touch_keys} touch keys"
-        self.api.log(
-            f"Connected to {session.model} (S/N: {session.serial}, "
-            f"{geometry['key_count']} keys, {rows}x{columns}, "
-            f"{geometry['dial_count']} dials{extras})"
-        )
-        await self.api.event_emit(
-            "connected", {"model": session.model, "serial": session.serial}
-        )
-
-        # Subscribe to state changes for feedback, visibility, and auto-page keys
-        await self._setup_feedback_subscriptions(session)
-
-        # Apply the initial auto-page selection before the first render so we
-        # don't briefly show page 0 and then immediately switch.
+    async def _show_opening_page(self, session):
+        """Open on the first matching auto_page rule's page, set before the
+        first render so the deck never shows page 0 and then switches. The
+        un-prefixed page key follows only the primary deck."""
         initial_page = await self._evaluate_auto_page(session)
-        if initial_page is not None:
-            session.current_page = initial_page
-            await self.api.state_set(f"{session.serial}.current_page", initial_page)
-            if self._primary_session() is session:
-                await self.api.state_set("current_page", initial_page)
-
-        # Render all buttons for the current page, then the secondary displays
-        await self._render_all_buttons(session)
-        await self._render_touchscreen(session)
-        await self._render_info_strip(session)
+        if initial_page is None:
+            return
+        session.current_page = initial_page
+        await self.api.state_set(f"{session.serial}.current_page", initial_page)
+        if self._primary_session() is session:
+            await self.api.state_set("current_page", initial_page)
 
     async def _watchdog(self):
         """Keep every deck connected: open new ones, recover after unplug.

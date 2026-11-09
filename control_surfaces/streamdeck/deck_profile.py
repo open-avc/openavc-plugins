@@ -1,0 +1,130 @@
+"""
+What a Stream Deck says about itself when it opens.
+
+The plugin opens every deck the same way, whatever carries it: a USB deck the
+library enumerates, a virtual deck (virtual_deck.py) or a network deck
+(net_deck.py). What differs between them is read here: which transport
+carries the deck and at what address, the name the plugin holds it under,
+its serial and model, and its geometry. The geometry comes from the deck
+itself, not a model table, so a model the library adds later still draws.
+
+Every geometry field is published as a state key per deck, and the
+un-prefixed keys mirror the primary deck. UNCONNECTED_GEOMETRY is what the
+plugin publishes for those keys before any deck is attached; ``visual``,
+``virtual`` and ``transport`` have no unconnected value and appear only with
+a deck. A new geometry field is one entry in ``deck_geometry`` and, when the
+status card needs it before a deck attaches, one in UNCONNECTED_GEOMETRY.
+
+The identity is read before the geometry, and a deck that fails mid-read
+raises out of the open: the plugin tells a network deck's link the serial it
+saw between the two reads, so a deck whose layout cannot be read has still
+been recorded on its link.
+"""
+
+from dataclasses import dataclass
+
+from .virtual_deck import VirtualDeck
+
+# The geometry keys a status card reads, as published before any deck.
+UNCONNECTED_GEOMETRY = (
+    ("key_count", 0),
+    ("rows", 0),
+    ("columns", 0),
+    ("dial_count", 0),
+    ("touch_key_count", 0),
+    ("has_touchscreen", False),
+    ("has_info_screen", False),
+)
+
+
+@dataclass(frozen=True)
+class DeckIdentity:
+    """Who a deck is and what carries it."""
+
+    device_id: object
+    serial: str
+    model: str
+    is_virtual: bool
+    is_network: bool
+    address: str
+    transport: str
+
+    @property
+    def serial_known(self):
+        """False when the deck reported no serial."""
+        return self.serial != "unknown"
+
+
+def deck_identity(deck):
+    """What an open deck reports about itself: its transport (``virtual``,
+    ``network`` or ``usb``) and a network deck's address, the name the plugin
+    holds it under (its HID path, or one made from the object when the path
+    cannot be read), its serial (``unknown`` when it reports none) and its
+    model."""
+    is_virtual = isinstance(deck, VirtualDeck)
+    net_device = getattr(deck, "device", None)
+    is_network = bool(getattr(net_device, "is_network", False))
+    address = net_device.address if is_network else ""
+    transport = "virtual" if is_virtual else "network" if is_network else "usb"
+    try:
+        device_id = deck.id()
+    except Exception:
+        device_id = f"deck-{id(deck)}"
+    return DeckIdentity(
+        device_id=device_id,
+        serial=deck.get_serial_number() or "unknown",
+        model=deck.deck_type(),
+        is_virtual=is_virtual,
+        is_network=is_network,
+        address=address,
+        transport=transport,
+    )
+
+
+def network_link(deck, identity):
+    """The link a network deck came up on, or None for any other deck or
+    one that has no link."""
+    if not identity.is_network:
+        return None
+    return getattr(getattr(deck, "device", None), "link", None)
+
+
+def deck_geometry(deck, identity):
+    """The deck's layout as the plugin publishes it. An info screen counts
+    when it reports a width; a deck that cannot say whether it has a screen
+    is taken to have one."""
+    rows, columns = deck.key_layout()
+    try:
+        has_info_screen = deck.screen_image_format()["size"][0] > 0
+    except Exception:
+        has_info_screen = False
+    try:
+        is_visual = bool(deck.is_visual())
+    except Exception:
+        is_visual = True
+    return {
+        "key_count": deck.key_count(),
+        "rows": rows,
+        "columns": columns,
+        "dial_count": deck.dial_count(),
+        "touch_key_count": deck.touch_key_count(),
+        "has_touchscreen": deck.is_touch(),
+        "has_info_screen": has_info_screen,
+        # False for display-less decks (foot pedals): keys fire actions but
+        # nothing renders, so the editor skips display-only flows.
+        "visual": is_visual,
+        "virtual": identity.is_virtual,
+        "transport": identity.transport,
+    }
+
+
+def connected_line(identity, geometry):
+    """The log line that says a deck connected and what it has."""
+    extras = ", touchscreen" if geometry["has_touchscreen"] else ""
+    if geometry["touch_key_count"]:
+        extras += f", {geometry['touch_key_count']} touch keys"
+    return (
+        f"Connected to {identity.model} (S/N: {identity.serial}, "
+        f"{geometry['key_count']} keys, {geometry['rows']}x{geometry['columns']}, "
+        f"{geometry['dial_count']} dials{extras})"
+    )
