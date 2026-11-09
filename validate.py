@@ -112,75 +112,191 @@ def validate_id_format(plugin_id):
 
 
 def _module_level_assignments(tree):
-    """Module-level `NAME = <literal>` values, for resolving references."""
+    """Module-level ``NAME = value`` statements with one plain name, for
+    resolving references: ``(consts, nodes)``, the values that are literals
+    and every value node. A later statement replaces an earlier one's node,
+    and its literal value only when it has one."""
     consts = {}
     nodes = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            if isinstance(target, ast.Name):
-                nodes[target.id] = node.value
-                try:
-                    consts[target.id] = ast.literal_eval(node.value)
-                except Exception:
-                    pass
+    for statement in tree.body:
+        name = _single_name(statement)
+        if name is None:
+            continue
+        nodes[name] = statement.value
+        try:
+            consts[name] = ast.literal_eval(statement.value)
+        except Exception:
+            pass
     return consts, nodes
 
 
-def _find_assignment(tree, name):
-    """The value node assigned to `name`, class-level first then module-level."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            for item in node.body:
-                if isinstance(item, ast.Assign):
-                    for target in item.targets:
-                        if isinstance(target, ast.Name) and target.id == name:
-                            return item.value
-    _, nodes = _module_level_assignments(tree)
-    return nodes.get(name)
+def _single_name(statement):
+    """The name a ``NAME = value`` statement with exactly one target assigns,
+    or None."""
+    if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+        target = statement.targets[0]
+        if isinstance(target, ast.Name):
+            return target.id
+    return None
 
 
-def extract_plugin_info(content):
-    """Extract the PLUGIN_INFO dict from plugin source using AST.
+def _assigned_names(statement):
+    """``(name, value)`` for each plain name a ``NAME = value`` statement
+    assigns (a chain ``A = B = value`` assigns two); nothing for any other
+    statement."""
+    if not isinstance(statement, ast.Assign):
+        return []
+    return [(t.id, statement.value) for t in statement.targets if isinstance(t, ast.Name)]
 
-    Returns ``(info, unresolved)`` -- the keys it could evaluate, and the names
-    of the keys it could not. Both halves matter: a plugin whose PLUGIN_INFO
-    can't be read gets NO validation at all, and reading it as a single
-    ``literal_eval`` is too strict for two shapes real plugins use. One holds a
-    module constant as a value (``"guest_alias": _GUEST_ALIAS``), the other
-    aliases a module-level dict into the class (``PLUGIN_INFO = PLUGIN_INFO``).
-    Either one used to make the whole extraction return None, silently, so
-    three of the shipped plugins were validated on plugin.json alone -- which
-    is how one of them shipped enforcing a lower min_openavc_version than its
-    catalog entry advertised. So: resolve module constants, follow one alias,
-    and evaluate the dict a key at a time rather than all-or-nothing.
+
+def _classes(tree):
+    """Every class, nested ones included, in the order ``ast.walk`` meets them."""
+    return (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
+
+
+def _body_assignments(cls):
+    """``(name, value)`` for every ``NAME = value`` in one class body, in order."""
+    for statement in cls.body:
+        yield from _assigned_names(statement)
+
+
+def _class_assignments(tree):
+    """``(name, value)`` for every ``NAME = value`` in every class body."""
+    for cls in _classes(tree):
+        yield from _body_assignments(cls)
+
+
+class PluginSource:
+    """A plugin module's source, parsed once, and the way this validator reads
+    each declaration in it without running it.
+
+    Three readings, each kept for the declaration that uses it:
+
+    - ``plugin_info()``: PLUGIN_INFO a key at a time, a module constant
+      resolved, so one value built at runtime leaves the rest checked.
+    - ``literal(name)``: a whole literal, class-level first, following one
+      ``NAME = NAME`` alias to the module-level value it names
+      (CONFIG_SCHEMA, CONFIG_SECRETS).
+    - ``class_literal(name)``: a whole literal written in a class body, no
+      alias followed (EXTENSIONS).
+
+    Source that does not parse declares nothing: every reading answers as if
+    the name were absent.
     """
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return None, []
 
-    consts, _ = _module_level_assignments(tree)
-    node = _find_assignment(tree, "PLUGIN_INFO")
-    # `PLUGIN_INFO = PLUGIN_INFO` in the class body -- follow it to the module.
-    if isinstance(node, ast.Name):
-        _, module_nodes = _module_level_assignments(tree)
-        node = module_nodes.get(node.id)
-    if not isinstance(node, ast.Dict):
-        return None, []
-
-    info, unresolved = {}, []
-    for key, value in zip(node.keys, node.values):
-        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-            continue
+    def __init__(self, content):
+        self.content = content
         try:
-            info[key.value] = ast.literal_eval(value)
-        except Exception:
-            if isinstance(value, ast.Name) and value.id in consts:
-                info[key.value] = consts[value.id]
+            self.tree = ast.parse(content)
+        except SyntaxError:
+            self.tree = None
+            self._consts, self._module_nodes = {}, {}
+        else:
+            self._consts, self._module_nodes = _module_level_assignments(self.tree)
+
+    def assignment(self, name):
+        """The value node assigned to `name`, class-level first then module-level."""
+        if self.tree is None:
+            return None
+        class_value = self._class_value(name)
+        if class_value is not None:
+            return class_value
+        return self._module_nodes.get(name)
+
+    def _class_value(self, name):
+        """The first class-level value assigned to `name`, or None."""
+        for assigned, value in _class_assignments(self.tree):
+            if assigned == name:
+                return value
+        return None
+
+    def _followed(self, name):
+        """`name`'s value node, with one ``NAME = OTHER`` alias followed to the
+        module-level value OTHER names."""
+        node = self.assignment(name)
+        if isinstance(node, ast.Name):
+            node = self._module_nodes.get(node.id)
+        return node
+
+    def plugin_info(self):
+        """The PLUGIN_INFO dict, read a key at a time.
+
+        Returns ``(info, unresolved)`` -- the keys it could evaluate, and the
+        names of the keys it could not. Both halves matter: a plugin whose
+        PLUGIN_INFO can't be read gets NO validation at all, and reading it as a
+        single ``literal_eval`` is too strict for two shapes real plugins use.
+        One holds a module constant as a value (``"guest_alias": _GUEST_ALIAS``),
+        the other aliases a module-level dict into the class (``PLUGIN_INFO =
+        PLUGIN_INFO``). Either one used to make the whole extraction return
+        None, silently, so three of the shipped plugins were validated on
+        plugin.json alone -- which is how one of them shipped enforcing a lower
+        min_openavc_version than its catalog entry advertised. So: resolve
+        module constants, follow one alias, and evaluate the dict a key at a
+        time rather than all-or-nothing. ``(None, [])`` when there is no dict to
+        read.
+        """
+        node = self._followed("PLUGIN_INFO")
+        if not isinstance(node, ast.Dict):
+            return None, []
+        info, unresolved = {}, []
+        for key, value in zip(node.keys, node.values):
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                continue
+            found, resolved = self._key_value(value)
+            if found:
+                info[key.value] = resolved
             else:
                 unresolved.append(key.value)
-    return info, unresolved
+        return info, unresolved
+
+    def _key_value(self, value):
+        """``(True, value)`` for a literal or a module constant's name,
+        ``(False, None)`` for anything computed."""
+        try:
+            return True, ast.literal_eval(value)
+        except Exception:
+            if isinstance(value, ast.Name) and value.id in self._consts:
+                return True, self._consts[value.id]
+            return False, None
+
+    def literal(self, name):
+        """`name`'s literal value, following one alias to the module; None
+        when it is not there or not a literal."""
+        return _literal_or_none(self._followed(name))
+
+    def class_literal(self, name):
+        """The first literal assigned to `name` in a class body; None when
+        there is none, or when that first one is not a literal."""
+        if self.tree is None:
+            return None
+        return _literal_or_none(self._class_value(name))
+
+    def config_hooks(self):
+        """Each ``validate_config`` defined in a class whose body assigns
+        PLUGIN_INFO, in the order ``ast.walk`` meets the classes."""
+        if self.tree is None:
+            return
+        for cls in _classes(self.tree):
+            if _assigns(cls, "PLUGIN_INFO"):
+                yield from (item for item in cls.body if _defines(item, "validate_config"))
+
+
+def _literal_or_none(node):
+    if node is None:
+        return None
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        return None
+
+
+def _assigns(cls, name):
+    """Whether a class body has a ``NAME = value`` statement for `name`."""
+    return any(assigned == name for assigned, _ in _body_assignments(cls))
+
+
+def _defines(statement, name):
+    return isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)) and statement.name == name
 
 
 def validate_plugin_info(plugin_info, result, source="PLUGIN_INFO", unresolved=()):
@@ -397,73 +513,19 @@ def validate_extensions_schema(extensions, result):
             seen.add(ext_id)
 
 
-def _extract_declared(content, attr_name):
-    """A class attribute's literal value, following one ``NAME = NAME`` alias
-    to the module-level dict it names (as extract_plugin_info does). None when
-    it is not there or not a literal."""
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return None
-    node = _find_assignment(tree, attr_name)
-    if isinstance(node, ast.Name):
-        _, module_nodes = _module_level_assignments(tree)
-        node = module_nodes.get(node.id)
-    if node is None:
-        return None
-    try:
-        return ast.literal_eval(node)
-    except Exception:
-        return None
-
-
-def _extract_class_attr(content, attr_name):
-    """Best-effort literal extraction of a class-level attribute via AST."""
-    try:
-        tree = ast.parse(content)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                for item in node.body:
-                    if isinstance(item, ast.Assign):
-                        for target in item.targets:
-                            if isinstance(target, ast.Name) and target.id == attr_name:
-                                return ast.literal_eval(item.value)
-    except Exception:
-        pass
-    return None
-
-
-def validate_config_hook(content, file_name, result):
+def validate_config_hook(source, file_name, result):
     """The optional ``validate_config`` is called on the plugin class (which may
     not be running) before its config is saved, synchronously. An instance
     method or an async one is never asked, which reads as a check that passes
     everything."""
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        declares_info = any(
-            isinstance(item, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "PLUGIN_INFO" for t in item.targets)
-            for item in node.body
-        )
-        if not declares_info:
-            continue
-        for item in node.body:
-            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if item.name != "validate_config":
-                continue
-            decorators = {d.id for d in item.decorator_list if isinstance(d, ast.Name)}
-            if isinstance(item, ast.AsyncFunctionDef):
-                result.error(f"{file_name}: validate_config must not be async -- "
-                             "OpenAVC calls it synchronously before saving a config")
-            elif not decorators & {"classmethod", "staticmethod"}:
-                result.error(f"{file_name}: validate_config must be a @classmethod or "
-                             "@staticmethod -- OpenAVC calls it on the class, which may not be running")
+    for hook in source.config_hooks():
+        decorators = {d.id for d in hook.decorator_list if isinstance(d, ast.Name)}
+        if isinstance(hook, ast.AsyncFunctionDef):
+            result.error(f"{file_name}: validate_config must not be async -- "
+                         "OpenAVC calls it synchronously before saving a config")
+        elif not decorators & {"classmethod", "staticmethod"}:
+            result.error(f"{file_name}: validate_config must be a @classmethod or "
+                         "@staticmethod -- OpenAVC calls it on the class, which may not be running")
 
 
 def validate_plugin_dir(plugin_path, result):
@@ -492,7 +554,8 @@ def validate_plugin_dir(plugin_path, result):
         result.error(f"{main_file.name}: missing PLUGIN_INFO class attribute")
 
     # Try to extract and validate PLUGIN_INFO
-    plugin_info, unresolved = extract_plugin_info(content)
+    source = PluginSource(content)
+    plugin_info, unresolved = source.plugin_info()
     if plugin_info is None:
         result.warn(f"{main_file.name}: could not read PLUGIN_INFO statically -- "
                     "it is not being validated. Declare it as a dict literal.")
@@ -525,13 +588,13 @@ def validate_plugin_dir(plugin_path, result):
     # to a module-level dict, which a class-body literal read alone skipped.
     config_schema = None
     if "CONFIG_SCHEMA" in content:
-        config_schema = _extract_declared(content, "CONFIG_SCHEMA")
+        config_schema = source.literal("CONFIG_SCHEMA")
         if config_schema is not None:
             validate_config_schema(config_schema, result)
 
     # Check for CONFIG_SECRETS (the config lists whose items hold a login).
     if "CONFIG_SECRETS" in content:
-        config_secrets = _extract_declared(content, "CONFIG_SECRETS")
+        config_secrets = source.literal("CONFIG_SECRETS")
         if config_secrets is None:
             result.warn(f"{main_file.name}: could not read CONFIG_SECRETS statically -- "
                         "it is not being validated. Declare it as a dict literal.")
@@ -541,12 +604,12 @@ def validate_plugin_dir(plugin_path, result):
     # Check for EXTENSIONS (UI extensions). Best-effort: only literal dicts can
     # be checked; ones built at runtime are skipped.
     if "EXTENSIONS" in content:
-        extensions = _extract_class_attr(content, "EXTENSIONS")
+        extensions = source.class_literal("EXTENSIONS")
         if extensions is not None:
             validate_extensions_schema(extensions, result)
 
     if "validate_config" in content:
-        validate_config_hook(content, main_file.name, result)
+        validate_config_hook(source, main_file.name, result)
 
     # Check for plugin.json
     plugin_json_path = plugin_path / "plugin.json"

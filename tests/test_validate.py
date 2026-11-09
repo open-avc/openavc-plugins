@@ -237,71 +237,71 @@ def test_find_assignment_prefers_the_class_then_the_module():
         "class Second:\n"
         "    X = {'from': 'second'}\n"
     )
-    node = v._find_assignment(_tree(src), "X")
+    node = v.PluginSource(src).assignment("X")
     assert ast.literal_eval(node) == {"from": "first"}
-    only_module = v._find_assignment(_tree("X = 3\nclass C:\n    y = 1\n"), "X")
+    only_module = v.PluginSource("X = 3\nclass C:\n    y = 1\n").assignment("X")
     assert ast.literal_eval(only_module) == 3
-    assert v._find_assignment(_tree("class C:\n    y = 1\n"), "X") is None
+    assert v.PluginSource("class C:\n    y = 1\n").assignment("X") is None
 
 
 def test_find_assignment_matches_any_target_of_a_chained_class_assignment():
     import ast
-    node = v._find_assignment(_tree("class C:\n    A = X = {'k': 1}\n"), "X")
+    node = v.PluginSource("class C:\n    A = X = {'k': 1}\n").assignment("X")
     assert ast.literal_eval(node) == {"k": 1}
 
 
 def test_find_assignment_ignores_an_annotated_class_assignment():
     import ast
     src = "X = 'module'\nclass C:\n    X: dict = {'k': 1}\n"
-    assert ast.literal_eval(v._find_assignment(_tree(src), "X")) == "module"
+    assert ast.literal_eval(v.PluginSource(src).assignment("X")) == "module"
 
 
 def test_find_assignment_reaches_a_nested_class():
     import ast
     src = "class Outer:\n    class Inner:\n        X = 5\n"
-    assert ast.literal_eval(v._find_assignment(_tree(src), "X")) == 5
+    assert ast.literal_eval(v.PluginSource(src).assignment("X")) == 5
 
 
 def test_extract_plugin_info_reads_a_literal():
-    info, unresolved = v.extract_plugin_info(GOOD_SOURCE)
+    info, unresolved = v.PluginSource(GOOD_SOURCE).plugin_info()
     assert info == GOOD_INFO
     assert unresolved == []
 
 
 def test_extract_plugin_info_on_a_syntax_error():
-    assert v.extract_plugin_info("class (:\n") == (None, [])
+    assert v.PluginSource("class (:\n").plugin_info() == (None, [])
 
 
 def test_extract_plugin_info_without_plugin_info():
-    assert v.extract_plugin_info("class C:\n    x = 1\n") == (None, [])
+    assert v.PluginSource("class C:\n    x = 1\n").plugin_info() == (None, [])
 
 
 def test_extract_plugin_info_when_it_is_not_a_dict():
-    assert v.extract_plugin_info("class C:\n    PLUGIN_INFO = make()\n") == (None, [])
-    assert v.extract_plugin_info("class C:\n    PLUGIN_INFO = [1]\n") == (None, [])
+    assert v.PluginSource("class C:\n    PLUGIN_INFO = make()\n").plugin_info() == (None, [])
+    assert v.PluginSource("class C:\n    PLUGIN_INFO = [1]\n").plugin_info() == (None, [])
 
 
 def test_extract_plugin_info_follows_one_alias_to_the_module():
     src = "PLUGIN_INFO = {'id': 'acme'}\nclass C:\n    PLUGIN_INFO = PLUGIN_INFO\n"
-    assert v.extract_plugin_info(src) == ({"id": "acme"}, [])
+    assert v.PluginSource(src).plugin_info() == ({"id": "acme"}, [])
 
 
 def test_extract_plugin_info_follows_an_alias_to_another_module_name():
     src = "_INFO = {'id': 'acme'}\nclass C:\n    PLUGIN_INFO = _INFO\n"
-    assert v.extract_plugin_info(src) == ({"id": "acme"}, [])
+    assert v.PluginSource(src).plugin_info() == ({"id": "acme"}, [])
 
 
 def test_extract_plugin_info_alias_to_a_missing_name():
-    assert v.extract_plugin_info("class C:\n    PLUGIN_INFO = NOWHERE\n") == (None, [])
+    assert v.PluginSource("class C:\n    PLUGIN_INFO = NOWHERE\n").plugin_info() == (None, [])
 
 
 def test_extract_plugin_info_follows_only_one_alias():
     src = "A = {'id': 'acme'}\nB = A\nclass C:\n    PLUGIN_INFO = B\n"
-    assert v.extract_plugin_info(src) == (None, [])
+    assert v.PluginSource(src).plugin_info() == (None, [])
 
 
 def test_extract_plugin_info_at_module_level_only():
-    assert v.extract_plugin_info("PLUGIN_INFO = {'id': 'acme'}\n") == ({"id": "acme"}, [])
+    assert v.PluginSource("PLUGIN_INFO = {'id': 'acme'}\n").plugin_info() == ({"id": "acme"}, [])
 
 
 def test_extract_plugin_info_resolves_constants_and_names_the_rest():
@@ -320,50 +320,50 @@ def test_extract_plugin_info_resolves_constants_and_names_the_rest():
         "        'license': 'MIT',\n"
         "    }\n"
     )
-    info, unresolved = v.extract_plugin_info(src)
+    info, unresolved = v.PluginSource(src).plugin_info()
     assert info == {"id": "acme", "guest_alias": "acme", "license": "MIT"}
     assert unresolved == ["version", "name", "author"]
 
 
 def test_extract_plugin_info_reads_an_empty_dict():
-    assert v.extract_plugin_info("class C:\n    PLUGIN_INFO = {}\n") == ({}, [])
+    assert v.PluginSource("class C:\n    PLUGIN_INFO = {}\n").plugin_info() == ({}, [])
 
 
 def test_extract_declared():
-    assert v._extract_declared("class (:\n", "CONFIG_SCHEMA") is None
-    assert v._extract_declared("class C:\n    x = 1\n", "CONFIG_SCHEMA") is None
-    assert v._extract_declared("class C:\n    CONFIG_SCHEMA = {'a': 1}\n", "CONFIG_SCHEMA") == {"a": 1}
+    assert v.PluginSource("class (:\n").literal("CONFIG_SCHEMA") is None
+    assert v.PluginSource("class C:\n    x = 1\n").literal("CONFIG_SCHEMA") is None
+    assert v.PluginSource("class C:\n    CONFIG_SCHEMA = {'a': 1}\n").literal("CONFIG_SCHEMA") == {"a": 1}
     alias = "CONFIG_SCHEMA = {'a': 2}\nclass C:\n    CONFIG_SCHEMA = CONFIG_SCHEMA\n"
-    assert v._extract_declared(alias, "CONFIG_SCHEMA") == {"a": 2}
-    assert v._extract_declared("class C:\n    CONFIG_SCHEMA = NOWHERE\n", "CONFIG_SCHEMA") is None
-    assert v._extract_declared("class C:\n    CONFIG_SCHEMA = make()\n", "CONFIG_SCHEMA") is None
-    assert v._extract_declared("CONFIG_SCHEMA = [1, 2]\n", "CONFIG_SCHEMA") == [1, 2]
+    assert v.PluginSource(alias).literal("CONFIG_SCHEMA") == {"a": 2}
+    assert v.PluginSource("class C:\n    CONFIG_SCHEMA = NOWHERE\n").literal("CONFIG_SCHEMA") is None
+    assert v.PluginSource("class C:\n    CONFIG_SCHEMA = make()\n").literal("CONFIG_SCHEMA") is None
+    assert v.PluginSource("CONFIG_SCHEMA = [1, 2]\n").literal("CONFIG_SCHEMA") == [1, 2]
     two_hops = "A = {'a': 3}\nB = A\nclass C:\n    CONFIG_SCHEMA = B\n"
-    assert v._extract_declared(two_hops, "CONFIG_SCHEMA") is None
+    assert v.PluginSource(two_hops).literal("CONFIG_SCHEMA") is None
 
 
 def test_extract_class_attr_reads_a_class_literal_only():
-    assert v._extract_class_attr("class C:\n    EXTENSIONS = {'views': []}\n", "EXTENSIONS") == {"views": []}
-    assert v._extract_class_attr("EXTENSIONS = {'views': []}\n", "EXTENSIONS") is None
+    assert v.PluginSource("class C:\n    EXTENSIONS = {'views': []}\n").class_literal("EXTENSIONS") == {"views": []}
+    assert v.PluginSource("EXTENSIONS = {'views': []}\n").class_literal("EXTENSIONS") is None
     alias = "EXTENSIONS = {'views': []}\nclass C:\n    EXTENSIONS = EXTENSIONS\n"
-    assert v._extract_class_attr(alias, "EXTENSIONS") is None
-    assert v._extract_class_attr("class (:\n", "EXTENSIONS") is None
-    assert v._extract_class_attr("class C:\n    EXTENSIONS = make()\n", "EXTENSIONS") is None
-    assert v._extract_class_attr("class C:\n    other = 1\n", "EXTENSIONS") is None
+    assert v.PluginSource(alias).class_literal("EXTENSIONS") is None
+    assert v.PluginSource("class (:\n").class_literal("EXTENSIONS") is None
+    assert v.PluginSource("class C:\n    EXTENSIONS = make()\n").class_literal("EXTENSIONS") is None
+    assert v.PluginSource("class C:\n    other = 1\n").class_literal("EXTENSIONS") is None
     after_a_method = "class C:\n    def f(self):\n        pass\n    EXTENSIONS: dict = {}\n    EXTENSIONS = {'views': []}\n"
-    assert v._extract_class_attr(after_a_method, "EXTENSIONS") == {"views": []}
+    assert v.PluginSource(after_a_method).class_literal("EXTENSIONS") == {"views": []}
 
 
 def test_extract_class_attr_stops_at_the_first_match_even_when_it_is_not_a_literal():
     src = "class A:\n    EXTENSIONS = make()\nclass B:\n    EXTENSIONS = {'views': []}\n"
-    assert v._extract_class_attr(src, "EXTENSIONS") is None
+    assert v.PluginSource(src).class_literal("EXTENSIONS") is None
     src2 = "class A:\n    EXTENSIONS = {'views': [1]}\nclass B:\n    EXTENSIONS = {'views': []}\n"
-    assert v._extract_class_attr(src2, "EXTENSIONS") == {"views": [1]}
+    assert v.PluginSource(src2).class_literal("EXTENSIONS") == {"views": [1]}
 
 
 def _hook(src):
     result = v.ValidationResult(Path("x"))
-    v.validate_config_hook(src, "acme_plugin.py", result)
+    v.validate_config_hook(v.PluginSource(src), "acme_plugin.py", result)
     return result.errors, result.warnings
 
 
