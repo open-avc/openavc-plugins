@@ -12,8 +12,10 @@ auto_brightness are judged by), config_check.py (what validate_config
 reports), declared_decks.py (the virtual and network decks the config
 declares, and the writes to a network deck's entry), dials.py (what a dial
 gesture runs, and the touch strip's zones), key_entries.py (which config entry
-a key runs, and the actions a binding holds), looks.py (what a key, a strip
-zone or an info item shows: the value line, the meter, the feedback style),
+a key runs, the actions a binding holds, and what a deck may write),
+layouts.py (where each part of a key, a strip zone, the idle clock and an
+overlay is drawn), looks.py (what a key, a strip zone or an info item shows:
+the value line, the meter, the feedback style),
 context_actions.py (what a context action or a simulated input asks for),
 deck_answers.py (what a network deck's discovery answer says),
 deck_profile.py (what a deck says about itself when it opens: its transport,
@@ -30,7 +32,6 @@ import json
 import os
 import platform as platform_mod
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -73,7 +74,14 @@ from .dials import (
     shows_on_strip,
     turn_route,
 )
-from .looks import meter_fill, styled, value_line
+from .layouts import (
+    clock_slots,
+    key_layout,
+    overlay_keys_slot,
+    overlay_panel_slot,
+    zone_layout,
+)
+from .looks import Look, meter_fill, plain, styled, value_line
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .pages import key_target_page, page_count, page_number, page_step
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
@@ -271,18 +279,6 @@ class _DeckSession:
         for handle in self.macro_clear_handles.values():
             handle.cancel()
         self.macro_clear_handles.clear()
-
-
-@dataclass
-class _KeyLook:
-    """What a key shows before its marks (``_key_look``)."""
-
-    label: str
-    icon: object
-    bg_color: str
-    text_color: str
-    value_text: str
-    meter: object
 
 
 class StreamDeckPlugin:
@@ -1409,7 +1405,7 @@ class StreamDeckPlugin:
         is_touch = self._is_touch_key(session, index)
         white = None
         if not is_touch and Image is not None:
-            white = self._create_button_image(session, "", "#ffffff", "#ffffff")
+            white = self._create_button_image(session, plain("#ffffff"))
         for _ in range(times):
             if is_touch:
                 self._apply_key_color(session, index, "#ffffff")
@@ -1476,9 +1472,7 @@ class StreamDeckPlugin:
         rows, cols = deck.key_layout()
         canvas = Image.new("RGB", (cols * key_w, rows * key_h), _OVERLAY_BACKGROUND)
         self._paste_label(
-            canvas, text, "#ffffff",
-            (key_w // 4, key_h // 4, cols * key_w - key_w // 2, rows * key_h - key_h // 2),
-            max_font=key_h, max_lines=max(2, rows),
+            canvas, overlay_keys_slot(text, (rows, cols), (key_w, key_h)), "#ffffff"
         )
         for index in range(deck.key_count()):
             row, col = divmod(index, cols)
@@ -1501,16 +1495,13 @@ class StreamDeckPlugin:
         """The overlay's ``text`` on the strip or screen ``where`` names
         (``_OVERLAY_ON_STRIP`` or ``_OVERLAY_ON_SCREEN``), sized as the deck
         reports; None when the deck has none or cannot say its size."""
-        format_reader, (inset_x, inset_y), min_font = where
+        format_reader, inset, min_font = where
         size = self._panel_size(deck, format_reader)
         if size is None:
             return None
-        width, height = size
         panel = Image.new("RGB", size, _OVERLAY_BACKGROUND)
         self._paste_label(
-            panel, text, "#ffffff",
-            (inset_x, inset_y, width - 2 * inset_x, height - 2 * inset_y),
-            max_font=max(min_font, height // 2), max_lines=2,
+            panel, overlay_panel_slot(text, size, inset, min_font), "#ffffff"
         )
         return panel
 
@@ -2061,7 +2052,7 @@ class StreamDeckPlugin:
         return styled(feedback, await self.api.state_get(feedback["key"]), look)
 
     async def _resolve_display(self, element, default_bg, default_fg):
-        """Resolve a display element (zone / info item) to drawables.
+        """What a display element (zone / info item) shows, as a Look.
 
         Shared schema: ``label`` / ``label_source`` (live override), ``icon``
         (Lucide or asset://), ``value_source`` + ``unit`` (live value text;
@@ -2080,79 +2071,38 @@ class StreamDeckPlugin:
             element.get("feedback"), (label, icon, bg, fg)
         )
         meter = meter_fill(element.get("meter"), raw_value, element.get("drag_adjust"))
-        return {
-            "label": label, "icon": icon, "value_text": value_text,
-            "bg": bg, "fg": fg, "meter": meter,
-        }
+        return Look(label, icon, bg, fg, value_text, meter)
 
     async def _draw_strip_zone(self, session, img, zone, height):
-        """Draw one display element (background, icon, label, value, meter)
-        into a strip image at the element's pixel bounds."""
+        """Draw one display element into a strip or screen image at its
+        pixel bounds: its background, then its icon, text and meter where
+        layouts.zone_layout puts them, its touch flash, and the divider from
+        the zone before it."""
         draw = ImageDraw.Draw(img)
         zx, zw = zone["x"], zone["w"]
         bg = self._deck_setting(session, "button_color", "#1a1a2e")
         fg = self._deck_setting(session, "text_color", "#e0e0e0")
-        resolved = await self._resolve_display(zone, bg, fg)
-
-        draw.rectangle([zx, 0, zx + zw - 1, height - 1], fill=resolved["bg"])
-
-        meter = resolved["meter"]
-        text_bottom = height - 18 if meter else height - 4
-
-        text_x = zx + 4
-        if resolved["icon"]:
-            icon_img = self._render_icon(resolved["icon"], resolved["fg"], 72)
-            if icon_img:
-                icon_size = max(16, min(40, zw // 4, text_bottom - 8))
-                icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
-                icon_y = max(2, (text_bottom - icon_size) // 2)
-                img.paste(icon_img, (zx + 8, icon_y), icon_img)
-                text_x = zx + 8 + icon_size + 6
-        text_w = zx + zw - 4 - text_x
-
-        label = resolved["label"]
-        value_text = resolved["value_text"]
-        if label and value_text:
-            self._paste_label(
-                img, label, resolved["fg"],
-                (text_x, 4, text_w, height // 3),
-                max_font=16, max_lines=1,
-            )
-            self._paste_label(
-                img, value_text, resolved["fg"],
-                (text_x, height // 3 + 2, text_w, text_bottom - height // 3 - 4),
-                max_font=30, max_lines=1,
-            )
-        elif label or value_text:
-            self._paste_label(
-                img, label or value_text, resolved["fg"],
-                (text_x, 4, text_w, text_bottom - 8),
-                max_font=24, max_lines=2,
-            )
-
-        if meter:
-            frac, color = meter
-            draw.rectangle(
-                [zx + 8, height - 14, zx + zw - 9, height - 7], fill="#2a2a3e"
-            )
-            fill_w = int((zw - 17) * frac)
-            if fill_w > 0:
-                draw.rectangle(
-                    [zx + 8, height - 14, zx + 8 + fill_w, height - 7], fill=color
-                )
-
-        # Momentary touch flash (the strip's press highlight).
+        look = await self._resolve_display(zone, bg, fg)
+        draw.rectangle([zx, 0, zx + zw - 1, height - 1], fill=look.bg_color)
+        icon_img = self._render_icon(look.icon, look.text_color, 72) if look.icon else None
+        layout = zone_layout((zx, zw), height, look, icon_img is not None)
+        self._paint_layout(img, layout, look, icon_img)
         if zone.get("index") in session.flash_zones:
-            region = img.crop((zx, 0, zx + zw, height))
-            overlay = Image.new("RGB", region.size, (255, 255, 255))
-            img.paste(Image.blend(region, overlay, 0.22), (zx, 0))
-            draw.rectangle(
-                [zx + 1, 1, zx + zw - 2, height - 2],
-                outline=(255, 255, 255), width=2,
-            )
-
+            self._lighten_zone(img, zx, zw, height)
         if zx > 0:
             draw.line([(zx, 8), (zx, height - 8)], fill="#3a3a4e", width=1)
+
+    @staticmethod
+    def _lighten_zone(img, zx, zw, height):
+        """A touched zone's press highlight: its region lightened, inside a
+        white border."""
+        region = img.crop((zx, 0, zx + zw, height))
+        overlay = Image.new("RGB", region.size, (255, 255, 255))
+        img.paste(Image.blend(region, overlay, 0.22), (zx, 0))
+        ImageDraw.Draw(img).rectangle(
+            [zx + 1, 1, zx + zw - 2, height - 2],
+            outline=(255, 255, 255), width=2,
+        )
 
     # ──── Idle clock (unconfigured displays are never dead black) ────
 
@@ -2171,18 +2121,9 @@ class StreamDeckPlugin:
 
     def _draw_clock(self, img, width, height, fg):
         """Draw the idle clock — proof the glass works, useful in a rack."""
-        time_str, date_str = self._clock_text()
-        split = max(10, int(height * 0.62))
-        self._paste_label(
-            img, time_str, fg,
-            (0, 2, width, split),
-            max_font=max(16, int(height * 0.5)), max_lines=1,
-        )
-        self._paste_label(
-            img, date_str, "#8a8a9a",
-            (0, split + 2, width, max(8, height - split - 4)),
-            max_font=max(10, int(height * 0.2)), max_lines=1,
-        )
+        time_slot, date_slot = clock_slots(width, height, *self._clock_text())
+        self._paste_label(img, time_slot, fg)
+        self._paste_label(img, date_slot, "#8a8a9a")
 
     def _strip_idle_mode(self, session):
         """``"clock"``/``"blank"`` when nothing is configured for the touch
@@ -2574,10 +2515,7 @@ class StreamDeckPlugin:
             color = self._touch_key_color(look.bg_color, macro_mark, nav_active, held)
             self._apply_key_color(session, key_index, color)
             return
-        image = self._create_button_image(
-            session, look.label, look.bg_color, look.text_color, look.icon,
-            value_text=look.value_text, meter=look.meter,
-        )
+        image = self._create_button_image(session, look)
         self._apply_key_image(
             session, key_index, self._marked_image(image, nav_active, held, macro_mark)
         )
@@ -2595,7 +2533,7 @@ class StreamDeckPlugin:
         else:
             self._apply_key_image(
                 session, key_index,
-                self._create_button_image(session, "", "#000000", "#000000"),
+                self._create_button_image(session, plain("#000000")),
             )
 
     async def _key_look(self, session, assignment):
@@ -2605,7 +2543,7 @@ class StreamDeckPlugin:
         bg_color = self._deck_setting(session, "button_color", "#1a1a2e")
         text_color = self._deck_setting(session, "text_color", "#e0e0e0")
         if not assignment:
-            return _KeyLook("", None, bg_color, text_color, "", None)
+            return Look("", None, bg_color, text_color, "", None)
         label = await self._live_label(assignment)
         icon = assignment.get("icon") or None
         raw_value, value_text = await self._live_value(assignment)
@@ -2616,12 +2554,12 @@ class StreamDeckPlugin:
         text_color = assignment.get("text_color") or text_color
         bindings = assignment.get("bindings", {})
         if not isinstance(bindings, dict):
-            return _KeyLook(label, icon, bg_color, text_color, value_text, meter)
+            return Look(label, icon, bg_color, text_color, value_text, meter)
         label = await self._toggle_label(bindings, label)
         label, icon, bg_color, text_color = await self._styled_look(
             bindings.get("feedback"), (label, icon, bg_color, text_color)
         )
-        return _KeyLook(label, icon, bg_color, text_color, value_text, meter)
+        return Look(label, icon, bg_color, text_color, value_text, meter)
 
     async def _toggle_label(self, bindings, label):
         """A toggle key's ``on_label`` while its toggle key reads on and its
@@ -2757,84 +2695,42 @@ class StreamDeckPlugin:
             if failure:
                 self.api.log(f"{failure}: {e}", level="debug")
 
-    def _create_button_image(self, session, label, bg_color, text_color,
-                             icon_name=None, value_text="", meter=None):
-        """Create a PIL image for a button: icon, wrapped label, optional
-        live value line, optional meter bar along the bottom."""
+    def _create_button_image(self, session, look):
+        """A key's image of ``look`` (looks.Look): its background, then its
+        icon, text and meter bar where layouts.key_layout puts them."""
         image_format = session.deck.key_image_format()
         width = image_format["size"][0]
         height = image_format["size"][1]
-
-        img = Image.new("RGB", (width, height), bg_color)
-
-        # A meter reserves a strip along the bottom edge.
-        usable_h = height - 10 if meter else height
-
-        # Load icon image if specified
-        icon_img = self._render_icon(icon_name, text_color, width) if icon_name else None
-
-        # An icon carries the identity, so with an icon plus both texts the
-        # live value wins the text slot (two text lines + icon turn to mush
-        # on a small key).
-        if icon_img and value_text:
-            label = value_text
-            value_text = ""
-
-        if icon_img and label:
-            # Icon in the upper area, wrapped label below it.
-            icon_size = min(width, usable_h) // 2
-            icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
-            icon_x = (width - icon_size) // 2
-            icon_y = max(4, (usable_h // 2) - icon_size + 4)
-            img.paste(icon_img, (icon_x, icon_y), icon_img)
-
-            text_top = icon_y + icon_size + 2
-            self._paste_label(
-                img, label, text_color,
-                (2, text_top, width - 4, max(0, usable_h - text_top - 2)),
-                max_font=14, max_lines=2,
-            )
-
-        elif icon_img:
-            # Icon only, centered
-            icon_size = int(min(width, usable_h) * 0.6)
-            icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
-            icon_x = (width - icon_size) // 2
-            icon_y = (usable_h - icon_size) // 2
-            img.paste(icon_img, (icon_x, icon_y), icon_img)
-
-        elif label and value_text:
-            # Name on top, live value as the main element below it.
-            self._paste_label(
-                img, label, text_color,
-                (2, 2, width - 4, usable_h // 3),
-                max_font=14, max_lines=1,
-            )
-            self._paste_label(
-                img, value_text, text_color,
-                (2, usable_h // 3 + 2, width - 4,
-                 max(0, usable_h - usable_h // 3 - 4)),
-                max_font=max(16, usable_h // 3), max_lines=1,
-            )
-
-        elif label or value_text:
-            # Single text — wrapped and shrunk to fill the key.
-            pad = max(2, width // 12)
-            self._paste_label(
-                img, label or value_text, text_color,
-                (pad, pad, width - 2 * pad, usable_h - 2 * pad),
-                max_font=max(14, usable_h // 4), max_lines=3,
-            )
-
-        if meter:
-            frac, color = meter
-            draw = ImageDraw.Draw(img)
-            draw.rectangle([3, height - 8, width - 4, height - 3], fill="#2a2a3e")
-            fill_w = int((width - 7) * frac)
-            if fill_w > 0:
-                draw.rectangle([3, height - 8, 3 + fill_w, height - 3], fill=color)
-
+        img = Image.new("RGB", (width, height), look.bg_color)
+        icon_img = self._render_icon(look.icon, look.text_color, width) if look.icon else None
+        layout = key_layout((width, height), look, icon_img is not None)
+        self._paint_layout(img, layout, look, icon_img)
         return img
+
+    def _paint_layout(self, img, layout, look, icon_img):
+        """Paint a layout (layouts.py) onto ``img``: the rendered icon resized
+        into its spot, each text slot in the look's text color, then the
+        meter bar."""
+        spot = layout.icon
+        if spot is not None:
+            icon = icon_img.resize((spot.size, spot.size), Image.LANCZOS)
+            img.paste(icon, (spot.x, spot.y), icon)
+        for slot in layout.texts:
+            self._paste_label(img, slot, look.text_color)
+        if layout.meter_bar is not None:
+            self._draw_meter_bar(img, layout.meter_bar, look.meter)
+
+    @staticmethod
+    def _draw_meter_bar(img, bar, meter):
+        """A meter's track across ``bar`` (left, top, right, bottom), filled
+        from the left by its fraction in its color."""
+        left, top, right, bottom = bar
+        frac, color = meter
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([left, top, right, bottom], fill="#2a2a3e")
+        fill_w = int((right - left) * frac)
+        if fill_w > 0:
+            draw.rectangle([left, top, left + fill_w, bottom], fill=color)
 
     # ──── Text Rendering (bundled font, word-wrap + shrink-to-fit) ────
 
@@ -2894,17 +2790,20 @@ class StreamDeckPlugin:
         lines.append(current)
         return lines
 
-    def _paste_label(self, img, label, color, box, max_font, max_lines):
-        """Draw ``label`` centered in ``box``=(x, y, w, h), wrapped + shrunk."""
-        bx, by, bw, bh = box
-        if not label or bw <= 0 or bh <= 0:
+    def _paste_label(self, img, slot, color):
+        """Draw a text slot (layouts.TextSlot) in ``color``, centered in its
+        box, wrapped and shrunk; nothing for no text or an empty box."""
+        if not slot.draws:
             return
-        layer = self._render_label_layer(label, color, bw, bh, max_font, max_lines)
-        img.paste(layer, (bx, by), layer)
+        layer = self._render_label_layer(slot, color)
+        img.paste(layer, (slot.x, slot.y), layer)
 
-    def _render_label_layer(self, label, color, w, h, max_font, max_lines):
-        """Render ``label`` to an RGBA layer of size (w, h), wrapped and shrunk
-        to fit in at most ``max_lines`` lines. Cached like rendered icons."""
+    def _render_label_layer(self, slot, color):
+        """Render a text slot's text to an RGBA layer the size of its box,
+        wrapped and shrunk to fit in at most ``max_lines`` lines. Cached like
+        rendered icons."""
+        label, w, h = slot.text, slot.w, slot.h
+        max_font, max_lines = slot.max_font, slot.max_lines
         cache_key = (label, w, h, color, max_font, max_lines)
         cached = self._label_cache.get(cache_key)
         if cached is not None:
@@ -3255,7 +3154,7 @@ class StreamDeckPlugin:
         touch_keys = range(key_count, key_count + deck.touch_key_count())
 
         # Flash white
-        white_img = self._create_button_image(session, "", "#ffffff", "#ffffff")
+        white_img = self._create_button_image(session, plain("#ffffff"))
         native_white = PILHelper.to_native_key_format(deck, white_img)
 
         for flash in range(3):

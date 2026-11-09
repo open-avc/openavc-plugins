@@ -35,6 +35,7 @@ from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # no
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 from control_surfaces.streamdeck.looks import (  # noqa: E402
     METER_DEFAULT_COLOR,
+    Look,
     meter_bounds,
     meter_fill,
 )
@@ -286,11 +287,11 @@ async def test_a_display_element_reads_its_live_label_and_keeps_its_own_when_uns
     element = {"label": "Mic", "label_source": "var.name", "icon": "",
                "bg_color": "", "text_color": "#123456"}
     resolved = await plugin._resolve_display(element, "#000", "#fff")
-    assert resolved == {"label": "Mic", "icon": None, "value_text": "",
-                        "bg": "#000", "fg": "#123456", "meter": None}
+    assert resolved == Look(label="Mic", icon=None, value_text="",
+                            bg_color="#000", text_color="#123456", meter=None)
     _set(state, {"var.name": 7})
     resolved = await plugin._resolve_display(dict(element, icon="mic"), "#000", "#fff")
-    assert resolved["label"] == "7" and resolved["icon"] == "mic"
+    assert resolved.label == "7" and resolved.icon == "mic"
 
 
 @pytest.mark.asyncio
@@ -300,17 +301,17 @@ async def test_a_fixed_value_wins_over_a_live_one_and_takes_no_unit_or_meter():
     element = {"value_static": 12, "value_source": "var.level", "unit": "dB",
                "meter": {}}
     resolved = await plugin._resolve_display(element, "#000", "#fff")
-    assert resolved["value_text"] == "12" and resolved["meter"] is None
+    assert resolved.value_text == "12" and resolved.meter is None
     resolved = await plugin._resolve_display(
         dict(element, value_static=None), "#000", "#fff")
-    assert resolved["value_text"] == "40 dB" and resolved["meter"] == (
+    assert resolved.value_text == "40 dB" and resolved.meter == (
         0.4, METER_DEFAULT_COLOR)
     resolved = await plugin._resolve_display(
         {"value_source": "var.level", "unit": "%"}, "#000", "#fff")
-    assert resolved["value_text"] == "40%"
+    assert resolved.value_text == "40%"
     resolved = await plugin._resolve_display(
         {"value_source": "var.missing", "unit": "%", "meter": True}, "#000", "#fff")
-    assert resolved["value_text"] == "" and resolved["meter"] is None
+    assert resolved.value_text == "" and resolved.meter is None
 
 
 @pytest.mark.asyncio
@@ -320,11 +321,11 @@ async def test_a_display_element_styles_over_its_own_colors_and_live_label():
     element = {"label_source": "var.name", "bg_color": "#101010",
                "feedback": {"key": "var.on", "style_active": {"text_color": "#00ff00"}}}
     resolved = await plugin._resolve_display(element, "#000", "#fff")
-    assert (resolved["label"], resolved["bg"], resolved["fg"]) == (
+    assert (resolved.label, resolved.bg_color, resolved.text_color) == (
         "Lectern", "#101010", "#00ff00")
     element["feedback"]["label_active"] = "LIVE"
     resolved = await plugin._resolve_display(element, "#000", "#fff")
-    assert resolved["label"] == "LIVE"
+    assert resolved.label == "LIVE"
 
 
 @pytest.mark.asyncio
@@ -377,7 +378,7 @@ async def test_a_key_and_a_zone_write_the_same_value_line():
         assignment = {"value_source": "var.v", "unit": unit}
         look = await plugin._key_look(session, assignment)
         zone = await plugin._resolve_display(assignment, "#000", "#fff")
-        assert look.value_text == zone["value_text"] == text
+        assert look.value_text == zone.value_text == text
 
 
 # ──── Context actions: which name runs which action ────

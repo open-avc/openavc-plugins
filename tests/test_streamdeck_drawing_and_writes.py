@@ -34,7 +34,8 @@ if str(_PLUGINS_ROOT) not in sys.path:
 
 from control_surfaces.streamdeck import streamdeck_plugin as sd_module  # noqa: E402
 from control_surfaces.streamdeck.config_check import config_problems  # noqa: E402
-from control_surfaces.streamdeck.looks import METER_DEFAULT_COLOR  # noqa: E402
+from control_surfaces.streamdeck.layouts import TextSlot  # noqa: E402
+from control_surfaces.streamdeck.looks import METER_DEFAULT_COLOR, Look  # noqa: E402
 from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
 
 try:
@@ -170,8 +171,8 @@ def _session(plugin, deck, serial="SN1"):
 
 def _label_call(args, kwargs):
     """One label paste as (text, color, box, max_font, max_lines)."""
-    label, color, box = args
-    return (label, color, tuple(box), kwargs["max_font"], kwargs["max_lines"])
+    slot, color = args
+    return (slot.text, color, (slot.x, slot.y, slot.w, slot.h), slot.max_font, slot.max_lines)
 
 
 def _record_labels(plugin):
@@ -222,9 +223,7 @@ def _bbox(img, rgb):
 
 def _key_image(plugin, session, label, icon=None, value="", meter=None,
                bg=BG, fg=FG):
-    return plugin._create_button_image(
-        session, label, bg, fg, icon, value_text=value, meter=meter,
-    )
+    return plugin._create_button_image(session, Look(label, icon, bg, fg, value, meter))
 
 
 def _key_rig(pil, key_size=(72, 72), renders=True):
@@ -549,7 +548,7 @@ def test_a_label_with_no_text_or_no_room_draws_nothing(pil):
     for label, box in (("", (0, 0, 100, 50)), ("Hi", (0, 0, 0, 50)),
                        ("Hi", (0, 0, 100, 0)), ("Hi", (0, 0, -5, 50)),
                        (None, (0, 0, 100, 50))):
-        plugin._paste_label(img, label, "#ffffff", box, max_font=14, max_lines=2)
+        plugin._paste_label(img, TextSlot(label, *box, 14, 2), "#ffffff")
     assert plugin._label_cache == {}
     assert _bbox(img, (0, 0, 0)) == (0, 0, 100, 50)
 
@@ -558,7 +557,7 @@ def test_a_label_draws_at_its_box_and_is_cached_by_its_fit(pil):
     plugin, state, logs = _plugin()
     plugin._load_text_font()
     img = pil.new("RGB", (100, 60), (0, 0, 0))
-    plugin._paste_label(img, "Hi", "#ffffff", (30, 10, 40, 20), max_font=14, max_lines=2)
+    plugin._paste_label(img, TextSlot("Hi", 30, 10, 40, 20, 14, 2), "#ffffff")
     assert list(plugin._label_cache) == [("Hi", 40, 20, "#ffffff", 14, 2)]
     layer = plugin._label_cache[("Hi", 40, 20, "#ffffff", 14, 2)]
     alone = pil.new("RGB", (40, 20), (0, 0, 0))

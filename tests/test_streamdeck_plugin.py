@@ -52,6 +52,7 @@ from control_surfaces.streamdeck.watch_keys import button_watches_key  # noqa: E
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 from control_surfaces.streamdeck.looks import (  # noqa: E402
     METER_DEFAULT_COLOR,
+    Look,
     meter_fill,
 )
 import control_surfaces.streamdeck.net_deck as net_deck  # noqa: E402
@@ -1238,10 +1239,10 @@ async def test_default_zone_carries_dial_display_fields():
     # The adjust declares bounds, so the zone meters automatically once the
     # value exists; with the value unset there is no bar yet.
     resolved = await plugin._resolve_display(zones[0], "#000", "#fff")
-    assert resolved["meter"] is None
+    assert resolved.meter is None
     state.set("var.volume", 70, source="test")
     resolved = await plugin._resolve_display(zones[0], "#000", "#fff")
-    assert resolved["meter"] == (0.7, METER_DEFAULT_COLOR)
+    assert resolved.meter == (0.7, METER_DEFAULT_COLOR)
 
 
 @pytest.mark.asyncio
@@ -1259,17 +1260,17 @@ async def test_resolve_display_value_unit_and_feedback():
         },
     }
     resolved = await plugin._resolve_display(element, "#000", "#fff")
-    assert resolved["value_text"] == "42 dB"
-    assert resolved["bg"] == "#ff0000"          # clip active -> red zone
-    assert resolved["meter"] == (0.42, METER_DEFAULT_COLOR)
+    assert resolved.value_text == "42 dB"
+    assert resolved.bg_color == "#ff0000"          # clip active -> red zone
+    assert resolved.meter == (0.42, METER_DEFAULT_COLOR)
     state.set("device.amp.clip", False, source="test")
     resolved = await plugin._resolve_display(element, "#000", "#fff")
-    assert resolved["bg"] == "#101010"
+    assert resolved.bg_color == "#101010"
     # Percent units attach without a space.
     state.set("var.mic_gain", 50, source="test")
     element2 = {"value_source": "var.mic_gain", "unit": "%"}
     resolved2 = await plugin._resolve_display(element2, "#000", "#fff")
-    assert resolved2["value_text"] == "50%"
+    assert resolved2.value_text == "50%"
 
 
 @pytest.mark.asyncio
@@ -2705,7 +2706,7 @@ def test_create_button_image_sizes_and_wraps(monkeypatch):
     # Short and long labels both yield a correctly-sized image without raising.
     for label in ["OK", "Presentation Mode",
                   "A really long multi word button label that must wrap"]:
-        img = plugin._create_button_image(session, label, "#1a1a2e", "#e0e0e0")
+        img = plugin._create_button_image(session, Look(label, None, "#1a1a2e", "#e0e0e0"))
         assert img.size == (72, 72)
         assert img.mode == "RGB"
 
@@ -2714,7 +2715,7 @@ def test_create_button_image_sizes_and_wraps(monkeypatch):
 
     # Icon + label path also renders to the right size.
     plugin._load_icon_font()
-    img = plugin._create_button_image(session, "Power", "#1a1a2e", "#e0e0e0", icon_name="power")
+    img = plugin._create_button_image(session, Look("Power", "power", "#1a1a2e", "#e0e0e0"))
     assert img.size == (72, 72)
 
 

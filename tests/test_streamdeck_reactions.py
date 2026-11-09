@@ -837,9 +837,9 @@ def _render_rig(config, deck=None):
     session = _session(plugin, deck if deck is not None else _Deck(keys=4, touch_keys=2))
     calls = []
 
-    def _image(session_, label, bg, fg, icon_name=None, value_text="", meter=None):
-        image = {"label": label, "bg": bg, "fg": fg, "icon": icon_name,
-                 "value": value_text, "meter": meter}
+    def _image(session_, look):
+        image = {"label": look.label, "bg": look.bg_color, "fg": look.text_color,
+                 "icon": look.icon, "value": look.value_text, "meter": look.meter}
         calls.append(("image", image))
         return image
 

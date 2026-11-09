@@ -4,8 +4,9 @@ values it reads: the value line, the meter's fill and color, and the feedback
 style.
 
 Keys and display elements (zones, info items) share these rules; the plugin
-reads the state they need and draws what they return. A look is the tuple
-``(label, icon, bg_color, text_color)``.
+reads the state they need and draws what they return. What one shows is a
+``Look``; the feedback style restyles its first four fields, passed as the
+tuple ``(label, icon, bg_color, text_color)``.
 
 Two feedback forms exist. A ``states`` map styles by the watched value as
 text (a missing value reads as ``""``), falling back to ``default_state``.
@@ -15,9 +16,31 @@ Without a usable map, the ``condition`` pair applies ``style_active`` or
 object. In every form an empty field keeps what the look already has.
 """
 
+from dataclasses import dataclass
+
 from .conditions import coerce_numeric, reads_as_on
 
 METER_DEFAULT_COLOR = "#8ab493"
+
+
+@dataclass
+class Look:
+    """What a key, a strip zone or an info item shows: its label, icon name
+    (None for none), colors, live value line and meter (``meter_fill``'s
+    answer, None for none)."""
+
+    label: str
+    icon: object
+    bg_color: str
+    text_color: str
+    value_text: str = ""
+    meter: object = None
+
+
+def plain(color):
+    """A key filled with one color and nothing on it (a hidden key, a
+    flash)."""
+    return Look("", None, color, color)
 
 
 def value_line(raw_value, unit):
