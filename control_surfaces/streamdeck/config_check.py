@@ -25,6 +25,7 @@ from .conditions import KNOWN_OPERATORS, coerce_numeric
 from .declared_decks import endpoint_key, network_endpoint, virtual_serial
 from .key_entries import ACTION_KINDS, unwrap_binding, write_door
 from .pages import NEXT_PAGE, PREV_PAGE, page_number
+from .screens import IDLE_MODES
 from .virtual_deck import VIRTUAL_MODELS
 
 _KNOWN_MODES = ("tap", "toggle", "hold_repeat", "tap_hold")
@@ -372,7 +373,7 @@ def _touchscreen_problems(ts, path):
         return [f"{path} is not an object, so the touch strip shows the clock."]
     problems = []
     idle = ts.get("idle")
-    if idle is not None and idle not in ("clock", "blank"):
+    if idle is not None and idle not in IDLE_MODES:
         problems.append(
             f"{path}.idle {_shown(idle)} is not \"clock\" or \"blank\", so the strip shows the clock."
         )

@@ -34,6 +34,7 @@ if str(_PLUGINS_ROOT) not in sys.path:
 
 from control_surfaces.streamdeck import streamdeck_plugin as sd_module  # noqa: E402
 from control_surfaces.streamdeck.config_check import config_problems  # noqa: E402
+from control_surfaces.streamdeck.screens import info_items  # noqa: E402
 from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
 
 try:
@@ -415,12 +416,12 @@ def test_the_info_screen_reads_its_own_decks_config_view():
 
 def test_info_elements_from_a_non_object_are_none():
     for cfg in (None, "x", 3, ["a"]):
-        assert StreamDeckPlugin._info_strip_items(cfg, 248) == []
+        assert info_items(cfg, 248) == []
 
 
 def test_an_items_list_with_no_objects_reads_the_config_itself():
     cfg = {"items": ["a", 3], "key": "var.t", "label": "T"}
-    elements = StreamDeckPlugin._info_strip_items(cfg, 248)
+    elements = info_items(cfg, 248)
     assert elements == [{
         "items": ["a", 3], "key": "var.t", "label": "T",
         "value_source": "var.t", "x": 0, "w": 248,
@@ -430,18 +431,18 @@ def test_an_items_list_with_no_objects_reads_the_config_itself():
 
 def test_info_items_split_the_width_and_keep_the_first_two():
     items = [{"label": "A"}, "skip", {"key": "var.b"}, {"label": "C"}]
-    elements = StreamDeckPlugin._info_strip_items({"items": items}, 249)
+    elements = info_items({"items": items}, 249)
     assert elements == [
         {"label": "A", "value_source": "", "x": 0, "w": 124},
         {"key": "var.b", "value_source": "var.b", "x": 124, "w": 124},
     ]
     assert items[0] == {"label": "A"}
-    one = StreamDeckPlugin._info_strip_items({"items": [{"label": "A"}]}, 0)
+    one = info_items({"items": [{"label": "A"}]}, 0)
     assert one == [{"label": "A", "value_source": "", "x": 0, "w": 0}]
 
 
 def test_an_info_elements_source_words():
-    read = StreamDeckPlugin._info_strip_items
+    read = info_items
     text = read({"source": "text", "text": 42, "value_source": "var.v"}, 10)
     assert text == [{"source": "text", "text": 42, "value_static": "42", "x": 0, "w": 10}]
     no_text = read({"source": "text"}, 10)

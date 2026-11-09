@@ -48,6 +48,7 @@ from control_surfaces.streamdeck.conditions import (  # noqa: E402
 from control_surfaces.streamdeck.virtual_deck import VIRTUAL_MODELS  # noqa: E402
 from control_surfaces.streamdeck.key_entries import press_actions  # noqa: E402
 from control_surfaces.streamdeck.pages import key_target_page  # noqa: E402
+from control_surfaces.streamdeck.screens import info_items  # noqa: E402
 from control_surfaces.streamdeck.watch_keys import button_watches_key  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 from control_surfaces.streamdeck.looks import (  # noqa: E402
@@ -1509,7 +1510,7 @@ async def test_info_idle_modes():
 
 def test_info_strip_items_split_and_legacy():
     # Two items split the screen; sources normalize like zones.
-    items = StreamDeckPlugin._info_strip_items(
+    items = info_items(
         {"items": [
             {"label": "Temp", "key": "var.temp"},
             {"source": "text", "text": "Room A"},
@@ -1520,12 +1521,12 @@ def test_info_strip_items_split_and_legacy():
     assert items[0]["value_source"] == "var.temp"
     assert items[1]["value_static"] == "Room A"
     # More than two items: the screen fits two.
-    many = StreamDeckPlugin._info_strip_items(
+    many = info_items(
         {"items": [{"label": str(n)} for n in range(4)]}, 248
     )
     assert len(many) == 2
     # Legacy single shape -> one full-width element.
-    legacy = StreamDeckPlugin._info_strip_items(
+    legacy = info_items(
         {"source": "state", "key": "var.x", "label": "X"}, 248
     )
     assert legacy[0]["x"] == 0 and legacy[0]["w"] == 248

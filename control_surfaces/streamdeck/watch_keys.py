@@ -34,6 +34,7 @@ from .key_entries import (
     press_actions,
     unwrap_binding,
 )
+from .screens import info_items
 
 # The live sources every display element reads: keys, strip zones and info
 # items alike. A field only keys read goes into ``button_keys``, not here.
@@ -169,15 +170,15 @@ def macro_keys(cfg):
     return marks
 
 
-def deck_watch(cfg, info_items):
-    """Everything a deck's config view reads. ``info_items`` is the info
-    strip's elements as the deck lays them out."""
+def deck_watch(cfg):
+    """Everything a deck's config view reads; the info screen's keys are
+    those its elements read (screens.info_items)."""
     keys = set()
     for btn in page_buttons(cfg) + global_buttons(cfg):
         keys.update(button_keys(btn))
     auto_page = _rule_keys(cfg.get("auto_page", []))
     touch_strip = _strip_keys(cfg)
-    info_strip = _info_keys(info_items)
+    info_strip = _info_keys(info_items(cfg.get("info_strip"), 0))
     brightness = _rule_keys(cfg.get("auto_brightness", []))
     for part in (auto_page, touch_strip, info_strip, brightness):
         keys |= part

@@ -15,8 +15,9 @@ gesture runs, and the touch strip's zones), key_entries.py (which config entry
 a key runs, the actions a binding holds, and what a deck may write),
 layouts.py (where each part of a key, a strip zone, the idle clock and an
 overlay is drawn), looks.py (what a key, a strip zone or an info item shows:
-the value line, the meter, the feedback style),
-context_actions.py (what a context action or a simulated input asks for),
+the value line, the meter, the feedback style), screens.py (the info screen's
+elements, and when the touch strip or the info screen is idle and shows the
+clock), context_actions.py (what a context action or a simulated input asks for),
 deck_answers.py (what a network deck's discovery answer says),
 deck_profile.py (what a deck says about itself when it opens: its transport,
 serial, model and geometry), pages.py (how many pages a deck has, and which
@@ -48,7 +49,6 @@ from .declared_decks import (
 from .key_entries import (
     action_list,
     assignment_for,
-    objects,
     press_actions,
     unwrap_binding,
     variable_name,
@@ -65,13 +65,11 @@ from .deck_profile import (
     tell_link_serial,
 )
 from .dials import (
-    declared_zones,
     dial_entry,
     lay_out_zones,
     live_adjust,
     push_deferred,
     release_actions,
-    shows_on_strip,
     turn_route,
 )
 from .layouts import (
@@ -84,6 +82,7 @@ from .layouts import (
 from .looks import Look, meter_fill, plain, styled, value_line
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .pages import key_target_page, page_count, page_number, page_step
+from .screens import CLOCK, info_idle_mode, info_items, strip_idle_mode
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
 from .watch_keys import deck_watch, keys_watching, zone_watches_key
 
@@ -2115,37 +2114,14 @@ class StreamDeckPlugin:
         self._paste_label(img, date_slot, "#8a8a9a")
 
     def _strip_idle_mode(self, session):
-        """``"clock"``/``"blank"`` when nothing is configured for the touch
-        strip (no declared zones, no dial worth a zone), else None."""
-        cfg = self._deck_config(session)
-        if declared_zones(cfg) or any(map(shows_on_strip, objects(cfg.get("dials", [])))):
-            return None
-        ts = cfg.get("touchscreen", {})
-        ts = ts if isinstance(ts, dict) else {}
-        return "blank" if ts.get("idle") == "blank" else "clock"
+        """What a deck's idle touch strip shows (screens.strip_idle_mode, read
+        from its config view): CLOCK or BLANK, None when not idle."""
+        return strip_idle_mode(self._deck_config(session))
 
     def _info_idle_mode(self, session):
-        """``"clock"``/``"blank"`` when the info screen has nothing
-        configured (or explicitly asks for the clock), else None."""
-        cfg = self._deck_config(session).get("info_strip")
-        if not isinstance(cfg, dict):
-            return "clock"
-        source = cfg.get("source")
-        if source == "clock":
-            return "clock"
-        if source == "blank":
-            return "blank"
-        items = cfg.get("items")
-        if isinstance(items, list) and any(isinstance(i, dict) for i in items):
-            return None
-        if any(
-            cfg.get(field) for field in (
-                "key", "text", "label", "label_source", "value_source",
-                "icon", "meter",
-            )
-        ):
-            return None
-        return "clock"
+        """What a deck's idle info screen shows (screens.info_idle_mode, read
+        from its config view): CLOCK or BLANK, None when not idle."""
+        return info_idle_mode(self._deck_config(session).get("info_strip"))
 
     async def _tick_clock(self, session):
         """Re-render idle clocks when the wall-clock minute changes
@@ -2156,9 +2132,9 @@ class StreamDeckPlugin:
         session.clock_minute = minute
         if not session.drawable:
             return
-        if session.deck.is_touch() and self._strip_idle_mode(session) == "clock":
+        if session.deck.is_touch() and self._strip_idle_mode(session) == CLOCK:
             await self._render_touchscreen(session)
-        if self._info_idle_mode(session) == "clock":
+        if self._info_idle_mode(session) == CLOCK:
             await self._render_info_strip(session)
 
     async def _render_touchscreen(self, session):
@@ -2218,8 +2194,8 @@ class StreamDeckPlugin:
 
     def _draw_idle(self, session, img, idle):
         """An idle strip's or info screen's content on ``img``: the clock in
-        the deck's text color, or nothing for ``"blank"``."""
-        if idle == "clock":
+        the deck's text color for CLOCK, else nothing."""
+        if idle == CLOCK:
             width, height = img.size
             fg = self._deck_setting(session, "text_color", "#e0e0e0")
             self._draw_clock(img, width, height, fg)
@@ -2296,44 +2272,6 @@ class StreamDeckPlugin:
 
     # ──── Info strip (decks with a secondary info screen) ────
 
-    @staticmethod
-    def _info_strip_items(cfg, width):
-        """Normalize ``info_strip`` config to display elements with pixel
-        bounds across the screen.
-
-        Accepts the display-element shape directly ({label, label_source,
-        icon, value_source, unit, meter, feedback, ...}); the legacy
-        ``{source: "state"|"text", key, text}`` shape maps onto it (a text
-        source becomes a static value).
-        """
-        if not isinstance(cfg, dict):
-            return []
-
-        def _normalize(element):
-            if element.get("source") == "text":
-                element["value_static"] = str(element.get("text", ""))
-                element.pop("value_source", None)
-            elif not element.get("value_source"):
-                element["value_source"] = element.get("key", "")
-            return element
-
-        items = cfg.get("items")
-        if isinstance(items, list):
-            items = [_normalize(dict(i)) for i in items if isinstance(i, dict)]
-            # The screen physically fits two items side by side.
-            items = items[:2]
-            if items:
-                slot = width // len(items)
-                for idx, item in enumerate(items):
-                    item["x"] = idx * slot
-                    item["w"] = slot
-                return items
-
-        element = _normalize(dict(cfg))
-        element["x"] = 0
-        element["w"] = width
-        return [element]
-
     async def _render_info_strip(self, session):
         """Render the secondary info screen from the ``info_strip`` config.
 
@@ -2358,7 +2296,7 @@ class StreamDeckPlugin:
         idle = self._info_idle_mode(session)
         if idle is None:
             cfg = self._deck_config(session).get("info_strip")
-            for element in self._info_strip_items(cfg, width):
+            for element in info_items(cfg, width):
                 await self._draw_strip_zone(session, img, element, height)
         else:
             self._draw_idle(session, img, idle)
@@ -3012,7 +2950,7 @@ class StreamDeckPlugin:
         is watch_keys.py.
         """
         cfg = self._deck_config(session)
-        watch = deck_watch(cfg, self._info_strip_items(cfg.get("info_strip"), 0))
+        watch = deck_watch(cfg)
         session.auto_page_keys = watch.auto_page
         session.touch_strip_keys = watch.touch_strip
         session.info_strip_keys = watch.info_strip
