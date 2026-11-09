@@ -1185,3 +1185,17 @@ async def test_load_displays_raising_on_a_record_keeps_the_ones_before_it():
         await plugin._load_displays()
     assert [d["id"] for d in plugin._displays] == ["a"]
     assert plugin.api.saved == []
+
+
+@pytest.mark.asyncio
+async def test_poll_stamps_a_join_with_the_wall_clock_second(monkeypatch):
+    plugin = _plugin()
+
+    async def scan():
+        return {"al"}
+
+    plugin._scan_presenters = scan
+    monkeypatch.setattr(present_plugin.time, "time", lambda: 1_700_000_123.9)
+    await plugin._poll()
+    assert plugin._presence == {"al": 1_700_000_123}
+    assert json.loads(plugin.api.state["presenters"])[0]["since"] == 1_700_000_123
