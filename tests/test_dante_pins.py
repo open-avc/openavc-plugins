@@ -409,6 +409,7 @@ async def test_connect_with_a_url_that_is_not_text_raises():
     ("https://ddm/graphql/", "https://ddm"),
     ("https://ddm/x/graphql", "https://ddm/x"),
     ("https://ddm", "https://ddm"),
+    ("https://ddm/", "https://ddm"),
     ("https://ddm/graphql/graphql", "https://ddm/graphql"),
 ])
 async def test_connect_builds_the_base_url_without_the_graphql_path(url, base):
@@ -728,6 +729,17 @@ async def test_refresh_with_the_same_devices_clears_the_keys_gone_and_sends_no_e
     ]
 
 
+async def test_refresh_announces_a_device_replaced_by_another_though_the_count_is_the_same():
+    swapped = _domain_body()
+    swapped["devices"][2] = {"id": "dev-009", "name": "Stage", "txChannels": None, "rxChannels": None}
+    plugin, api = _plugin(answers=[_domain_answer(), _domain_answer(swapped)])
+    plugin._domain_id = "d1"
+    await plugin._refresh_state()
+    api.calls.clear()
+    await plugin._refresh_state()
+    assert api.calls[-1] == ("event", "devices.updated", {"device_count": 3})
+
+
 async def test_refresh_of_a_domain_with_no_device_list_counts_nothing_and_announces_the_change():
     plugin, api = _plugin(answers=[_domain_answer({"id": "d1", "devices": None})])
     plugin._domain_id = "d1"
@@ -997,6 +1009,20 @@ async def test_recall_with_a_missing_receiver_or_a_refused_batch_is_a_partial_fa
     ]
 
 
+async def test_recall_whose_only_failure_is_a_missing_receiver_is_still_a_partial_failure():
+    routes = [
+        {"tx_device": "A", "tx_channel": "1", "rx_device": "AMP 01.a", "rx_channel_index": 2},
+        {"tx_device": "A", "tx_channel": "1", "rx_device": "Gone", "rx_channel_index": 1},
+    ]
+    plugin, api = _plugin({"_presets": {"P": routes}}, answers=[_OK])
+    plugin._devices = _devices()
+    assert await plugin.recall_preset("P") is False
+    assert api.calls[-2:] == [
+        ("log", "error", "Preset: Rx device not found: Gone"),
+        ("event", "route.failed", {"reason": "preset_partial_failure", "preset_name": "P"}),
+    ]
+
+
 async def test_presets_that_are_not_a_mapping_read_as_none():
     plugin, api = _plugin({"_presets": [["Meeting"]]})
     assert plugin._parse_presets() == {}
@@ -1032,6 +1058,8 @@ async def test_clear_all_with_nothing_routed_still_resets_the_preset_shown():
 async def test_snapshot_lists_each_routed_receiver_channel_in_device_order():
     plugin, api = _plugin()
     plugin._devices = _devices()
+    plugin._devices["dev-002"]["rxChannels"].append(
+        {"index": 4, "subscribedDevice": "", "subscribedChannel": "01"})
     assert plugin._snapshot_current_routes() == [
         {"tx_device": "MIC-01", "tx_channel": "01", "rx_device": "AMP 01.a", "rx_channel_index": 1},
         {"tx_device": "MIC-01", "tx_channel": "", "rx_device": "AMP 01.a", "rx_channel_index": 3},
@@ -1123,38 +1151,43 @@ async def test_a_preset_edit_with_presets_that_are_not_a_mapping_starts_from_non
 
 
 async def _dispatch(event_name, payload, config=None):
-    plugin, api = _plugin(config)
-    seen = []
-    names = ["_handle_refresh_domains", "recall_preset", "_handle_save_preset",
-             "_handle_update_preset", "_handle_delete_preset", "_clear_all_subscriptions",
-             "_handle_route_action", "_handle_unroute_action"]
-    for name in names:
-        async def record(*args, _name=name):
-            seen.append((_name, args))
-        setattr(plugin, name, record)
+    """Send one action event to a plugin whose DDM answers every request with
+    a domain list, and return what it did."""
+    plugin, api = _plugin(config, answers=[_domains(("d1", "Main"))])
+    plugin._devices = _devices()
     await plugin._on_action(event_name, payload)
-    return seen, api.calls
+    return api.calls
+
+
+_CLEAR_REQUEST = _mutation("dev-002", [_sub(1, "", ""), _sub(3, "", "")], True)
 
 
 @pytest.mark.parametrize("event_name, payload, expected", [
-    ("plugin.dante.action.refresh_domains", {"x": 1}, [("_handle_refresh_domains", ())]),
-    ("plugin.dante.action.recall_preset", {"preset_name": "M"}, [("recall_preset", ("M",))]),
-    ("plugin.dante.action.save_preset", {"name": "M"}, [("_handle_save_preset", ({"name": "M"},))]),
-    ("plugin.dante.action.save_preset", None, [("_handle_save_preset", ({},))]),
-    ("plugin.dante.action.update_preset", None, [("_handle_update_preset", ({},))]),
-    ("plugin.dante.action.delete_preset", {"name": "M"}, [("_handle_delete_preset", ({"name": "M"},))]),
-    ("plugin.dante.action.clear_all", {"x": 1}, [("_clear_all_subscriptions", ())]),
-    ("plugin.dante.action.route", None, [("_handle_route_action", ({},))]),
-    ("plugin.dante.action.route", {"row": "a.1"}, [("_handle_route_action", ({"row": "a.1"},))]),
-    ("plugin.dante.action.unroute", {"row": "a.1"}, [("_handle_unroute_action", ({"row": "a.1"},))]),
-    ("unroute", None, [("_handle_unroute_action", ({},))]),
+    ("plugin.dante.action.refresh_domains", {"x": 1},
+     [_DOMAINS_POST, ("log", "info", "Domain: Main (ID: d1)")]),
+    ("plugin.dante.action.recall_preset", {"preset_name": "M"},
+     [("log", "error", "Preset not found: M")]),
+    ("plugin.dante.action.save_preset", {"name": "M"},
+     [("save_config", {"_presets": {"M": _SNAP}}),
+      ("state", "active_preset", "M"),
+      ("state", "preset_dirty", False),
+      ("log", "info", "Saved preset: M (2 routes)")]),
+    ("plugin.dante.action.save_preset", None, [("log", "error", "Save preset: name is required")]),
+    ("plugin.dante.action.update_preset", None, [("log", "error", "Update preset: name is required")]),
+    ("plugin.dante.action.delete_preset", {"name": "M"}, [("log", "error", "Preset 'M' does not exist")]),
+    ("plugin.dante.action.clear_all", {"x": 1}, [_CLEAR_REQUEST]),
+    ("plugin.dante.action.route", None, [("log", "error", "Route action missing required fields")]),
+    ("plugin.dante.action.route", {"row": "amp_01_a.1"},
+     [("log", "error", "Route action missing required fields")]),
+    ("plugin.dante.action.unroute", {"row": "a.1"},
+     [("log", "error", "Could not resolve matrix reference: row=a.1")]),
+    ("unroute", None, [("log", "error", "Unroute action missing required fields")]),
     ("plugin.dante.action.reboot", {"x": 1}, []),
     ("plugin.dante.action.", {"x": 1}, []),
     ("plugin.dante.action.Route", {"x": 1}, []),
 ])
 async def test_each_action_name_runs_its_handler_with_its_payload(event_name, payload, expected):
-    seen, calls = await _dispatch(event_name, payload)
-    assert seen == expected and calls == []
+    assert await _dispatch(event_name, payload) == expected
 
 
 @pytest.mark.parametrize("payload, config, logs", [
@@ -1163,8 +1196,7 @@ async def test_each_action_name_runs_its_handler_with_its_payload(event_name, pa
     ({"preset_name": None}, {"_presets": "x"}, [("log", "warning", "No presets configured")]),
 ])
 async def test_a_recall_with_no_preset_name_lists_the_presets_instead(payload, config, logs):
-    seen, calls = await _dispatch("plugin.dante.action.recall_preset", payload, config)
-    assert seen == [] and calls == logs
+    assert await _dispatch("plugin.dante.action.recall_preset", payload, config) == logs
 
 
 async def test_refresh_domains_logs_each_domain_or_why_there_are_none():
