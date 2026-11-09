@@ -751,6 +751,8 @@ def test_a_whep_session_route_checks_the_id_then_the_secret_and_not_the_stream()
     assert r.status_code == 422 and r.json()["detail"].startswith("Stream ID may")
     r = client.delete("/whep/cam/bad_secret")
     assert (r.status_code, r.json()["detail"]) == (422, "Invalid WHEP session id.")
+    r = client.patch("/whep/cam/bad_secret", content=b"")
+    assert (r.status_code, r.json()["detail"]) == (422, "Invalid WHEP session id.")
     assert plugin.api.proxy_calls == []
     assert client.patch("/whep/nope/abc", content=b"").status_code == 204
     assert client.delete("/whep/cam/abc").status_code == 200
@@ -917,6 +919,9 @@ async def test_odd_scopes_and_odd_reachability_keys():
         "device.c.d.01.offline_detail": "child says",
         "device.e.f.preview_url": "rtsp://e/1",
         "device.e.f.online": False,  # four parts: a scope, but not a child's key
+        "device.g.preview_url": "rtsp://g/1",
+        "device.g.connected": True,
+        "device.g.x.connected": False,  # four parts, read after the device's own
     })
     await plugin._rebuild_discovered()
     assert {sid: (d["device"], d["group"], d["status"], d["detail"])
@@ -925,6 +930,7 @@ async def test_odd_scopes_and_odd_reachability_keys():
         "auto-a": ("a", "a", "offline", _OFFLINE),
         "auto-c-d-01": ("c", "c", "", ""),
         "auto-e-f": ("e", "e", "", ""),
+        "auto-g": ("g", "g", "", ""),
     }
 
 
@@ -1282,7 +1288,9 @@ async def test_a_start_with_a_port_taken_refuses_after_writing_its_config(monkey
     )
     with pytest.raises(vp_mod.PluginRefusal) as exc:
         await plugin.start(plugin.api)
-    assert str(exc.value) == msg
+    # The type tells only where the platform is importable (PluginRefusal is
+    # RuntimeError without it); run with the openavc checkout on PYTHONPATH.
+    assert type(exc.value) is vp_mod.PluginRefusal and str(exc.value) == msg
     assert entries[4:] == [
         ("state", "running", False),
         ("state", "error", ""),
