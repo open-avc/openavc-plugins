@@ -767,9 +767,7 @@ class StreamDeckPlugin:
             await self._settle_page(session)
 
             await self._apply_active_brightness(session)
-            await self._render_all_buttons(session)
-            await self._render_touchscreen(session)
-            await self._render_info_strip(session)
+            await self._render_deck(session)
 
         await self._publish_deck_state()
         return True
@@ -902,11 +900,7 @@ class StreamDeckPlugin:
         # Subscribe to state changes for feedback, visibility, and auto-page keys
         await self._setup_feedback_subscriptions(session)
         await self._show_opening_page(session)
-
-        # Render all buttons for the current page, then the secondary displays
-        await self._render_all_buttons(session)
-        await self._render_touchscreen(session)
-        await self._render_info_strip(session)
+        await self._render_deck(session)
 
     def _wire_callbacks(self, session):
         """Bind a deck's key, dial and touch callbacks to its session, the
@@ -1370,21 +1364,18 @@ class StreamDeckPlugin:
                 )
 
     async def _set_live_mirror(self, payload):
-        """Toggle mirroring of physical decks (virtual decks always mirror)."""
+        """Toggle mirroring of physical decks (virtual decks always mirror).
+        Turned on, every deck is redrawn so the mirror holds what it shows
+        now; turned off, the physical decks' images are dropped."""
         turn_on = bool(payload.get("on"))
         if turn_on == self._mirror_physical:
             return
         self._mirror_physical = turn_on
-        if turn_on:
-            # Populate the mirror with the current rendering of every deck.
-            for session in list(self._sessions.values()):
-                await self._render_all_buttons(session)
-                await self._render_touchscreen(session)
-                await self._render_info_strip(session)
-        else:
-            for session in list(self._sessions.values()):
-                if not session.is_virtual:
-                    self._drop_mirror_blobs(session.serial)
+        for session in list(self._sessions.values()):
+            if turn_on:
+                await self._render_deck(session)
+            elif not session.is_virtual:
+                self._drop_mirror_blobs(session.serial)
 
     # ──── Automation actions (driven by macro event.emit steps) ────
 
@@ -1439,9 +1430,7 @@ class StreamDeckPlugin:
         if not session.overlay_active:
             return
         session.overlay_active = False
-        await self._render_all_buttons(session)
-        await self._render_touchscreen(session)
-        await self._render_info_strip(session)
+        await self._render_deck(session)
 
     async def _draw_overlay(self, session, text):
         """Show ``text`` everywhere a deck can: across the keys (one canvas
@@ -2491,6 +2480,14 @@ class StreamDeckPlugin:
         self.api.log(f"Switched to page {new_page}", level="debug")
 
     # ──── Button Rendering ────
+
+    async def _render_deck(self, session):
+        """Redraw everything a deck shows: its keys on the page showing, then
+        its touch strip, then its info screen (each draws nothing on a deck
+        without one)."""
+        await self._render_all_buttons(session)
+        await self._render_touchscreen(session)
+        await self._render_info_strip(session)
 
     async def _render_all_buttons(self, session):
         """Render every key for a deck's current page (LCD keys + touch keys)."""
