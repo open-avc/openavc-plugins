@@ -226,6 +226,11 @@ _REMOTE_BLOCKED_DETAIL = (
 # before they're spliced into the proxied sidecar URL.
 _SECRET_RE = re.compile(r"[A-Za-z0-9-]+")
 
+
+def _no_such_stream(stream_id):
+    """The 404 for a stream id that names nothing the route can serve."""
+    return HTTPException(404, f"No stream with id '{stream_id}'.")
+
 # Auto-discovered preview sources (preview_sources.py) are rescanned on a
 # trailing debounce: coalesce a burst of preview-key changes (e.g. a controller
 # enumerating dozens of encoders at once) into a single rebuild.
@@ -1206,83 +1211,31 @@ class VideoPanelPlugin:
 
         @router.get("/status")
         async def status():
-            return {
-                "running": bool(self._supervisor and self._supervisor.running),
-                "mediamtx_version": _MEDIAMTX_VERSION,
-                "stream_ids": [s["stream_id"] for s in self._streams],
-            }
+            return self._status()
 
         @router.get("/streams")
         async def list_streams():
-            live = await self._live_status_map()
-            return {"streams": [stream_records.programmer_view(s, live) for s in self._streams]}
+            return await self._list_streams()
 
         @router.post("/streams")
         async def add_stream(data: StreamIn):
-            entry = stream_records.new_record(self._streams, data, self.api.log)
-            self._streams.append(entry)
-            await self._persist_streams()
-            await self._sync_path_add(entry)
-            await self._publish_streams()
-            live = await self._live_status_map()
-            return stream_records.programmer_view(entry, live)
+            return await self._add_stream(data)
 
         @router.put("/streams/{stream_id}")
         async def edit_stream(stream_id: str, data: StreamIn):
-            existing = stream_records.find(self._streams, stream_id)
-            if not existing:
-                raise HTTPException(404, f"No stream with id '{stream_id}'.")
-            entry = stream_records.edited_record(self._streams, existing, data, self.api.log)
-            self._streams[self._streams.index(existing)] = entry
-            await self._persist_streams()
-            # save_config does not restart the plugin, so the MediaMTX path must be
-            # re-synced live. Delete-then-add covers both source edits and renames.
-            await self._sync_path_delete(stream_id)
-            await self._sync_path_add(entry)
-            await self._publish_streams()
-            live = await self._live_status_map()
-            return stream_records.programmer_view(entry, live)
+            return await self._edit_stream(stream_id, data)
 
         @router.delete("/streams/{stream_id}")
         async def delete_stream(stream_id: str):
-            existing = stream_records.find(self._streams, stream_id)
-            if not existing:
-                raise HTTPException(404, f"No stream with id '{stream_id}'.")
-            self._streams.remove(existing)
-            await self._persist_streams()
-            await self._sync_path_delete(stream_id)
-            await self.api.state_set(f"streams.{stream_id}", None)
-            await self._publish_streams()
-            return {"status": "deleted", "stream_id": stream_id}
+            return await self._delete_stream(stream_id)
 
         @router.post("/streams/probe")
         async def probe_stream(body: ProbeIn):
-            stream_records.validate_url(body.rtsp_url)
-            if not self._ffmpeg_bin:
-                raise HTTPException(
-                    503,
-                    "ffmpeg is not available. Reinstall the Video Panel plugin to "
-                    "fetch its native dependencies.",
-                )
-            password = stream_records.password_for_test(self._streams, body)
-            url = stream_records.source_url(body.rtsp_url, body.username, password)
-            return await self._probe_rtsp(url)
+            return await self._probe_stream(body)
 
         @router.get("/streams/{stream_id}/snapshot.jpg")
         async def snapshot(stream_id: str):
-            stream = stream_records.find(self._streams, stream_id)
-            if not stream:
-                raise HTTPException(404, f"No stream with id '{stream_id}'.")
-            if not self._ffmpeg_bin:
-                raise HTTPException(503, "ffmpeg is not available.")
-            data = await self._snapshot_rtsp(stream_records.stream_source_url(stream))
-            if not data:
-                raise HTTPException(502, "Could not capture a frame from the stream.")
-            return Response(
-                content=data,
-                media_type="image/jpeg",
-                headers={"Cache-Control": "no-store"},
-            )
+            return await self._snapshot(stream_id)
 
         # ── How should THIS viewer play THIS stream? ──
         # The element used to answer that itself, off the shared stream list.
@@ -1291,9 +1244,7 @@ class VideoPanelPlugin:
         # playback, and dispatches on what comes back.
         @router.get("/delivery/{stream_id}")
         async def delivery(stream_id: str, request: Request):
-            stream_records.validate_stream_id(stream_id)
-            if not self._is_known_stream(stream_id):
-                raise HTTPException(404, f"No stream with id '{stream_id}'.")
+            self._check_playable(stream_id)
             return self._delivery_for(stream_id, request)
 
         # Why a tile has no picture, kept where it outlives the tile. Every
@@ -1303,16 +1254,7 @@ class VideoPanelPlugin:
         # nobody had open, and is gone the moment the panel reloads.
         @router.post("/report")
         async def report_failure(body: ReportIn):
-            reason = " ".join(body.reason.split())[:200]
-            stream_id = body.stream_id or ""
-            if stream_id:
-                stream_records.validate_stream_id(stream_id)
-            await self.api.state_set("playback_error", reason)
-            await self.api.state_set("playback_error_stream", stream_id)
-            await self.api.state_set(
-                "playback_error_at", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            )
-            return {"ok": True}
+            return await self._report_failure(body)
 
         # ── HLS reverse proxy (tunnelled viewers only) ──
         # Playlists and segments are ordinary small GETs, which is the whole
@@ -1322,25 +1264,7 @@ class VideoPanelPlugin:
         # follow-up comes back through here authenticated.
         @router.get("/hls/{stream_id}/{filename}")
         async def hls(stream_id: str, filename: str, request: Request):
-            stream_records.validate_stream_id(stream_id)
-            if not self._is_known_stream(stream_id):
-                raise HTTPException(404, f"No stream with id '{stream_id}'.")
-            if not _HLS_FILE_RE.fullmatch(filename or ""):
-                raise HTTPException(422, "Invalid HLS file name.")
-            # Re-checked on every fetch, not just at the delivery call: a plan
-            # can be revoked mid-session, and the segment fetches are the part
-            # that actually spends the bandwidth.
-            if self._viewer_access(request) == VIEWER_REMOTE_BLOCKED:
-                raise HTTPException(402, _REMOTE_BLOCKED_DETAIL)
-            # The query is not decoration. MediaMTX puts the HLS session in it,
-            # and under lowLatency the part requests carry _HLS_msn/_HLS_part --
-            # which IS the low latency. Dropping it left every derived request
-            # asking for something else than the player meant.
-            upstream_query, token = _split_plugin_token(request.url.query)
-            return await self._hls_stream_response(
-                self._hls_url(stream_id, filename, upstream_query),
-                token=token,
-            )
+            return await self._hls(stream_id, filename, request)
 
         # ── MJPEG (multipart-over-HTTP) reverse proxy ──
         # Auto-discovered MJPEG previews (e.g. a Chazy encoder's ?action=stream
@@ -1351,60 +1275,192 @@ class VideoPanelPlugin:
         # only the OpenAVC host needs a route to the AV/video LAN.
         @router.get("/mjpeg/{stream_id}")
         async def mjpeg(stream_id: str, request: Request):
-            stream_records.validate_stream_id(stream_id)
-            url = self._resolve_mjpeg_url(stream_id)
-            if not url:
-                raise HTTPException(404, f"No MJPEG preview for '{stream_id}'.")
-            # MJPEG crosses the tunnel perfectly well on its own -- which is
-            # exactly why it is gated too. It carries no interframe compression,
-            # so it is the most expensive of the three paths per minute, and a
-            # switch that let the dearest one through would not be a switch.
-            if self._viewer_access(request) == VIEWER_REMOTE_BLOCKED:
-                raise HTTPException(402, _REMOTE_BLOCKED_DETAIL)
-            return await self._mjpeg_stream_response(url)
+            return await self._mjpeg(stream_id, request)
 
         # ── WHEP (WebRTC playback) reverse proxy ──
         # The panel iframe's WHEP client POSTs an SDP offer here; we forward it
         # to the sidecar's WebRTC server (localhost, Basic-authed via the URL
-        # userinfo httpx applies) and return the SDP answer. MediaMTX answers
-        # with a path-absolute Location (/{stream_id}/whep/{session}); left
-        # as-is the browser would resolve the follow-up PATCH/DELETE against
-        # the origin root, bypassing this authenticated mount. So we rewrite
-        # Location to sit under the incoming request path — the trickle and
-        # teardown then come back through here.
+        # userinfo httpx applies) and return the SDP answer. The trickle and
+        # teardown come back through here too (see _whep_offer).
         @router.post("/whep/{stream_id}")
         async def whep_offer(stream_id: str, request: Request):
-            stream_records.validate_stream_id(stream_id)
-            if not self._is_known_stream(stream_id):
-                raise HTTPException(404, f"No stream with id '{stream_id}'.")
-            # allow_internal: the sidecar is on localhost; proxy_to refuses
-            # internal hosts by default (SSRF guard).
-            resp = await self.api.proxy_to(
-                self._whep_url(stream_id), request, allow_internal=True
-            )
-            location = resp.headers.get("location")
-            if location:
-                secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-                resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
-            return resp
+            return await self._whep_offer(stream_id, request)
 
         @router.patch("/whep/{stream_id}/{secret}")
         async def whep_trickle(stream_id: str, secret: str, request: Request):
-            stream_records.validate_stream_id(stream_id)
-            self._validate_secret(secret)
-            return await self.api.proxy_to(
-                self._whep_url(stream_id, secret), request, allow_internal=True
-            )
+            return await self._whep_session(stream_id, secret, request)
 
         @router.delete("/whep/{stream_id}/{secret}")
         async def whep_teardown(stream_id: str, secret: str, request: Request):
-            stream_records.validate_stream_id(stream_id)
-            self._validate_secret(secret)
-            return await self.api.proxy_to(
-                self._whep_url(stream_id, secret), request, allow_internal=True
-            )
+            return await self._whep_session(stream_id, secret, request)
 
         return router
+
+    # The plugin page's operations. Each returns what its route answers, or
+    # raises the HTTPException the page shows; the record rules are
+    # stream_records', what a change does to the sidecar and the state keys is
+    # here.
+
+    def _status(self):
+        return {
+            "running": bool(self._supervisor and self._supervisor.running),
+            "mediamtx_version": _MEDIAMTX_VERSION,
+            "stream_ids": [s["stream_id"] for s in self._streams],
+        }
+
+    async def _list_streams(self):
+        live = await self._live_status_map()
+        return {"streams": [stream_records.programmer_view(s, live) for s in self._streams]}
+
+    def _stream_or_404(self, stream_id):
+        stream = stream_records.find(self._streams, stream_id)
+        if not stream:
+            raise _no_such_stream(stream_id)
+        return stream
+
+    async def _add_stream(self, data):
+        entry = stream_records.new_record(self._streams, data, self.api.log)
+        self._streams.append(entry)
+        await self._persist_streams()
+        await self._sync_path_add(entry)
+        await self._publish_streams()
+        live = await self._live_status_map()
+        return stream_records.programmer_view(entry, live)
+
+    async def _edit_stream(self, stream_id, data):
+        existing = self._stream_or_404(stream_id)
+        entry = stream_records.edited_record(self._streams, existing, data, self.api.log)
+        self._streams[self._streams.index(existing)] = entry
+        await self._persist_streams()
+        # save_config does not restart the plugin, so the MediaMTX path must be
+        # re-synced live. Delete-then-add covers both source edits and renames.
+        await self._sync_path_delete(stream_id)
+        await self._sync_path_add(entry)
+        await self._publish_streams()
+        live = await self._live_status_map()
+        return stream_records.programmer_view(entry, live)
+
+    async def _delete_stream(self, stream_id):
+        existing = self._stream_or_404(stream_id)
+        self._streams.remove(existing)
+        await self._persist_streams()
+        await self._sync_path_delete(stream_id)
+        await self.api.state_set(f"streams.{stream_id}", None)
+        await self._publish_streams()
+        return {"status": "deleted", "stream_id": stream_id}
+
+    async def _probe_stream(self, body):
+        stream_records.validate_url(body.rtsp_url)
+        if not self._ffmpeg_bin:
+            raise HTTPException(
+                503,
+                "ffmpeg is not available. Reinstall the Video Panel plugin to "
+                "fetch its native dependencies.",
+            )
+        password = stream_records.password_for_test(self._streams, body)
+        url = stream_records.source_url(body.rtsp_url, body.username, password)
+        return await self._probe_rtsp(url)
+
+    async def _snapshot(self, stream_id):
+        stream = self._stream_or_404(stream_id)
+        if not self._ffmpeg_bin:
+            raise HTTPException(503, "ffmpeg is not available.")
+        data = await self._snapshot_rtsp(stream_records.stream_source_url(stream))
+        if not data:
+            raise HTTPException(502, "Could not capture a frame from the stream.")
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def _report_failure(self, body):
+        reason = " ".join(body.reason.split())[:200]
+        stream_id = body.stream_id or ""
+        if stream_id:
+            stream_records.validate_stream_id(stream_id)
+        await self.api.state_set("playback_error", reason)
+        await self.api.state_set("playback_error_stream", stream_id)
+        await self.api.state_set(
+            "playback_error_at", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        )
+        return {"ok": True}
+
+    # The play routes. Each checks the stream id's form first; the delivery,
+    # HLS and WHEP offer routes then that the panel may play it at all.
+
+    def _check_playable(self, stream_id):
+        """A well-formed id of a stream the panel may play (configured or
+        discovered), or the refusal: 422, then 404."""
+        stream_records.validate_stream_id(stream_id)
+        if not self._is_known_stream(stream_id):
+            raise _no_such_stream(stream_id)
+
+    def _check_viewer_plan(self, request):
+        """Refuse (402) a tunnelled viewer whose plan has no remote video."""
+        if self._viewer_access(request) == VIEWER_REMOTE_BLOCKED:
+            raise HTTPException(402, _REMOTE_BLOCKED_DETAIL)
+
+    async def _hls(self, stream_id, filename, request):
+        self._check_playable(stream_id)
+        if not _HLS_FILE_RE.fullmatch(filename or ""):
+            raise HTTPException(422, "Invalid HLS file name.")
+        # Re-checked on every fetch, not just at the delivery call: a plan
+        # can be revoked mid-session, and the segment fetches are the part
+        # that actually spends the bandwidth.
+        self._check_viewer_plan(request)
+        # The query is not decoration. MediaMTX puts the HLS session in it,
+        # and under lowLatency the part requests carry _HLS_msn/_HLS_part --
+        # which IS the low latency. Dropping it left every derived request
+        # asking for something else than the player meant.
+        upstream_query, token = _split_plugin_token(request.url.query)
+        return await self._hls_stream_response(
+            self._hls_url(stream_id, filename, upstream_query),
+            token=token,
+        )
+
+    async def _mjpeg(self, stream_id, request):
+        stream_records.validate_stream_id(stream_id)
+        url = self._resolve_mjpeg_url(stream_id)
+        if not url:
+            raise HTTPException(404, f"No MJPEG preview for '{stream_id}'.")
+        # MJPEG crosses the tunnel perfectly well on its own -- which is
+        # exactly why it is gated too. It carries no interframe compression,
+        # so it is the most expensive of the three paths per minute, and a
+        # switch that let the dearest one through would not be a switch.
+        self._check_viewer_plan(request)
+        return await self._mjpeg_stream_response(url)
+
+    async def _whep_offer(self, stream_id, request):
+        """Forward an SDP offer and rewrite the answer's Location.
+
+        MediaMTX answers with a path-absolute Location
+        (/{stream_id}/whep/{session}); left as-is the browser would resolve
+        the follow-up PATCH/DELETE against the origin root, bypassing this
+        authenticated mount. So Location is rewritten to sit under the
+        incoming request path, and the trickle and teardown come back here.
+        """
+        self._check_playable(stream_id)
+        # allow_internal: the sidecar is on localhost; proxy_to refuses
+        # internal hosts by default (SSRF guard).
+        resp = await self.api.proxy_to(
+            self._whep_url(stream_id), request, allow_internal=True
+        )
+        location = resp.headers.get("location")
+        if location:
+            secret = location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            resp.headers["location"] = f"{request.url.path.rstrip('/')}/{secret}"
+        return resp
+
+    async def _whep_session(self, stream_id, secret, request):
+        """A WHEP session's trickle (PATCH) or teardown (DELETE), passed to the
+        sidecar session it names. The id and the session are checked for form
+        only; the stream is not looked up."""
+        stream_records.validate_stream_id(stream_id)
+        self._validate_secret(secret)
+        return await self.api.proxy_to(
+            self._whep_url(stream_id, secret), request, allow_internal=True
+        )
 
     def _viewer_access(self, request):
         """Where this viewer is, as far as tunnel video is concerned.
