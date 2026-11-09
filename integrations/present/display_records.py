@@ -13,8 +13,10 @@ manner. The load at start repairs what it can, skips what it cannot, and says
 whether anything changed so the plugin saves once. The add and edit routes
 refuse instead, with the HTTP status and the sentence the plugin page shows
 (the statuses are part of the rule, hence HTTPException here). The plugin
-writes three things itself: a regenerated key (minted here), and a renamed
-id, written only once the display's running state has moved off the old one.
+writes three things itself: a regenerated display key and a regenerated
+stream key (both minted here; the plugin refuses a stream key to a browser
+display), and a renamed id, written only once the display's running state
+has moved off the old one.
 What a record's kind does to the running outputs, state keys and kiosk
 windows stays with the plugin.
 """
@@ -237,8 +239,9 @@ def new_record(records, data):
 def apply_edit(records, display, data):
     """Apply the edit route's ``data`` to ``display`` in place.
 
-    Returns the id the display is to take; the id itself is not changed here,
-    because a rename first moves the display's running state off the old id. The label,
+    Returns the id the display is to take; the id itself is not changed
+    here, because a rename first moves the display's running state off the
+    old id. The label,
     kind and id are refused before anything changes. A refused local output
     is checked only after the label, kind and stream key were written, so it
     leaves those changes on the record in memory (unsaved).

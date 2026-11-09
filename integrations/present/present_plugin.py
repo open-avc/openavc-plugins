@@ -470,8 +470,9 @@ class PresentPlugin:
             raise
 
     def _find_binaries(self):
-        """Find MediaMTX and FFmpeg in plugin_repo/.deps/; the name of the
-        first one missing, else None."""
+        """Find MediaMTX and FFmpeg in plugin_repo/.deps/ and keep their
+        paths (None when absent); the name of the first one missing, else
+        None."""
         self._mediamtx_bin = self._resolve_dep(self._binary_name("mediamtx"))
         self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
         if self._mediamtx_bin is None:
@@ -723,9 +724,10 @@ class PresentPlugin:
             return
         specs = {}
         for display in self._displays:
-            if display_records.window_allowed(display.get("kind")) and display.get("local_output"):
+            local_output = display.get("local_output")
+            if display_records.window_allowed(display.get("kind")) and local_output:
                 specs[display["id"]] = {
-                    "output": display["local_output"],
+                    "output": local_output,
                     "url": self._local_display_url(display),
                 }
         await self._kiosk.sync(specs)
@@ -1300,8 +1302,8 @@ class PresentPlugin:
     @staticmethod
     def _slugify_presenter(name):
         """Path-safe ingest name from a typed display name ('' when nothing
-        survives). Distinct from display_records.slugify: no fallback value — an empty name
-        is rejected, not defaulted."""
+        survives). Distinct from display_records.slugify: no fallback value —
+        an empty name is rejected, not defaulted."""
         return re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
 
     # ──── Ext router (authed, mounted at /api/plugins/present/ext/) ────

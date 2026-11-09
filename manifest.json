@@ -28,7 +28,7 @@
       "files": {
         "integrations/present/LICENSE": "b79a604c79149a5a0410abe01821c01b4f7dca598249ce91e8b957141012a926",
         "integrations/present/README.md": "abe854445e7f336522377d793b78ec08a429351ed00915f1bcf66aaa84f17be3",
-        "integrations/present/display_records.py": "56bcb3ee827d72e51a09de25312b99416bff66081af870b9b4f503d378fc7654",
+        "integrations/present/display_records.py": "9a0e7bfce9bf1ed49dbc8eb0318864e629f697af4e588c780f31dc78c09c867e",
         "integrations/present/encoders.py": "8eb08c3f3e11683681a3126fdea7c9c5316575feb4ac5017ab162cb79e4fa242",
         "integrations/present/enum_outputs.ps1": "a9646fee2f56883a09c674400ee185f795b1d5d0a027c9fa152c691a76fa2587",
         "integrations/present/hostoutputs.py": "cda3fe37f70dad3968eea3bb74b589f83511642bb2b0eff6c0d06b7e6b39aaa6",
@@ -42,7 +42,7 @@
         "integrations/present/panel/display.html": "74c971a0529923fa81f60a5629dcee72cc14d895faef2e4818216f2033e4074c",
         "integrations/present/panel/display.js": "c5348255ea2d3271bfd5a206f9991730312a819fa398585cdec799446acc3966",
         "integrations/present/plugin.json": "7f26f455489a9c67fa9b6f25a654a7fa5f96f046f6df5ed4944b4918bba68811",
-        "integrations/present/present_plugin.py": "9487e3b4ec957f93b327b62e5806308c18bb8d285814ff5efdaa1c18728345db",
+        "integrations/present/present_plugin.py": "25148578f0f4dbd10445a7404b93c82090c67cdbb12db185bf6776e446de7cf1",
         "integrations/present/sidecar.py": "6106cdf5c11dcac2ba552a847b07684bb06ab6e5d419b8afeb2c32a108d448f4"
       }
     },
