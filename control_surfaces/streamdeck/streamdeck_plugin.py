@@ -83,6 +83,7 @@ from .dials import (
     release_actions,
     turn_route,
     turned_value,
+    zone_fader,
 )
 from .layouts import (
     clock_slots,
@@ -1158,11 +1159,9 @@ class StreamDeckPlugin:
         """Look a deck up by every serial it answers to, once per outage
         (DockLink.claim_look_up, asked last: asking takes the claim), when
         discovery is available."""
-        if (
-            serials
-            and callable(getattr(self.api, "mdns_browse", None))
-            and link.claim_look_up()
-        ):
+        if not serials or not callable(getattr(self.api, "mdns_browse", None)):
+            return
+        if link.claim_look_up():
             self.api.create_task(
                 self._net_reresolve(key, serials),
                 name=f"net_reresolve_{link.state_key}",
@@ -1828,8 +1827,10 @@ class StreamDeckPlugin:
         press_time = session.dial_press_times.pop(dial, None)
         turned = dial in session.dial_turned
         session.dial_turned.discard(dial)
-        if press_time is None or not push_deferred(entry) or turned:
-            return
+        if press_time is None or turned:
+            return  # no deferred push was noted, or it was a grip
+        if not push_deferred(entry):
+            return  # the dial's binding no longer waits for its release
         held = asyncio.get_running_loop().time() - press_time
         await self._execute_actions(session, release_actions(entry, held), f"dial {dial}")
 
@@ -1960,7 +1961,8 @@ class StreamDeckPlugin:
         drag = live_adjust(zone.get("drag_adjust"))
         if drag is None:
             return
-        if drag.get("fader") and await self._apply_touch_fader(drag, zone, int(x_out)):
+        fader = zone_fader(zone)
+        if fader is not None and await self._apply_touch_fader(fader, zone, int(x_out)):
             return
         detents = int((x_out - x) / 8)  # truncate toward zero
         if detents:
@@ -1976,10 +1978,9 @@ class StreamDeckPlugin:
         if zone is None:
             return
         await self._flash_touch_zone(session, zone["index"])
-        drag = live_adjust(zone.get("drag_adjust"))
-        if kind == "SHORT" and drag and drag.get("fader"):
-            if await self._apply_touch_fader(drag, zone, x):
-                return
+        fader = zone_fader(zone) if kind == "SHORT" else None
+        if fader is not None and await self._apply_touch_fader(fader, zone, x):
+            return
         actions = zone.get("long_touch") if kind == "LONG" else None
         if not actions:
             actions = zone.get("touch")

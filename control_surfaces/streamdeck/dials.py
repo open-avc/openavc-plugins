@@ -18,9 +18,10 @@ Two rules worth knowing before changing this:
   release and still turns as it does unheld.
 - A dial's ``adjust`` and ``pressed_adjust``, and a zone's ``drag_adjust``,
   change a value only when they name the key they write (``live_adjust``).
-  A turn steps the value from what it reads now (``turned_value``); a fader
-  touch sets it from where the touch lands (``fader_value``), and only an
-  adjust with a ``min`` below its ``max`` can do that. Either writes a whole
+  A turn steps the value from what it reads now (``turned_value``); a touch
+  on a fader zone (``zone_fader``) sets it from where the touch lands
+  (``fader_value``), and only an adjust with a ``min`` below its ``max`` can
+  do that. Either writes a whole
   number as an int.
 """
 
@@ -123,6 +124,15 @@ def turned_value(adjust, current, detents):
     if maximum is not None:
         value = min(maximum, value)
     return whole(value)
+
+
+def zone_fader(zone):
+    """A zone's live ``drag_adjust`` when it is a fader (``fader`` set: a
+    touch sets its value from where it lands), else None."""
+    drag = live_adjust(zone.get("drag_adjust"))
+    if drag is not None and drag.get("fader"):
+        return drag
+    return None
 
 
 def fader_bounds(drag):
