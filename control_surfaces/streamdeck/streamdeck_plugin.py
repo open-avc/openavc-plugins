@@ -92,6 +92,9 @@ Image = None
 ImageDraw = None
 ImageFont = None
 
+# What a show_message overlay writes on, on the keys, the strip and the screen.
+_OVERLAY_BACKGROUND = "#101018"
+
 
 def _lazy_import():
     """Import streamdeck and PIL after DLL paths are configured."""
@@ -1443,18 +1446,32 @@ class StreamDeckPlugin:
         await self._render_info_strip(session)
 
     async def _draw_overlay(self, session, text):
-        """Render ``text`` wrapped across the key grid (and strips) as one
-        canvas split into key tiles."""
+        """Show ``text`` everywhere a deck can: across the keys (one canvas
+        cut into key tiles, the touch keys lit white), then on the touch strip
+        and the info screen. A send the deck refuses is dropped silently."""
         deck = session.deck
         if not session.drawable or Image is None:
             return
-        key_format = deck.key_image_format()
-        key_w, key_h = key_format["size"]
+        key_w, key_h = deck.key_image_format()["size"]
         if not key_w or not key_h:
             return
-        rows, cols = deck.key_layout()
+        self._overlay_keys(session, text, key_w, key_h)
+        if deck.is_touch():
+            strip = self._overlay_panel(text, deck, "touchscreen_image_format", (8, 4), 16)
+            if strip is not None:
+                self._mirror(session, "touchscreen", strip)
+                self._send_strip_image(deck, strip)
+        screen = self._overlay_panel(text, deck, "screen_image_format", (4, 2), 14)
+        if screen is not None:
+            self._mirror(session, "screen", screen)
+            self._send_screen_image(deck, screen)
 
-        canvas = Image.new("RGB", (cols * key_w, rows * key_h), "#101018")
+    def _overlay_keys(self, session, text, key_w, key_h):
+        """The overlay on the keys: ``text`` on one canvas the size of the
+        key grid, each LCD key showing its tile, the touch keys white."""
+        deck = session.deck
+        rows, cols = deck.key_layout()
+        canvas = Image.new("RGB", (cols * key_w, rows * key_h), _OVERLAY_BACKGROUND)
         self._paste_label(
             canvas, text, "#ffffff",
             (key_w // 4, key_h // 4, cols * key_w - key_w // 2, rows * key_h - key_h // 2),
@@ -1466,49 +1483,38 @@ class StreamDeckPlugin:
                 (col * key_w, row * key_h, (col + 1) * key_w, (row + 1) * key_h)
             )
             self._apply_key_image(session, index, tile)
-
-        # Touch keys glow white while the message is up.
         for index in range(
             deck.key_count(), deck.key_count() + deck.touch_key_count()
         ):
             self._apply_key_color(session, index, "#ffffff")
 
-        # Strips carry the text too.
-        if deck.is_touch():
-            try:
-                strip_w, strip_h = deck.touchscreen_image_format()["size"]
-            except Exception:
-                strip_w = strip_h = 0
-            if strip_w and strip_h:
-                strip = Image.new("RGB", (strip_w, strip_h), "#101018")
-                self._paste_label(
-                    strip, text, "#ffffff", (8, 4, strip_w - 16, strip_h - 8),
-                    max_font=max(16, strip_h // 2), max_lines=2,
-                )
-                self._mirror(session, "touchscreen", strip)
-                try:
-                    native = PILHelper.to_native_touchscreen_format(deck, strip)
-                    with deck:
-                        deck.set_touchscreen_image(native, 0, 0, strip_w, strip_h)
-                except Exception:
-                    pass
+    def _overlay_panel(self, text, deck, format_reader, margin, min_font):
+        """The overlay's ``text`` on a strip or screen of the size the deck's
+        ``format_reader`` reports, inset by ``margin`` (x, y) on each side;
+        None when the deck has none or cannot say its size."""
+        size = self._panel_size(deck, format_reader)
+        if size is None:
+            return None
+        width, height = size
+        inset_x, inset_y = margin
+        panel = Image.new("RGB", size, _OVERLAY_BACKGROUND)
+        self._paste_label(
+            panel, text, "#ffffff",
+            (inset_x, inset_y, width - 2 * inset_x, height - 2 * inset_y),
+            max_font=max(min_font, height // 2), max_lines=2,
+        )
+        return panel
+
+    @staticmethod
+    def _panel_size(deck, format_reader):
+        """A touch strip's or info screen's (width, height), from the deck's
+        ``touchscreen_image_format`` or ``screen_image_format``; None when
+        the deck lacks the reader, it raises, or either side is 0."""
         try:
-            screen_w, screen_h = deck.screen_image_format()["size"]
+            width, height = getattr(deck, format_reader)()["size"]
         except Exception:
-            screen_w = screen_h = 0
-        if screen_w and screen_h:
-            screen = Image.new("RGB", (screen_w, screen_h), "#101018")
-            self._paste_label(
-                screen, text, "#ffffff", (4, 2, screen_w - 8, screen_h - 4),
-                max_font=max(14, screen_h // 2), max_lines=2,
-            )
-            self._mirror(session, "screen", screen)
-            try:
-                native = PILHelper.to_native_screen_format(deck, screen)
-                with deck:
-                    deck.set_screen_image(native)
-            except Exception:
-                pass
+            return None
+        return (width, height) if width and height else None
 
     # ──── Key Handling ────
 
@@ -2256,12 +2262,7 @@ class StreamDeckPlugin:
 
         session.strip_image = img
         self._mirror(session, "touchscreen", img)
-        try:
-            native = PILHelper.to_native_touchscreen_format(deck, img)
-            with deck:
-                deck.set_touchscreen_image(native, 0, 0, width, height)
-        except Exception as e:
-            self.api.log(f"Error setting touchscreen image: {e}", level="debug")
+        self._send_strip_image(deck, img, failure="Error setting touchscreen image")
 
     def _schedule_strip_render(self, session, zones=None):
         """Coalesce strip redraws (~40 ms debounce): collect dirty zones,
@@ -2329,12 +2330,7 @@ class StreamDeckPlugin:
         if zw <= 0:
             return
         region = img.crop((zx, 0, zx + zw, height))
-        try:
-            native = PILHelper.to_native_touchscreen_format(deck, region)
-            with deck:
-                deck.set_touchscreen_image(native, zx, 0, zw, height)
-        except Exception as e:
-            self.api.log(f"Error setting touchscreen region: {e}", level="debug")
+        self._send_strip_image(deck, region, x=zx, failure="Error setting touchscreen region")
 
     # ──── Info strip (decks with a secondary info screen) ────
 
@@ -2389,12 +2385,10 @@ class StreamDeckPlugin:
             return
         if session.overlay_active:
             return  # a show_message overlay owns the display right now
-        try:
-            width, height = deck.screen_image_format()["size"]
-        except Exception:
-            return
-        if not width or not height:
+        size = self._panel_size(deck, "screen_image_format")
+        if size is None:
             return  # this deck has no info screen
+        width, height = size
 
         bg = self._deck_setting(session, "button_color", "#1a1a2e")
         img = Image.new("RGB", (width, height), bg)
@@ -2410,12 +2404,7 @@ class StreamDeckPlugin:
         # idle == "blank": leave the plain background
 
         self._mirror(session, "screen", img)
-        try:
-            native = PILHelper.to_native_screen_format(deck, img)
-            with deck:
-                deck.set_screen_image(native)
-        except Exception as e:
-            self.api.log(f"Error setting info strip image: {e}", level="debug")
+        self._send_screen_image(deck, img, failure="Error setting info strip image")
 
     # ──── Brightness (auto rules + idle dim) ────
 
@@ -2733,6 +2722,32 @@ class StreamDeckPlugin:
                 session.deck.set_key_image(key_index, native_image)
         except Exception as e:
             self.api.log(f"Error setting key {key_index} image: {e}", level="debug")
+
+    def _send_strip_image(self, deck, image, x=0, failure=None):
+        """Set ``image`` on the touch strip at ``x``: the whole strip, or one
+        zone's region (the strip takes partial updates). Converted to the
+        deck's native format and set under its lock; a send the deck refuses
+        is logged at debug after ``failure``'s words, or dropped silently
+        without them. The Live View mirror is the caller's."""
+        width, height = image.size
+        try:
+            native = PILHelper.to_native_touchscreen_format(deck, image)
+            with deck:
+                deck.set_touchscreen_image(native, x, 0, width, height)
+        except Exception as e:
+            if failure:
+                self.api.log(f"{failure}: {e}", level="debug")
+
+    def _send_screen_image(self, deck, image, failure=None):
+        """Set ``image`` on the info screen, the way ``_send_strip_image``
+        sets the strip."""
+        try:
+            native = PILHelper.to_native_screen_format(deck, image)
+            with deck:
+                deck.set_screen_image(native)
+        except Exception as e:
+            if failure:
+                self.api.log(f"{failure}: {e}", level="debug")
 
     def _create_button_image(self, session, label, bg_color, text_color,
                              icon_name=None, value_text="", meter=None):

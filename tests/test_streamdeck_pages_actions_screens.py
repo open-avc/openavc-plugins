@@ -871,3 +871,19 @@ async def test_an_overlay_draws_nothing_without_a_screen_pil_or_a_key_size(pil, 
 def test_every_action_type_the_deck_runs_has_one_runner_and_no_other_does():
     from control_surfaces.streamdeck.key_entries import ACTION_KINDS
     assert tuple(StreamDeckPlugin._ACTION_RUNNERS) == ACTION_KINDS
+
+
+@pytest.mark.asyncio
+async def test_a_deck_without_a_strip_or_screen_reader_still_shows_the_overlay_on_its_keys(pil):
+    class _KeysOnly(_ScreenDeck):
+        touchscreen_image_format = property(lambda self: (_ for _ in ()).throw(AttributeError("no")))
+        screen_image_format = property(lambda self: (_ for _ in ()).throw(AttributeError("no")))
+
+    plugin, state, logs = _plugin({})
+    plugin._load_text_font()
+    session = _session(plugin, _KeysOnly())
+    await plugin._draw_overlay(session, "Hi")
+    assert [s[0] for s in session.deck.sent] == ["key"] * 4 + ["color"] * 2
+    await plugin._render_info_strip(session)
+    assert [s[0] for s in session.deck.sent] == ["key"] * 4 + ["color"] * 2
+    assert logs == []
