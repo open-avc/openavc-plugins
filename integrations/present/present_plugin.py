@@ -419,10 +419,8 @@ class PresentPlugin:
     async def start(self, api):
         self.api = api
 
-        self._mediamtx_bin = self._resolve_dep(self._binary_name("mediamtx"))
-        self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
-        if self._mediamtx_bin is None or self._ffmpeg_bin is None:
-            missing = "MediaMTX" if self._mediamtx_bin is None else "FFmpeg"
+        missing = self._find_binaries()
+        if missing:
             raise await self._refusal(
                 f"{missing} binary not found in plugin_repo/.deps/. Native "
                 "dependencies install when the plugin is installed from the "
@@ -470,6 +468,17 @@ class PresentPlugin:
             await self._supervisor.stop()
             self._supervisor = None
             raise
+
+    def _find_binaries(self):
+        """Find MediaMTX and FFmpeg in plugin_repo/.deps/; the name of the
+        first one missing, else None."""
+        self._mediamtx_bin = self._resolve_dep(self._binary_name("mediamtx"))
+        self._ffmpeg_bin = self._resolve_dep(self._binary_name("ffmpeg"))
+        if self._mediamtx_bin is None:
+            return "MediaMTX"
+        if self._ffmpeg_bin is None:
+            return "FFmpeg"
+        return None
 
     async def _refusal(self, msg):
         """Mark the plugin not running with ``msg`` as its error; the refusal
