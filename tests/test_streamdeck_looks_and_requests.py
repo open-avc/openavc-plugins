@@ -810,3 +810,22 @@ async def test_the_look_up_logs_a_failed_browse_and_ignores_an_answer_where_it_i
     plugin.api.mdns_browse = _same
     await plugin._net_reresolve("10.0.0.5:5343", {"A1"})
     assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_an_active_style_with_empty_colors_keeps_the_look():
+    plugin, state = _plugin()
+    _set(state, {"var.on": True})
+    feedback = {"key": "var.on",
+                "style_active": {"bg_color": "", "text_color": None, "icon": ""}}
+    assert await plugin._apply_feedback_styles(feedback, *BASE) == BASE
+
+
+@pytest.mark.asyncio
+async def test_a_simulated_edge_is_passed_on_as_true_or_false():
+    plugin, _, calls = _input_rig()
+    await plugin._simulate_input({"serial": "VSN", "type": "dial_push", "index": 0,
+                                  "pressed": 1})
+    await plugin._simulate_input({"serial": "VSN", "type": "key", "index": 0,
+                                  "pressed": 0})
+    assert [type(c[-1]) for c in calls] == [bool, bool]
