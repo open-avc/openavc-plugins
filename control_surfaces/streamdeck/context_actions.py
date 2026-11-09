@@ -13,6 +13,7 @@ nothing. Nothing here touches a deck; the plugin runs what these return.
 """
 
 from .conditions import coerce_numeric
+from .pages import page_number
 
 # (action, how its name appears in the event name, the text it matches), in
 # the order they are tried.
@@ -44,7 +45,7 @@ def _whole(value):
 
 
 def _page_args(data):
-    page = _whole(data.get("page"))
+    page = page_number(data.get("page"))
     return None if page is None else (page,)
 
 

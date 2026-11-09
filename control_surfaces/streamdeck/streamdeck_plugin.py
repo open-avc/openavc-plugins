@@ -1448,7 +1448,8 @@ class StreamDeckPlugin:
     async def _draw_overlay(self, session, text):
         """Show ``text`` everywhere a deck can: across the keys (one canvas
         cut into key tiles, the touch keys lit white), then on the touch strip
-        and the info screen. A send the deck refuses is dropped silently."""
+        and the info screen. A strip or screen send the deck refuses is
+        dropped silently; a refused key tile is logged as any key is."""
         deck = session.deck
         if not session.drawable or Image is None:
             return
@@ -1457,11 +1458,11 @@ class StreamDeckPlugin:
             return
         self._overlay_keys(session, text, key_w, key_h)
         if deck.is_touch():
-            strip = self._overlay_panel(text, deck, "touchscreen_image_format", (8, 4), 16)
+            strip = self._overlay_panel(text, deck, self._OVERLAY_ON_STRIP)
             if strip is not None:
                 self._mirror(session, "touchscreen", strip)
                 self._send_strip_image(deck, strip)
-        screen = self._overlay_panel(text, deck, "screen_image_format", (4, 2), 14)
+        screen = self._overlay_panel(text, deck, self._OVERLAY_ON_SCREEN)
         if screen is not None:
             self._mirror(session, "screen", screen)
             self._send_screen_image(deck, screen)
@@ -1488,15 +1489,21 @@ class StreamDeckPlugin:
         ):
             self._apply_key_color(session, index, "#ffffff")
 
-    def _overlay_panel(self, text, deck, format_reader, margin, min_font):
-        """The overlay's ``text`` on a strip or screen of the size the deck's
-        ``format_reader`` reports, inset by ``margin`` (x, y) on each side;
-        None when the deck has none or cannot say its size."""
+    # Where the overlay writes on the strip and the screen: the deck's format
+    # reader for its size, the text's inset (x, y) on each side, and the
+    # smallest font it may shrink to.
+    _OVERLAY_ON_STRIP = ("touchscreen_image_format", (8, 4), 16)
+    _OVERLAY_ON_SCREEN = ("screen_image_format", (4, 2), 14)
+
+    def _overlay_panel(self, text, deck, where):
+        """The overlay's ``text`` on the strip or screen ``where`` names
+        (``_OVERLAY_ON_STRIP`` or ``_OVERLAY_ON_SCREEN``), sized as the deck
+        reports; None when the deck has none or cannot say its size."""
+        format_reader, (inset_x, inset_y), min_font = where
         size = self._panel_size(deck, format_reader)
         if size is None:
             return None
         width, height = size
-        inset_x, inset_y = margin
         panel = Image.new("RGB", size, _OVERLAY_BACKGROUND)
         self._paste_label(
             panel, text, "#ffffff",
@@ -2728,7 +2735,9 @@ class StreamDeckPlugin:
         zone's region (the strip takes partial updates). Converted to the
         deck's native format and set under its lock; a send the deck refuses
         is logged at debug after ``failure``'s words, or dropped silently
-        without them. The Live View mirror is the caller's."""
+        without them. Unlike ``_apply_key_image`` it takes the deck the
+        caller drew for and leaves the Live View mirror to the caller, which
+        mirrors the whole strip when it sends one region."""
         width, height = image.size
         try:
             native = PILHelper.to_native_touchscreen_format(deck, image)

@@ -12,8 +12,8 @@ a page nothing else uses lands on the last page.
 A page is whatever Python's ``int()`` makes of a value, so ``2.7`` is page
 2 and ``true`` page 1; a value ``int()`` refuses names no page, and an
 infinite number raises. The deck's navigate, a page key's highlight, the
-auto_page rules and the config check all read a page here, so the check
-never reports a page the deck goes to. OpenAVC's Stream Deck view counts
+auto_page rules, the set_page action and the config check all read a page
+here, so the check never reports a page the deck goes to. OpenAVC's Stream Deck view counts
 pages with its own copy of this rule to preview them, reading only whole
 numbers, so the two can differ on a page such as 2.7.
 """

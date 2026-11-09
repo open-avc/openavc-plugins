@@ -887,3 +887,9 @@ async def test_a_deck_without_a_strip_or_screen_reader_still_shows_the_overlay_o
     await plugin._render_info_strip(session)
     assert [s[0] for s in session.deck.sent] == ["key"] * 4 + ["color"] * 2
     assert logs == []
+
+
+def test_the_config_check_reads_fields_only_for_action_types_the_deck_runs():
+    from control_surfaces.streamdeck import config_check
+    from control_surfaces.streamdeck.key_entries import ACTION_KINDS
+    assert set(config_check._ACTION_FIELDS) <= set(ACTION_KINDS)
