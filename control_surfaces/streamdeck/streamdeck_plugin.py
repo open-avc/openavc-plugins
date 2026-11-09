@@ -1209,10 +1209,12 @@ class StreamDeckPlugin:
 
         @router.post("/network/scan")
         async def network_scan():
+            """Find network decks on the LAN."""
             return await self._scan_network()
 
         @router.post("/network/test")
         async def network_test(payload: dict):
+            """Try a TCP connection to host:port (the manual-add Test button)."""
             return await self._test_network_address(payload)
 
         return router
@@ -3254,7 +3256,7 @@ class StreamDeckPlugin:
         elif action == "show_message":
             if session.drawable:
                 await self._show_message(session, *args)
-        else:
+        elif action == "identify":
             await self._identify_deck(session)
 
     async def _identify_deck(self, session):

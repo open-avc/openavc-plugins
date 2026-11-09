@@ -833,3 +833,24 @@ async def test_a_simulated_edge_is_passed_on_as_true_or_false():
     await plugin._simulate_input({"serial": "VSN", "type": "key", "index": 0,
                                   "pressed": 0})
     assert [type(c[-1]) for c in calls] == [bool, bool]
+
+
+@pytest.mark.asyncio
+async def test_a_simulated_turn_with_no_index_reads_no_amount():
+    plugin, _, calls = _input_rig()
+    await plugin._simulate_input({"serial": "VSN", "type": "dial_turn", "index": "x",
+                                  "amount": float("inf")})
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_every_deck_action_has_its_own_runner():
+    from control_surfaces.streamdeck import context_actions
+
+    args = {"set_page": (1,), "set_brightness": (40,), "flash_key": (0, 2),
+            "show_message": ("Hi", 5.0), "identify": ()}
+    assert set(context_actions._DECK_ARGS) == set(args)
+    for action, action_args in args.items():
+        plugin, calls, decks = _action_rig()
+        await plugin._run_deck_action(action, decks[0], action_args)
+        assert len(calls) == 1, action

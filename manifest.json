@@ -49,7 +49,7 @@
         "control_surfaces/streamdeck/README.md": "f51fd2701a7331c82466abde87ce48df20f2927bea68c14961d95866bde21b0d",
         "control_surfaces/streamdeck/conditions.py": "f62de6604a2693daf1f143609d288c3fa33e312c3db9a2a350853c1385565b91",
         "control_surfaces/streamdeck/config_check.py": "8bfd969ed187bee963be824b1dd45646037cab9faff2d6efcb3cf837e40d371c",
-        "control_surfaces/streamdeck/context_actions.py": "d5e2f365b8adcbd5d8219246b7a48a98290d3ad55929e68e70b9dfdaac79641d",
+        "control_surfaces/streamdeck/context_actions.py": "b75c22c4abfdeb763d61ebd3f3e59f8cfe1d30beef01fbd7af15b683e8004e38",
         "control_surfaces/streamdeck/deck_answers.py": "3a23c6e98a7ca02c92a1076f00de2df329669e11d1b7765e60ad639920730b4c",
         "control_surfaces/streamdeck/deck_classes.py": "95da51584067966b21b5a2309ea09af31ec5854b17c6708141cbcfa761e59558",
         "control_surfaces/streamdeck/declared_decks.py": "ec08023700e3176dba8b77cdaf1ce77bda04de6b130c04faa25a99e060d388d0",
@@ -62,7 +62,7 @@
         "control_surfaces/streamdeck/looks.py": "20689dfea5d9c0cd05e5c469ab6601cc0d84ac7a89331ffce66ce9cf3ee8c1f0",
         "control_surfaces/streamdeck/net_deck.py": "bc8b366f9a2edf9ac7659af96c7085fa38610c796378fe00e6ea8c5774698a38",
         "control_surfaces/streamdeck/plugin.json": "017f6c544d588ebe47a09fe8aae0c6aa0bf2c35fd9bf2a3058dcdbd5e1ce1418",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "59e472f9295ae1a41e1063ac03641d94b5efeefe9137b33965c3e99b9cd8f755",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "65525b19e597ffc99d95c4994dbbb5848068dbc2f97c2bb6fbff3cf69358aa9c",
         "control_surfaces/streamdeck/virtual_deck.py": "61e9cd9663a73eb1c7068ea0d7d8ce67718f0fa696f24617358db6bbb4a39aef",
         "control_surfaces/streamdeck/watch_keys.py": "3351a6e6f9dce2fc4d9c0c9e9526ea2cc2821343fd5bd1e50e0a32e71553ff75"
       }

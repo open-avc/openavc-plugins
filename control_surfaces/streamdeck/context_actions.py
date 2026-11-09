@@ -115,8 +115,10 @@ def _simulated_key(payload, key_total):
 
 def _simulated_turn(payload, key_total):
     index = _whole(payload.get("index"))
+    if index is None:
+        return []
     amount = _whole(payload.get("amount", 1))
-    if index is None or amount is None:
+    if amount is None:
         return []
     return [("dial", index, "TURN", amount)]
 
