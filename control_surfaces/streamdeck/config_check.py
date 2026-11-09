@@ -21,6 +21,7 @@ shows them to the integrator and the AI assistant repeats them.
 import functools
 import json
 
+from .brightness import DEFAULT_LEVEL
 from .conditions import KNOWN_OPERATORS, coerce_numeric
 from .declared_decks import endpoint_key, network_endpoint, virtual_serial
 from .key_entries import ACTION_KINDS, unwrap_binding, write_door
@@ -567,7 +568,7 @@ def config_problems(config):
     if not isinstance(config, dict):
         return []
     problems = _layout_problems(config, "")
-    problems += _number_problems(config, "", ("brightness",), "70 is used")
+    problems += _number_problems(config, "", ("brightness",), f"{DEFAULT_LEVEL} is used")
     problems += [
         f"{name} is not an object keyed by deck serial, so it is ignored."
         for name in ("decks", "deck_names", "deck_settings")

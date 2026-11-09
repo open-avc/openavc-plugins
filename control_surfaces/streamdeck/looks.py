@@ -16,25 +16,18 @@ Without a usable map, the ``condition`` pair applies ``style_active`` or
 object. In every form an empty field keeps what the look already has.
 
 A touch key has no screen, only a color (``touch_key_color``): a macro run's
-mark color outright, else its own background, lifted for "you are here" (a
-page key whose page is showing) and again while it is held. An LCD key shows
-the same marks drawn over its image, in the same ``MARK_COLORS``; drawing them
-is the plugin's.
+mark color (macro_marks.py) in place of its own, else its own background lifted
+for "you are here" (a page key whose page is showing); either is lifted again
+while the key is held. An LCD key draws its marks over its image instead, "you
+are here" under a macro's mark as well; drawing them is the plugin's.
 """
 
 from dataclasses import dataclass
 
 from .conditions import coerce_numeric, reads_as_on
+from .macro_marks import MARK_COLORS
 
 METER_DEFAULT_COLOR = "#8ab493"
-
-# A key's mark while a macro its press runs is running, has finished or
-# failed: the border on an LCD key, the whole color of a touch key.
-MARK_COLORS = {
-    "running": "#f59e0b",
-    "done": "#22c55e",
-    "error": "#ef4444",
-}
 
 
 @dataclass
@@ -75,9 +68,9 @@ def lighten_hex(color, amount):
 
 
 def touch_key_color(bg_color, macro_mark, nav_active, held):
-    """A touch key's color: its macro mark's color outright, else its own
-    ``bg_color``, lifted for "you are here" (only without a mark) and again
-    while held."""
+    """A touch key's color: its macro mark's color in place of its own
+    ``bg_color``, the own color lifted for "you are here" (only without a
+    mark), and either lifted again while held."""
     color = MARK_COLORS.get(macro_mark, bg_color)
     if nav_active and macro_mark is None:
         color = lighten_hex(color, 0.2)

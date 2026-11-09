@@ -12,6 +12,7 @@ Every reader returns None for a payload it refuses, and the plugin then does
 nothing. Nothing here touches a deck; the plugin runs what these return.
 """
 
+from .brightness import clamp_level
 from .conditions import coerce_numeric
 from .pages import page_number
 
@@ -51,7 +52,7 @@ def _page_args(data):
 
 def _brightness_args(data):
     level = coerce_numeric(data.get("level"))
-    return None if level is None else (max(0, min(100, int(level))),)
+    return None if level is None else (clamp_level(level),)
 
 
 def _flash_args(data):

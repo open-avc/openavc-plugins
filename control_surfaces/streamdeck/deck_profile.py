@@ -1,5 +1,6 @@
 """
-What a Stream Deck says about itself when it opens.
+What a Stream Deck says about itself: who it is and its layout when it opens,
+and how big its touch strip and info screen are whenever the plugin draws.
 
 The plugin opens every deck the same way, whatever carries it: a USB deck the
 library enumerates, a virtual deck (virtual_deck.py) or a network deck
@@ -21,7 +22,7 @@ LCD keys are 0-7 and its two touch keys 8 and 9); ``key_total``,
 numbering from the deck.
 
 A touch strip and an info screen say their size through the deck's format
-readers, read three ways on purpose: the strip's zones are laid out on the
+readers, read three ways, each kept as it was written: the strip's zones are laid out on the
 width the deck reports, a 0 included, or 800 when it cannot say
 (``strip_width``); the strip's renders take its format with both sides as
 reported (``strip_format``); an overlay and the info screen draw only where
@@ -109,8 +110,8 @@ def tell_link_serial(deck, identity):
 
 def deck_geometry(deck, identity):
     """The deck's layout as the plugin publishes it. An info screen counts
-    when it reports a width; a deck that cannot say whether it has a screen
-    is taken to have one."""
+    when it reports a width above 0, and not when it cannot say; a deck that
+    cannot say whether it draws at all (``is_visual``) is taken to draw."""
     rows, columns = deck.key_layout()
     try:
         has_info_screen = deck.screen_image_format()["size"][0] > 0

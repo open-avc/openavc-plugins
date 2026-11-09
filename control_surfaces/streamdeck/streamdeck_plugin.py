@@ -9,22 +9,24 @@ network the Network Dock and the Stream Deck Studio (net_deck.py).
 
 Beside this module: brightness.py (the level a deck shows, from its rules or
 its unit's base, and when idle dim lowers it), conditions.py (the rule
-visible_when, auto_page and auto_brightness are judged by), config_check.py (what validate_config
-reports), declared_decks.py (the virtual and network decks the config
-declares, and the writes to a network deck's entry), dials.py (what a dial
-gesture runs, and the touch strip's zones), key_entries.py (which config entry
-a key runs, the actions a binding holds, and what a deck may write),
-layouts.py (where each part of a key, a strip zone, the idle clock and an
-overlay is drawn), looks.py (what a key, a strip zone or an info item shows:
-the value line, the meter, the feedback style), screens.py (the info screen's
-elements, and when the touch strip or the info screen is idle and shows the
-clock), context_actions.py (what a context action or a simulated input asks for),
-deck_answers.py (what a network deck's discovery answer says),
-deck_profile.py (what a deck says about itself when it opens: its transport,
-serial, model and geometry, and how big its touch strip and info screen are), pages.py (how many pages a deck has, and which
-page a value names), virtual_deck.py (a deck that exists only in software)
-and watch_keys.py (which state keys a deck reads, and what each one
-redraws).
+visible_when, auto_page and auto_brightness are judged by), config_check.py
+(what validate_config reports), declared_decks.py (the virtual and network
+decks the config declares, and the writes to a network deck's entry), dials.py
+(what a dial gesture runs, and the touch strip's zones), key_entries.py (which
+config entry a key runs, the actions a binding holds, and what a deck may
+write), layouts.py (where each part of a key, a strip zone, the idle clock and
+an overlay is drawn), looks.py (what a key, a strip zone or an info item
+shows: the value line, the meter, the feedback style, and a touch key's
+color), macro_marks.py (the mark a key shows while a macro it runs is running
+and after it ends), screens.py (the info screen's elements, and when the touch
+strip or the info screen is idle and shows the clock), context_actions.py
+(what a context action or a simulated input asks for), deck_answers.py (what
+a network deck's discovery answer says), deck_profile.py (what a deck says
+about itself: its transport, serial, model and geometry when it opens, and
+how big its touch strip and info screen are), pages.py (how many pages a deck
+has, and which page a value names), virtual_deck.py (a deck that exists only
+in software) and watch_keys.py (which state keys a deck reads, and what each
+one redraws).
 """
 
 import asyncio
@@ -93,7 +95,6 @@ from .layouts import (
     zone_layout,
 )
 from .looks import (
-    MARK_COLORS,
     Look,
     hex_to_rgb,
     meter_fill,
@@ -102,6 +103,7 @@ from .looks import (
     touch_key_color,
     value_line,
 )
+from .macro_marks import MARK_COLORS, RUNNING, SHOW_SECONDS, mark_for_event
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .pages import key_target_page, page_count, page_number, page_step
 from .screens import CLOCK, info_idle_mode, info_items, strip_idle_mode
@@ -2859,8 +2861,9 @@ class StreamDeckPlugin:
         brightness or page, and note which keys show which macro's run.
 
         Each deck subscribes against its own config view; what the view reads,
-        and which part of the deck each key redraws, is the session's
-        ``watch`` (watch_keys.py).
+        and which parts of the deck redraw as a whole on each key, is the
+        session's ``watch`` (watch_keys.py). Which keys redraw is asked of the
+        config when the state changes.
         """
         session.watch = deck_watch(self._deck_config(session))
         callback = functools.partial(self._on_state_change, session)
@@ -2869,10 +2872,11 @@ class StreamDeckPlugin:
             session.feedback_subs.append(sub_id)
 
     async def _on_state_change(self, session, key, value, old_value):
-        """Redraw what a watched state change touches (the session's
-        ``watch``), in order: an automatic page switch (which redraws the
-        whole page and ends here), the strip zones, the info strip, the
-        brightness, then the keys."""
+        """Redraw what a watched state change touches, in order: an automatic
+        page switch (which redraws the whole page and ends here), the strip
+        zones, the info strip, the brightness (each when the session's
+        ``watch`` says the key is theirs), then the keys on the page showing
+        that read it (watch_keys.keys_watching, on the live config)."""
         if not session.drawable:
             return
         watch = session.watch
@@ -2917,25 +2921,17 @@ class StreamDeckPlugin:
 
     # ──── Macro run feedback ────
 
-    # How long a result shows on its keys before they draw as usual.
-    _MACRO_FLASH_SECONDS = {"done": 0.8, "error": 1.2}
-
     async def _on_macro_event(self, event_name, payload):
-        """Mark keys whose bindings reference a macro that changed state."""
-        for prefix, mark in (
-            ("macro.started.", "running"),
-            ("macro.completed.", "done"),
-            ("macro.cancelled.", None),
-            ("macro.error.", "error"),
-        ):
-            if event_name.startswith(prefix):
-                await self._apply_macro_mark_event(event_name[len(prefix):], mark)
-                return
+        """Mark keys whose bindings reference a macro that changed state (the
+        mark an event sets is macro_marks.py)."""
+        marked = mark_for_event(event_name)
+        if marked is not None:
+            await self._apply_macro_mark_event(*marked)
 
     async def _apply_macro_mark_event(self, macro_id, mark):
         """Mark every key whose press runs ``macro_id``, on every deck, and
         redraw the ones showing."""
-        seconds = self._MACRO_FLASH_SECONDS.get(mark)
+        seconds = SHOW_SECONDS.get(mark)
         for session in list(self._sessions.values()):
             flash_ended = functools.partial(self._end_macro_flash, session)
             for page, key_index in session.watch.macro_keys.get(macro_id) or ():
@@ -2965,7 +2961,7 @@ class StreamDeckPlugin:
             draw = ImageDraw.Draw(out)
             w, h = out.size
             draw.rectangle([0, 0, w - 1, h - 1], outline=color, width=3)
-            if mark == "running":
+            if mark == RUNNING:
                 icon = self._render_icon("loader", color, max(16, w // 3))
                 if icon is not None:
                     size = max(10, w // 4)
