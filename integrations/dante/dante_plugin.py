@@ -5,6 +5,13 @@ Audio network routing via Dante Domain Manager or Dante Director Professional.
 Uses the official Audinate Managed API (GraphQL over HTTPS) to discover devices,
 manage audio subscriptions, monitor routing status, and recall routing presets.
 
+Where each part lives: the state keys a domain's channels are published under,
+and a routing-matrix click read back to its channel, are channel_keys.py;
+routes, the presets saved from them and the subscription requests that set
+them are routing.py. This module connects and polls, sends the requests, keeps
+the presets in the config and runs the actions. The declarations stay here,
+where validate.py reads them.
+
 Requires: httpx (MIT license, async HTTP client)
 """
 
@@ -295,6 +302,30 @@ mutation DeviceRxChannelsSubscriptionSet($input: DeviceRxChannelsSubscriptionSet
     }
 }
 """
+
+
+# The actions an event plugin.dante.action.<name> runs, by name: the
+# Programmer's context actions and routing matrix send them, and a macro or a
+# script can too. Each handler is given the event's payload ({} for none).
+_ACTIONS = {
+    "refresh_domains": "_handle_refresh_domains",
+    "recall_preset": "_handle_recall_preset",
+    "save_preset": "_handle_save_preset",
+    "update_preset": "_handle_update_preset",
+    "delete_preset": "_handle_delete_preset",
+    "clear_all": "_clear_all_subscriptions",
+    "route": "_handle_route_action",
+    "unroute": "_handle_unroute_action",
+}
+
+# A route asked for by name: its fields in order, and what an absent one reads
+# as. An unroute takes the first two. Every one must be set.
+_ROUTE_FIELDS = (
+    ("rx_device", ""),
+    ("rx_channel_index", 0),
+    ("tx_device_name", ""),
+    ("tx_channel_name", ""),
+)
 
 
 class DanteDDMPlugin:
@@ -850,9 +881,10 @@ class DanteDDMPlugin:
                 all_ok = False
         return all_ok
 
-    async def _clear_all_subscriptions(self) -> bool:
+    async def _clear_all_subscriptions(self, _payload: dict | None = None) -> bool:
         """Unroute every routed receive channel in the domain, one request per
-        device. When every request succeeds, no preset is shown."""
+        device. When every request succeeds, no preset is shown. (The
+        clear_all action's payload is not read.)"""
         all_ok = True
         for device_id, subs in routing.clear_requests(self._devices.values()):
             if not await self._set_subscriptions_batch(device_id, subs):
@@ -913,38 +945,13 @@ class DanteDDMPlugin:
     # ──── Event Handlers ────
 
     async def _on_action(self, event_name: str, payload: dict | None):
-        """Handle context action events from the IDE and programmatic events."""
-        action = event_name.rsplit(".", 1)[-1] if "." in event_name else event_name
+        """Run the action an event names (_ACTIONS); any other is ignored."""
+        handler = _ACTIONS.get(event_name.rsplit(".", 1)[-1])
+        if handler:
+            await getattr(self, handler)(payload or {})
 
-        if action == "refresh_domains":
-            await self._handle_refresh_domains()
-        elif action == "recall_preset":
-            preset_name = (payload or {}).get("preset_name", "")
-            if not preset_name:
-                # List available presets in log
-                presets = self._parse_presets()
-                if presets:
-                    names = ", ".join(presets.keys())
-                    self.api.log(f"Available presets: {names}")
-                else:
-                    self.api.log("No presets configured", level="warning")
-                return
-            await self.recall_preset(preset_name)
-        elif action == "save_preset":
-            await self._handle_save_preset(payload or {})
-        elif action == "update_preset":
-            await self._handle_update_preset(payload or {})
-        elif action == "delete_preset":
-            await self._handle_delete_preset(payload or {})
-        elif action == "clear_all":
-            await self._clear_all_subscriptions()
-        elif action == "route":
-            await self._handle_route_action(payload or {})
-        elif action == "unroute":
-            await self._handle_unroute_action(payload or {})
-
-    async def _handle_refresh_domains(self):
-        """Refresh the domain list and log results."""
+    async def _handle_refresh_domains(self, _payload: dict | None = None):
+        """Log the domains the DDM has, or why there are none to show."""
         try:
             domains = await self._fetch_domains()
         except Exception as e:
@@ -959,66 +966,70 @@ class DanteDDMPlugin:
         for d in domains:
             self.api.log(f"Domain: {d['name']} (ID: {d['id']})")
 
-    async def _handle_route_action(self, payload: dict):
-        """Handle a route request from either matrix click or programmatic event.
-
-        Matrix clicks send {row, col} with sanitized state key segments.
-        Programmatic events send {rx_device, rx_channel_index, tx_device_name,
-        tx_channel_name}.
-        """
-        if "row" in payload and "col" in payload:
-            # Matrix cell click
-            row = payload["row"]
-            col = payload["col"]
-            rx_device_name, rx_channel_index = self._resolve_matrix_ref(row, "rx")
-            tx_device_name, tx_channel_name = self._resolve_matrix_ref(col, "tx")
-            if not rx_device_name or not tx_device_name:
-                self.api.log(
-                    f"Could not resolve matrix reference: row={row} col={col}",
-                    level="error",
-                )
-                return
-            await self.route(
-                rx_device_name, rx_channel_index, tx_device_name, tx_channel_name
-            )
+    async def _handle_recall_preset(self, payload: dict):
+        """Recall the preset the payload names; with no name, log the
+        presets there are."""
+        preset_name = payload.get("preset_name", "")
+        if preset_name:
+            await self.recall_preset(preset_name)
+            return
+        presets = self._parse_presets()
+        if presets:
+            names = ", ".join(presets.keys())
+            self.api.log(f"Available presets: {names}")
         else:
-            # Programmatic event
-            rx_device = payload.get("rx_device", "")
-            rx_channel_index = payload.get("rx_channel_index", 0)
-            tx_device_name = payload.get("tx_device_name", "")
-            tx_channel_name = payload.get("tx_channel_name", "")
+            self.api.log("No presets configured", level="warning")
 
-            if not all([rx_device, rx_channel_index, tx_device_name, tx_channel_name]):
-                self.api.log("Route action missing required fields", level="error")
-                return
-
-            await self.route(
-                rx_device, rx_channel_index, tx_device_name, tx_channel_name
-            )
+    async def _handle_route_action(self, payload: dict):
+        """Route by a matrix cell, {row, col} (the channels' key segments,
+        channel_keys), or by name, {rx_device, rx_channel_index,
+        tx_device_name, tx_channel_name}."""
+        if "row" in payload and "col" in payload:
+            request = self._matrix_route(payload["row"], payload["col"])
+        else:
+            request = self._named_request(payload, _ROUTE_FIELDS, "Route")
+        if request:
+            await self.route(*request)
 
     async def _handle_unroute_action(self, payload: dict):
-        """Handle an unroute request from either matrix click or programmatic event."""
+        """Unroute by a matrix row, {row}, or by name, {rx_device,
+        rx_channel_index}."""
         if "row" in payload:
-            # Matrix cell click
-            row = payload["row"]
-            rx_device_name, rx_channel_index = self._resolve_matrix_ref(row, "rx")
-            if not rx_device_name:
-                self.api.log(
-                    f"Could not resolve matrix reference: row={row}",
-                    level="error",
-                )
-                return
-            await self.unroute(rx_device_name, rx_channel_index)
+            request = self._matrix_unroute(payload["row"])
         else:
-            # Programmatic event
-            rx_device = payload.get("rx_device", "")
-            rx_channel_index = payload.get("rx_channel_index", 0)
+            request = self._named_request(payload, _ROUTE_FIELDS[:2], "Unroute")
+        if request:
+            await self.unroute(*request)
 
-            if not all([rx_device, rx_channel_index]):
-                self.api.log("Unroute action missing required fields", level="error")
-                return
+    def _matrix_route(self, row: str, col: str) -> tuple | None:
+        rx_device_name, rx_channel_index = self._resolve_matrix_ref(row, "rx")
+        tx_device_name, tx_channel_name = self._resolve_matrix_ref(col, "tx")
+        if not rx_device_name or not tx_device_name:
+            self.api.log(
+                f"Could not resolve matrix reference: row={row} col={col}",
+                level="error",
+            )
+            return None
+        return rx_device_name, rx_channel_index, tx_device_name, tx_channel_name
 
-            await self.unroute(rx_device, rx_channel_index)
+    def _matrix_unroute(self, row: str) -> tuple | None:
+        rx_device_name, rx_channel_index = self._resolve_matrix_ref(row, "rx")
+        if not rx_device_name:
+            self.api.log(
+                f"Could not resolve matrix reference: row={row}",
+                level="error",
+            )
+            return None
+        return rx_device_name, rx_channel_index
+
+    def _named_request(self, payload: dict, fields: tuple, action: str) -> tuple | None:
+        """The fields a request by name carries, in order, or None, logged,
+        when one is missing or empty."""
+        request = tuple(payload.get(name, absent) for name, absent in fields)
+        if all(request):
+            return request
+        self.api.log(f"{action} action missing required fields", level="error")
+        return None
 
     # ──── Helpers ────
 
