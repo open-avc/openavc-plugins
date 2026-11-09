@@ -47,6 +47,7 @@ from control_surfaces.streamdeck.conditions import (  # noqa: E402
 )
 from control_surfaces.streamdeck.virtual_deck import VIRTUAL_MODELS  # noqa: E402
 from control_surfaces.streamdeck.key_entries import press_actions  # noqa: E402
+from control_surfaces.streamdeck.pages import key_target_page  # noqa: E402
 from control_surfaces.streamdeck.watch_keys import button_watches_key  # noqa: E402
 import control_surfaces.streamdeck.streamdeck_plugin as sd_module  # noqa: E402
 from control_surfaces.streamdeck.looks import (  # noqa: E402
@@ -3000,14 +3001,14 @@ async def test_deck_settings_absent_defaults_to_70():
 
 def test_nav_target_page_extraction():
     nav = {"bindings": {"press": [{"action": "navigate", "page": 2}]}}
-    assert StreamDeckPlugin._nav_target_page(nav) == 2
+    assert key_target_page(nav) == 2
     nav_str = {"bindings": {"press": [{"action": "navigate", "page": "3"}]}}
-    assert StreamDeckPlugin._nav_target_page(nav_str) == 3
+    assert key_target_page(nav_str) == 3
     relative = {"bindings": {"press": [{"action": "navigate", "page": "__next_page__"}]}}
-    assert StreamDeckPlugin._nav_target_page(relative) is None
+    assert key_target_page(relative) is None
     macro = {"bindings": {"press": [{"action": "macro", "macro": "m"}]}}
-    assert StreamDeckPlugin._nav_target_page(macro) is None
-    assert StreamDeckPlugin._nav_target_page({}) is None
+    assert key_target_page(macro) is None
+    assert key_target_page({}) is None
 
 
 def test_apply_nav_active_image_same_size(monkeypatch):

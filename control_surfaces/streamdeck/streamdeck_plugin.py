@@ -17,8 +17,10 @@ zone or an info item shows: the value line, the meter, the feedback style),
 context_actions.py (what a context action or a simulated input asks for),
 deck_answers.py (what a network deck's discovery answer says),
 deck_profile.py (what a deck says about itself when it opens: its transport,
-serial, model and geometry), virtual_deck.py (a deck that exists only in software) and watch_keys.py (which
-state keys a deck reads, and what each one redraws).
+serial, model and geometry), pages.py (how many pages a deck has, and which
+page a value names), virtual_deck.py (a deck that exists only in software)
+and watch_keys.py (which state keys a deck reads, and what each one
+redraws).
 """
 
 import asyncio
@@ -45,7 +47,6 @@ from .declared_decks import (
 from .key_entries import (
     action_list,
     assignment_for,
-    global_buttons,
     objects,
     press_actions,
     unwrap_binding,
@@ -72,6 +73,7 @@ from .dials import (
 )
 from .looks import meter_fill, styled, value_line
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
+from .pages import key_target_page, page_count, page_number, page_step
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
 from .watch_keys import deck_watch, keys_watching, zone_watches_key
 
@@ -1690,18 +1692,22 @@ class StreamDeckPlugin:
             await runner(self, session, action_binding, source)
 
     async def _run_navigate(self, session, action_binding, source):
-        """Change the deck's page: the next or previous one, or a page index
-        (an int or a numeric string)."""
-        page_id = action_binding.get("page", "")
-        if page_id == "__next_page__":
-            await self._change_page(session, session.current_page + 1)
-        elif page_id == "__prev_page__":
-            await self._change_page(session, session.current_page - 1)
-        else:
-            try:
-                await self._change_page(session, int(page_id))
-            except (TypeError, ValueError):
-                pass
+        """Change the deck's page: one step for the next- or previous-page
+        word, else to the page the value names (pages.py); a value that
+        names no page does nothing. A TypeError or ValueError raised while
+        changing to a named page is dropped here; a step lets it through."""
+        page = action_binding.get("page", "")
+        step = page_step(page)
+        if step is not None:
+            await self._change_page(session, session.current_page + step)
+            return
+        number = page_number(page)
+        if number is None:
+            return
+        try:
+            await self._change_page(session, number)
+        except (TypeError, ValueError):
+            pass
 
     async def _run_macro(self, session, action_binding, source):
         """Run the binding's macro; a failure is logged, never raised."""
@@ -2502,71 +2508,9 @@ class StreamDeckPlugin:
     # ──── Page Navigation ────
 
     def _effective_page_count(self, session):
-        """Pages exist by being used — no page-count setting.
-
-        The count is 1 + the highest page index referenced anywhere in the
-        deck's config view: button placements, page rules, page names, and
-        numeric navigate targets in any action list (key presses including
-        off/hold actions, locked keys, dial turns/presses, strip zones).
-        Every deck has at least one page.
-        """
-        cfg = self._deck_config(session)
-        highest = 0
-
-        def note(value):
-            nonlocal highest
-            try:
-                idx = int(value)
-            except (TypeError, ValueError):
-                return
-            if idx > highest:
-                highest = idx
-
-        def scan_actions(value):
-            for action in action_list(value):
-                if action.get("action") == "navigate":
-                    note(action.get("page"))
-                for nested in ("off_action", "hold_action"):
-                    sub = action.get(nested)
-                    if isinstance(sub, dict) and sub.get("action") == "navigate":
-                        note(sub.get("page"))
-
-        buttons = cfg.get("buttons", [])
-        for btn in buttons if isinstance(buttons, list) else []:
-            if not isinstance(btn, dict):
-                continue
-            note(btn.get("page", 0))
-            bindings = btn.get("bindings", {})
-            if isinstance(bindings, dict):
-                scan_actions(bindings.get("press"))
-        for btn in global_buttons(cfg):
-            bindings = btn.get("bindings", {})
-            if isinstance(bindings, dict):
-                scan_actions(bindings.get("press"))
-
-        rules = cfg.get("auto_page", [])
-        for rule in rules if isinstance(rules, list) else []:
-            if isinstance(rule, dict):
-                note(rule.get("page"))
-
-        names = cfg.get("page_names", {})
-        for key in names.keys() if isinstance(names, dict) else []:
-            note(key)
-
-        dials = cfg.get("dials", [])
-        for dial in dials if isinstance(dials, list) else []:
-            if isinstance(dial, dict):
-                for field in ("cw", "ccw", "press"):
-                    scan_actions(dial.get(field))
-
-        touchscreen = cfg.get("touchscreen", {})
-        zones = touchscreen.get("zones") if isinstance(touchscreen, dict) else None
-        for zone in zones if isinstance(zones, list) else []:
-            if isinstance(zone, dict):
-                for field in ("touch", "long_touch"):
-                    scan_actions(zone.get(field))
-
-        return highest + 1
+        """How many pages a deck's config view makes: pages exist by being
+        used, so there is no page-count setting (pages.py says what counts)."""
+        return page_count(self._deck_config(session))
 
     async def _change_page(self, session, new_page):
         """Switch a deck to a different button page."""
@@ -2646,7 +2590,7 @@ class StreamDeckPlugin:
     def _navigates_here(self, session, assignment):
         """True for a key whose press navigates to the page showing: its
         "you are here" treatment makes page-switcher rows read as tabs."""
-        target = self._nav_target_page(assignment) if assignment else None
+        target = key_target_page(assignment) if assignment else None
         return target is not None and target == session.current_page
 
     def _blank_key(self, session, key_index, is_touch_key):
@@ -2717,24 +2661,6 @@ class StreamDeckPlugin:
         if macro_mark:
             image = self._apply_macro_mark(image, macro_mark)
         return image
-
-    @staticmethod
-    def _nav_target_page(assignment):
-        """The numeric deck page a key's first press action navigates to.
-
-        None for non-navigate keys and for the relative next/previous targets
-        (those have no single page to light up for).
-        """
-        bindings = assignment.get("bindings", {})
-        if not isinstance(bindings, dict):
-            return None
-        press = unwrap_binding(bindings.get("press"))
-        if not isinstance(press, dict) or press.get("action") != "navigate":
-            return None
-        try:
-            return int(press.get("page"))
-        except (TypeError, ValueError):
-            return None
 
     def _apply_nav_active(self, image):
         """Subtle highlight for a page key whose target page is showing."""
@@ -3128,9 +3054,8 @@ class StreamDeckPlugin:
             if when is None or page is None:
                 continue
             if await self._eval_condition(when):
-                try:
-                    target = int(page)
-                except (TypeError, ValueError):
+                target = page_number(page)
+                if target is None:
                     continue
                 return max(0, min(target, max_pages - 1))
         return None

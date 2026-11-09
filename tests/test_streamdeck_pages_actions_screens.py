@@ -33,6 +33,7 @@ if str(_PLUGINS_ROOT) not in sys.path:
 
 from control_surfaces.streamdeck import streamdeck_plugin as sd_module  # noqa: E402
 from control_surfaces.streamdeck.config_check import config_problems  # noqa: E402
+from control_surfaces.streamdeck.pages import key_target_page  # noqa: E402
 from control_surfaces.streamdeck.streamdeck_plugin import StreamDeckPlugin  # noqa: E402
 
 try:
@@ -419,7 +420,7 @@ def test_the_config_check_names_the_action_types_a_deck_runs():
 
 
 def test_a_page_key_lights_for_the_page_int_makes_of_its_first_press_navigate():
-    target = StreamDeckPlugin._nav_target_page
+    target = key_target_page
     assert target(_press(_nav(3))) == 3
     assert target({"bindings": {"press": _nav("2")}}) == 2
     assert target(_press(_nav(True))) == 1

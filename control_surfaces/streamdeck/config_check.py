@@ -24,6 +24,7 @@ import json
 from .conditions import KNOWN_OPERATORS, coerce_numeric
 from .declared_decks import endpoint_key, network_endpoint, virtual_serial
 from .key_entries import ACTION_KINDS, unwrap_binding
+from .pages import NEXT_PAGE, PREV_PAGE, page_number
 from .virtual_deck import VIRTUAL_MODELS
 
 _KNOWN_MODES = ("tap", "toggle", "hold_repeat", "tap_hold")
@@ -32,7 +33,7 @@ _DIAL_ACTIONS = (
     "press", "long_press", "cw", "ccw", "pressed_cw", "pressed_ccw",
     "touch", "long_touch",
 )
-_PAGE_WORDS = (None, "", "__next_page__", "__prev_page__")
+_PAGE_WORDS = (None, "", NEXT_PAGE, PREV_PAGE)
 _SOURCE_FIELDS = ("label_source", "value_source", "key")
 
 # What a key, dial or zone may write: a user variable or this plugin's own
@@ -55,14 +56,6 @@ def _is_number(value):
 def _is_slot_number(value):
     """A key, dial or page number: a whole number, 0 or more."""
     return _is_number(value) and float(value).is_integer() and value >= 0
-
-
-def _reads_as_int(value):
-    try:
-        int(value)
-    except (TypeError, ValueError):
-        return False
-    return True
 
 
 def _is_set_but_not(value, kind):
@@ -162,7 +155,7 @@ def _kind_problems(kind, path):
 
 def _navigate_problems(action, path):
     page = action.get("page")
-    if page in _PAGE_WORDS or _reads_as_int(page):
+    if page in _PAGE_WORDS or page_number(page) is not None:
         return []
     return [
         f"{path}: page {_shown(page)} is not a page number, "
@@ -435,7 +428,7 @@ def _rule_value_problems(rule, path, value_field):
     page = rule.get("page")
     if page is None:
         return [f"{path} has no page, so it is skipped."]
-    if _reads_as_int(page):
+    if page_number(page) is not None:
         return []
     return [f"{path}.page {_shown(page)} is not a page number, so it is skipped."]
 
