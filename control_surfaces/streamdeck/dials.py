@@ -1,4 +1,5 @@
-"""What a dial's entry runs, and the touch strip zones a deck lays out.
+"""What a dial's entry runs, the value a turn or a fader touch writes, and the
+touch strip zones a deck lays out.
 
 A dial gesture is a push, its release, and the turns in between. The plugin
 keeps the gesture's state (when the push began, whether the dial turned while
@@ -17,6 +18,10 @@ Two rules worth knowing before changing this:
   release and still turns as it does unheld.
 - A dial's ``adjust`` and ``pressed_adjust``, and a zone's ``drag_adjust``,
   change a value only when they name the key they write (``live_adjust``).
+  A turn steps the value from what it reads now (``turned_value``); a fader
+  touch sets it from where the touch lands (``fader_value``), and only an
+  adjust with a ``min`` below its ``max`` can do that. Either writes a whole
+  number as an int.
 """
 
 from .conditions import coerce_numeric
@@ -93,6 +98,64 @@ def turn_route(entry, detents, held):
     else:
         adjust, cw, ccw = "adjust", "cw", "ccw"
     return live_adjust(entry.get(adjust)), entry.get(cw if detents > 0 else ccw)
+
+
+def whole(value):
+    """A value to write, as an int when it is a whole number (5.0 -> 5)."""
+    return int(value) if float(value).is_integer() else value
+
+
+def turned_value(adjust, current, detents):
+    """The value a turn of ``detents`` writes through ``adjust``: ``current``
+    read as a number (else the ``min``, else 0), moved ``step`` per detent
+    (1 when unset), and held to whichever of ``min`` and ``max`` are set."""
+    step = coerce_numeric(adjust.get("step"))
+    if step is None:
+        step = 1
+    minimum = coerce_numeric(adjust.get("min"))
+    maximum = coerce_numeric(adjust.get("max"))
+    start = coerce_numeric(current)
+    if start is None:
+        start = minimum if minimum is not None else 0
+    value = start + step * detents
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return whole(value)
+
+
+def fader_bounds(drag):
+    """A fader's ``(min, max)`` as numbers; None unless both are set and
+    ``max`` is above ``min``."""
+    minimum = coerce_numeric(drag.get("min"))
+    maximum = coerce_numeric(drag.get("max"))
+    if minimum is None or maximum is None:
+        return None
+    if maximum <= minimum:
+        return None
+    return minimum, maximum
+
+
+def fader_value(drag, zone, x):
+    """The value a touch at pixel ``x`` writes through a fader ``drag`` on
+    ``zone``: where ``x`` falls across the zone's width (held to its edges),
+    mapped onto ``min``..``max``, snapped to the ``step`` grid from ``min``
+    (1 unless positive) and held to the bounds; None without usable bounds
+    (``fader_bounds``)."""
+    bounds = fader_bounds(drag)
+    if bounds is None:
+        return None
+    minimum, maximum = bounds
+    step = coerce_numeric(drag.get("step"))
+    if step is None or step <= 0:
+        step = 1
+    zx = zone.get("x", 0)
+    zw = max(1, zone.get("w", 1))
+    frac = max(0.0, min(1.0, (x - zx) / zw))
+    value = minimum + frac * (maximum - minimum)
+    value = minimum + round((value - minimum) / step) * step
+    return whole(max(minimum, min(maximum, value)))
 
 
 def shows_on_strip(entry):

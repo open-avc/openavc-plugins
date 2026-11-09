@@ -66,11 +66,13 @@ from .deck_profile import (
 )
 from .dials import (
     dial_entry,
+    fader_value,
     lay_out_zones,
     live_adjust,
     push_deferred,
     release_actions,
     turn_route,
+    turned_value,
 )
 from .layouts import (
     clock_slots,
@@ -1847,32 +1849,14 @@ class StreamDeckPlugin:
         await self._execute_per_detent(session, actions, detents, f"dial {dial}")
 
     async def _apply_dial_adjust(self, adjust, detents):
-        """Increment a numeric state value by ``step * detents``, clamped.
-
-        The turn magnitude (detents moved since the last event) scales the
-        step, so spinning a dial fast moves the value proportionally faster.
+        """Move an adjust's state value by ``detents`` turned
+        (dials.turned_value), so spinning a dial fast moves it further.
         Writes go through the same scope rule as state.set actions (own
         ``plugin.<id>.*`` state or ``var.*`` user variables only).
         """
         key = adjust.get("key", "")
-        step = coerce_numeric(adjust.get("step"))
-        if step is None:
-            step = 1
-        minimum = coerce_numeric(adjust.get("min"))
-        maximum = coerce_numeric(adjust.get("max"))
-
-        current = coerce_numeric(await self.api.state_get(key))
-        if current is None:
-            current = minimum if minimum is not None else 0
-
-        new_value = current + step * detents
-        if minimum is not None:
-            new_value = max(minimum, new_value)
-        if maximum is not None:
-            new_value = min(maximum, new_value)
-        if float(new_value).is_integer():
-            new_value = int(new_value)
-        await self._apply_state_set(key, new_value)
+        current = await self.api.state_get(key)
+        await self._apply_state_set(key, turned_value(adjust, current, detents))
 
     # ──── Touchscreen strip (decks with a touch strip) ────
 
@@ -1897,32 +1881,17 @@ class StreamDeckPlugin:
         return None
 
     async def _apply_touch_fader(self, drag, zone, x_px):
-        """Set a drag_adjust value absolutely from a touch position.
-
-        A fader zone maps the touched fraction of its width linearly onto
-        min..max (snapped to the step grid). Returns True when applied;
-        False (with a debug log) when the bounds are missing, so the caller
-        can fall back to relative stepping.
+        """Set a drag_adjust value from where a touch lands on its zone
+        (dials.fader_value). True when written; False (with a debug log) when
+        the adjust has no usable bounds, so the caller can step instead.
         """
-        minimum = coerce_numeric(drag.get("min"))
-        maximum = coerce_numeric(drag.get("max"))
-        if minimum is None or maximum is None or maximum <= minimum:
+        value = fader_value(drag, zone, x_px)
+        if value is None:
             self.api.log(
                 "Touch fader needs min and max on its adjust; ignoring touch",
                 level="debug",
             )
             return False
-        step = coerce_numeric(drag.get("step"))
-        if step is None or step <= 0:
-            step = 1
-        zx = zone.get("x", 0)
-        zw = max(1, zone.get("w", 1))
-        frac = max(0.0, min(1.0, (x_px - zx) / zw))
-        value = minimum + frac * (maximum - minimum)
-        value = minimum + round((value - minimum) / step) * step
-        value = max(minimum, min(maximum, value))
-        if float(value).is_integer():
-            value = int(value)
         await self._apply_state_set(drag.get("key", ""), value)
         return True
 
