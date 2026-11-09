@@ -36,7 +36,8 @@ except ModuleNotFoundError:
         allow_module_level=True,
     )
 
-from integrations.dante.dante_plugin import DanteDDMPlugin, _sanitize_id, _settings
+from integrations.dante.channel_keys import sanitize_id as _sanitize_id  # noqa: E402
+from integrations.dante.dante_plugin import DanteDDMPlugin, _settings  # noqa: E402
 
 
 # ──── Fixtures ────

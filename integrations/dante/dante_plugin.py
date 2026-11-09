@@ -11,6 +11,11 @@ Requires: httpx (MIT license, async HTTP client)
 import asyncio
 import logging
 
+try:
+    from . import channel_keys
+except ImportError:  # loaded by a loader that is not a package one
+    import channel_keys
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_INFO = {
@@ -286,11 +291,6 @@ mutation DeviceRxChannelsSubscriptionSet($input: DeviceRxChannelsSubscriptionSet
 """
 
 
-def _sanitize_id(name: str) -> str:
-    """Convert a Dante device/channel name to a safe state key segment."""
-    return name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
-
-
 class DanteDDMPlugin:
     """Dante Domain Manager / Director plugin."""
 
@@ -562,72 +562,34 @@ class DanteDDMPlugin:
             await asyncio.sleep(interval)
 
     async def _refresh_state(self):
-        """Fetch domain data and update state keys.
+        """Read the domain, publish every channel's state, clear the keys of
+        channels gone, and announce a change in the device list.
 
-        Raises on network errors (handled by _poll_loop).
-        Returns silently on GraphQL errors (non-fatal).
+        Raises on network errors (handled by _poll_loop). A GraphQL error,
+        already logged, is not a lost connection: nothing changes.
         """
         domain = await self._fetch_domain()
         if domain is None:
-            # GraphQL-level error -- logged by _graphql, not a connection loss
             return
 
         devices = domain.get("devices") or []
-        old_devices = dict(self._devices)
+        old_ids = set(self._devices)
         self._devices = {d["id"]: d for d in devices}
 
-        new_keys: set[str] = set()
-        subscription_count = 0
-
-        # Update Tx and Rx channel state
-        for device in devices:
-            device_id = _sanitize_id(device["name"])
-
-            # Tx channels
-            for ch in device.get("txChannels") or []:
-                key = f"tx.{device_id}.{ch['index']}"
-                label = f"{device['name']} / {ch['name']}"
-                await self.api.state_set(key, label)
-                new_keys.add(key)
-
-            # Rx channels
-            for ch in device.get("rxChannels") or []:
-                rx_key = f"rx.{device_id}.{ch['index']}"
-                label = f"{device['name']} / {ch['name']}"
-                await self.api.state_set(rx_key, label)
-                new_keys.add(rx_key)
-
-                # Route status
-                summary = (ch.get("summary") or "NONE").lower()
-                route_key = f"route.{device_id}.{ch['index']}"
-                await self.api.state_set(route_key, summary)
-                new_keys.add(route_key)
-
-                # Route info (source description)
-                sub_device = ch.get("subscribedDevice") or ""
-                sub_channel = ch.get("subscribedChannel") or ""
-                info_key = f"route_info.{device_id}.{ch['index']}"
-                if sub_device:
-                    info = f"{sub_device} / {sub_channel}"
-                    subscription_count += 1
-                else:
-                    info = ""
-                await self.api.state_set(info_key, info)
-                new_keys.add(info_key)
-
-        # Clean up stale keys from devices that disappeared
-        stale_keys = self._state_keys - new_keys
-        for key in stale_keys:
+        published: set[str] = set()
+        for key, value in channel_keys.channel_states(devices):
+            await self.api.state_set(key, value)
+            published.add(key)
+        for key in self._state_keys - published:
             await self.api.state_set(key, None)
-        self._state_keys = new_keys
+        self._state_keys = published
 
         await self.api.state_set("device_count", len(devices))
-        await self.api.state_set("subscription_count", subscription_count)
+        await self.api.state_set(
+            "subscription_count", channel_keys.routed_count(devices)
+        )
 
-        # Emit update event if device list changed
-        old_ids = set(old_devices.keys())
-        new_ids = set(self._devices.keys())
-        if old_ids != new_ids:
+        if old_ids != set(self._devices):
             await self.api.event_emit(
                 "devices.updated",
                 {"device_count": len(devices)},
@@ -1110,36 +1072,6 @@ class DanteDDMPlugin:
     def _resolve_matrix_ref(
         self, ref: str, direction: str
     ) -> tuple[str | None, int | str | None]:
-        """Resolve a matrix row/col reference to device name + channel info.
-
-        ref format: "device_id.channel_index" (sanitized state key segments)
-        direction: "rx" or "tx"
-
-        Returns (device_name, channel_index_or_name) or (None, None).
-        """
-        parts = ref.rsplit(".", 1)
-        if len(parts) != 2:
-            return None, None
-
-        device_key, channel_idx_str = parts
-
-        # Find device by matching sanitized name
-        for device in self._devices.values():
-            if _sanitize_id(device["name"]) == device_key:
-                try:
-                    channel_index = int(channel_idx_str)
-                except ValueError:
-                    return None, None
-
-                if direction == "tx":
-                    # Return channel name for Tx
-                    for ch in device.get("txChannels") or []:
-                        if ch["index"] == channel_index:
-                            return device["name"], ch["name"]
-                else:
-                    # Return channel index for Rx
-                    return device["name"], channel_index
-
-                return None, None
-
-        return None, None
+        """The device name and channel a matrix row ("rx": the index) or
+        column ("tx": the channel's name) names; channel_keys.resolve_ref."""
+        return channel_keys.resolve_ref(self._devices.values(), ref, direction)
