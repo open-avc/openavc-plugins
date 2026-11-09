@@ -621,6 +621,10 @@ async def test_a_dial_turn_with_no_key_writes_to_the_empty_key():
     ({"key": "var.f", "min": 0, "max": 1, "step": 0.25}, {"x": 0, "w": 100}, 40, 0.5),
     ({"key": "var.f", "min": 0, "max": 1, "step": 0.25}, {"x": 0, "w": 100}, 30, 0.25),
     ({"key": "var.f", "min": 0, "max": 10, "step": 3}, {"x": 0, "w": 100}, 100, 9),
+    # A touch past the zone counts as its edge, then snaps: 9 here, not max.
+    ({"key": "var.f", "min": 0, "max": 10, "step": 3}, {"x": 0, "w": 100}, 500, 9),
+    # The step grid can overshoot max (12 here); the value stops at max.
+    ({"key": "var.f", "min": 0, "max": 10, "step": 6}, {"x": 0, "w": 100}, 100, 10),
     ({"key": "var.f", "min": "0", "max": "10"}, {}, 0, 0),
     ({"key": "var.f", "min": 0, "max": 10}, {"x": 0, "w": 0}, 1, 10),
     ({"key": "var.f", "min": 0, "max": 10}, {"x": 5, "w": -3}, 6, 10),
