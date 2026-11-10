@@ -35,6 +35,7 @@
   const retryEl = document.getElementById('retry');
 
   const STATE_PREFIX = 'plugin.video_panel.';
+  const LIST_KEY = STATE_PREFIX + 'stream_ids';
   const RECONNECT_BASE_MS = 1000;
   const RECONNECT_CAP_MS = 10000;
   // Said only when a source is unplayable and nobody supplied a sentence. Every
@@ -88,7 +89,7 @@
   let seenRow = false;
   // The plugin's own state key for our stream was deleted. Deliberately NOT
   // folded into blockReason at the point it happens: the same teardown deletes
-  // the stream list, and a resolveMeta with no list to read clears blockReason.
+  // the stream list, and a readList with no list to read clears blockReason.
   // The two nulls arrive in one batch in whichever order a Python set iterates,
   // so the fact has to survive a pass that has nothing to read.
   let stateGone = false;
@@ -136,59 +137,47 @@
     // session on top of it.
     cancelRetry();
     applyTheme(msg.theme || {});
-    const cover = config.fit === 'cover';
-    videoEl.classList.toggle('fit-cover', cover);
-    imgEl.classList.toggle('fit-cover', cover);
-
-    channel = (config.channel || '').trim();
-    selectionKey = channel ? STATE_PREFIX + 'selection.' + channel : '';
+    applyFit();
+    followChannel();
 
     const snapshot = msg.state || {};
-    if (snapshot[STATE_PREFIX + 'stream_ids']) {
-      streamListRaw = snapshot[STATE_PREFIX + 'stream_ids'];
-    }
-
-    // A channel selection (when set and non-empty) overrides the static stream;
-    // otherwise the element shows its configured stream_id.
-    let newId = (config.stream_id || '').trim();
-    if (selectionKey && typeof snapshot[selectionKey] === 'string' && snapshot[selectionKey].trim()) {
-      newId = snapshot[selectionKey].trim();
-    }
+    if (snapshot[LIST_KEY]) streamListRaw = snapshot[LIST_KEY];
+    const newId = initialStream(snapshot);
     if (newId !== streamId) switchSource(newId);
-    streamMode = resolveMeta();
+    streamMode = readList();
     playOrSayWhy();
   }
 
   function onState(key, value) {
-    if (key === STATE_PREFIX + 'stream_ids') {
-      updateLabelFromList(value);
-      return;
-    }
-    if (selectionKey && key === selectionKey) {
+    if (key === LIST_KEY) {
+      onStreamList(value);
+    } else if (selectionKey && key === selectionKey) {
       // A macro / script / API changed this channel's selection. An empty value
       // falls back to the element's configured stream_id (or "no stream").
-      const next = (typeof value === 'string' && value.trim())
-        ? value.trim()
-        : (config.stream_id || '').trim();
-      selectStream(next);
-      return;
+      selectStream(selectedStream(value) || configuredStream());
+    } else if (isOwnKey(key) && value === null) {
+      onOwnKeyGone();
     }
-    if (streamId && key === STATE_PREFIX + 'streams.' + streamId && value === null) {
-      // Our stream's state key went away. That is a stream deleted from the
-      // project -- and it is EVERY plugin restart too, because stopping a
-      // plugin deletes every key it set, and a plugin update, a settings save
-      // or a crash-restart all stop it. The two are the same null here, and
-      // nothing in the message tells them apart, so this must be a block and
-      // not a verdict: no backoff, no spinner, Retry offered, and the tile
-      // comes back on its own the moment the list is republished. Reading it
-      // as a deletion is what left a whole panel of tiles saying "Stream
-      // removed" after an update, with nothing but a page reload to fix it.
-      // A stream that really was deleted is not republished, so the block
-      // stands and resolveMeta says so in its own words.
-      stateGone = true;
-      blockReason = NO_STREAM_TEXT;
-      blockPlayback();
-    }
+  }
+
+  // Our stream's state key went away. That is a stream deleted from the
+  // project -- and it is EVERY plugin restart too, because stopping a plugin
+  // deletes every key it set, and a plugin update, a settings save or a
+  // crash-restart all stop it. The two are the same null here, and nothing in
+  // the message tells them apart, so this must be a block and not a verdict:
+  // no backoff, no spinner, Retry offered, and the tile comes back on its own
+  // the moment the list is republished. Reading it as a deletion is what left a
+  // whole panel of tiles saying "Stream removed" after an update, with nothing
+  // but a page reload to fix it. A stream that really was deleted is not
+  // republished, so the block stands and readList says so in its own words.
+  function onOwnKeyGone() {
+    stateGone = true;
+    blockReason = NO_STREAM_TEXT;
+    blockPlayback();
+  }
+
+  function isOwnKey(key) {
+    return Boolean(streamId) && key === STATE_PREFIX + 'streams.' + streamId;
   }
 
   function applyTheme(theme) {
@@ -196,6 +185,37 @@
     for (const [k, v] of Object.entries(theme)) {
       if (v) root.style.setProperty(k, v);
     }
+  }
+
+  function applyFit() {
+    const cover = config.fit === 'cover';
+    videoEl.classList.toggle('fit-cover', cover);
+    imgEl.classList.toggle('fit-cover', cover);
+  }
+
+  function followChannel() {
+    channel = (config.channel || '').trim();
+    selectionKey = channel ? STATE_PREFIX + 'selection.' + channel : '';
+  }
+
+  // ──── Which source, and what the list says about it ────
+
+  function configuredStream() {
+    return (config.stream_id || '').trim();
+  }
+
+  // A channel's selection names a source only when it is non-blank text;
+  // anything else is '' and the configured stream shows instead.
+  function selectedStream(value) {
+    return typeof value === 'string' && value.trim() ? value.trim() : '';
+  }
+
+  // The source an init shows: its channel's selection in the snapshot, else
+  // the configured stream. The configured one is read first, so a stream_id
+  // that is not text fails the init whatever the selection says.
+  function initialStream(snapshot) {
+    const configured = configuredStream();
+    return (selectionKey && selectedStream(snapshot[selectionKey])) || configured;
   }
 
   // Our source's row in the cached list: the entry object, `null` when the list
@@ -217,37 +237,50 @@
     return list.find((e) => e && (e.value === streamId || e.id === streamId)) || null;
   }
 
-  // Resolve the current stream's label from the cached list and put it on
-  // screen, and set blockReason from what the list says about it. Returns the
-  // kind the list advertises, which is used only to notice that something
-  // changed — the delivery route decides how we actually play.
-  function resolveMeta() {
+  // Read the cached list for our source: its label (put on screen), and
+  // blockReason from what the list says about it. Returns the kind the list
+  // advertises, which is used only to notice that something changed — the
+  // delivery route decides how we actually play.
+  function readList() {
     let kind = listedKind;
-    streamLabel = streamId;
     const row = listRow();
     if (row) {
       seenRow = true;
-      streamLabel = row.label || streamId;
       if (row.mode) kind = row.mode;
-      const status = typeof row.status === 'string' ? row.status.trim() : '';
-      // No `value` means there is no stream behind the row. A status means the
-      // source is offline, half-configured, or switched off. Either way it
-      // cannot be drawn, and the row carries the sentence that says why.
-      const playable = row.value !== undefined && row.value !== null
-        && (status === '' || status === 'ready');
-      blockReason = playable
-        ? null
-        : ((typeof row.detail === 'string' && row.detail.trim()) || NO_STREAM_TEXT);
-    } else if (row === null && seenRow) {
-      blockReason = SOURCE_GONE_TEXT;
-    } else {
-      blockReason = null;
     }
-    // Survives the branch above, which has no list to read and so cannot know.
+    streamLabel = (row && row.label) || streamId;
+    blockReason = listVerdict(row);
+    // Survives the verdict above, which has no list to read and so cannot know.
     if (stateGone && !blockReason) blockReason = NO_STREAM_TEXT;
+    showLabel();
+    return kind;
+  }
+
+  // What the list says about playing our source: null when nothing stands in
+  // the way, else the sentence that says what does. A list that does not name
+  // us is a verdict only once one has.
+  function listVerdict(row) {
+    if (row) return rowBlockReason(row);
+    return row === null && seenRow ? SOURCE_GONE_TEXT : null;
+  }
+
+  // No `value` means there is no stream behind the row. A status means the
+  // source is offline, half-configured, or switched off. Either way it cannot
+  // be drawn, and the row carries the sentence that says why.
+  function rowBlockReason(row) {
+    if (rowPlayable(row)) return null;
+    return (typeof row.detail === 'string' && row.detail.trim()) || NO_STREAM_TEXT;
+  }
+
+  function rowPlayable(row) {
+    const status = typeof row.status === 'string' ? row.status.trim() : '';
+    const hasStream = row.value !== undefined && row.value !== null;
+    return hasStream && (status === '' || status === 'ready');
+  }
+
+  function showLabel() {
     labelEl.textContent = streamLabel || '';
     labelEl.hidden = !(config.show_label && streamLabel);
-    return kind;
   }
 
   // Stop playing and say why. Not a failure state: no backoff, no retry timer,
@@ -260,30 +293,33 @@
     showBlock();
   }
 
-  function updateLabelFromList(raw) {
+  // The plugin published its stream list.
+  function onStreamList(raw) {
     streamListRaw = raw;
     const wasBlocked = blockReason;
-    // Cleared HERE rather than in resolveMeta, which also runs off the cached
+    // Cleared HERE rather than in readList, which also runs off the cached
     // list: only a list that has just been published can say the plugin is
     // back, and it is the same plugin that will set our state key again.
     if (stateGone && listRow()) stateGone = false;
-    const nextKind = resolveMeta();
+    const nextKind = readList();
     const kindChanged = nextKind !== listedKind;
     listedKind = nextKind;
+    followList(wasBlocked, kindChanged);
+  }
 
+  // What a newly published list means for playback, given what the tile was
+  // doing before it: block on a new reason, come back once nothing stands in
+  // the way, or restart on a changed kind.
+  function followList(wasBlocked, kindChanged) {
     if (blockReason) {
       if (blockReason !== wasBlocked || active) blockPlayback();
-      return;
-    }
-    if (wasBlocked && streamId) {
+    } else if (wasBlocked && streamId) {
       // Whatever was missing has been supplied. Come back by ourselves.
       play();
-      return;
-    }
-    // The source changed kind under a stable id (a driver republished it with a
-    // different preview format). We'd be playing the wrong way, so restart and
-    // let the server say how.
-    if (kindChanged && active && streamId) {
+    } else if (kindChanged && wantsPicture()) {
+      // The source changed kind under a stable id (a driver republished it
+      // with a different preview format). We'd be playing the wrong way, so
+      // restart and let the server say how.
       teardown();
       play();
     }
@@ -296,7 +332,7 @@
     newId = (newId || '').trim();
     if (newId === streamId) return;
     switchSource(newId);
-    listedKind = resolveMeta();
+    listedKind = readList();
     streamMode = '';
     playOrSayWhy();
   }
@@ -326,6 +362,11 @@
       return;
     }
     play();
+  }
+
+  // The tile is meant to be playing, and has a source to play.
+  function wantsPicture() {
+    return active && Boolean(streamId);
   }
 
   // Start playing from the first attempt. Every path that decides the tile
@@ -749,7 +790,7 @@
     cancelRetry();
     // Re-read the list first. A source that is still missing its stream should
     // say so again rather than spin, so the button never becomes a lie.
-    resolveMeta();
+    readList();
     if (blockReason) {
       showBlock();
       return;
