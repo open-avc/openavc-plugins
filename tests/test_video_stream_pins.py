@@ -326,6 +326,77 @@ EXPECTED = {
         "timer set #2 1500",
         "view overlay \"Reconnecting… (connection closed)\" +spinner +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
+    # A connected session resets the backoff to its first step.
+    'webrtc_connected_resets_the_backoff': [
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#1 new {\"iceServers\":[]}",
+        "peer#1 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#1 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#1 createDataChannel \"\"",
+        "peer#1 createOffer",
+        "peer#1 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#1 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"answer-sdp\"}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "playoutDelayHint 0.1",
+        "video play",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "view overlay hidden | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "peer#1 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
+        "fetch POST ext/report headers={\"Content-Type\":\"application/json\"} body=\"{\\\"stream_id\\\":\\\"cam\\\",\\\"reason\\\":\\\"connection failed\\\"}\"",
+        "timer set #1 750",
+        "view overlay \"Reconnecting… (connection failed)\" +spinner +retry | label hidden(\"CAM\") | video shown | img hidden",
+        "timer fire #1",
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#2 new {\"iceServers\":[]}",
+        "peer#2 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#2 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#2 createDataChannel \"\"",
+        "peer#2 createOffer",
+        "peer#2 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#2 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"answer-sdp\"}",
+        "view overlay \"Reconnecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "view overlay hidden | label hidden(\"CAM\") | video shown | img hidden",
+        "peer#2 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
+        "fetch POST ext/report headers={\"Content-Type\":\"application/json\"} body=\"{\\\"stream_id\\\":\\\"cam\\\",\\\"reason\\\":\\\"connection failed\\\"}\"",
+        "timer set #2 750",
+        "view overlay \"Reconnecting… (connection failed)\" +spinner +retry | label hidden(\"CAM\") | video shown | img hidden",
+    ],
+    # Only a 201 answers an offer.
+    'webrtc_post_answered_200_is_refused': [
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#1 new {\"iceServers\":[]}",
+        "peer#1 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#1 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#1 createDataChannel \"\"",
+        "peer#1 createOffer",
+        "peer#1 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#1 close",
+        "fetch POST ext/report headers={\"Content-Type\":\"application/json\"} body=\"{\\\"stream_id\\\":\\\"cam\\\",\\\"reason\\\":\\\"WHEP POST returned 200\\\"}\"",
+        "timer set #1 750",
+        "view overlay \"Reconnecting… (WHEP POST returned 200)\" +spinner +retry | label hidden(\"CAM\") | video shown | img hidden",
+    ],
+    # A refused or failed offer landing after a switch schedules nothing.
+    'webrtc_offer_refused_after_a_source_switch': [
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#1 new {\"iceServers\":[]}",
+        "peer#1 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#1 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#1 createDataChannel \"\"",
+        "peer#1 createOffer",
+        "peer#1 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "peer#1 close",
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
+        "release POST ext/whep/cam",
+        "release: nothing held",
+    ],
     # Intermediate connection states change nothing.
     'webrtc_connecting_state_does_nothing': [
         "fetch GET ext/delivery/cam headers={}",
@@ -1104,11 +1175,16 @@ EXPECTED = {
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
     ],
+    # As today: with no stream chosen a row with an empty id is ours and blocks; lifting it plays nothing.
+    'a_row_with_an_empty_id_while_no_stream_is_chosen': [
+        "view overlay \"No stream selected\" | label hidden(\"\") | video shown | img hidden",
+        "view overlay \"Blank is off.\" +retry | label hidden(\"Blank\") | video shown | img hidden",
+    ],
     # With no stream chosen, lists change nothing.
     'list_before_any_stream_is_chosen': [
         "view overlay \"No stream selected\" | label hidden(\"\") | video shown | img hidden",
     ],
-    # Another stream's key, our key with a value, and unrelated keys are ignored.
+    # Another stream's key, our key with any value but null (empty, 0, false included), and unrelated keys are ignored.
     'state_keys_that_are_not_ours': [
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
@@ -1116,6 +1192,20 @@ EXPECTED = {
     # With no stream chosen, a deleted key is not ours.
     'our_key_goes_while_no_stream_is_chosen': [
         "view overlay \"No stream selected\" | label hidden(\"\") | video shown | img hidden",
+    ],
+    # A new stream after ours lost its key starts fresh, not blocked.
+    'a_new_stream_after_our_key_went_is_not_blocked': [
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+        "view overlay \"This source has no stream right now.\" +retry | label hidden(\"CAM\") | video hidden | img hidden",
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img shown src=ext/mjpeg/door",
+    ],
+    # Retry re-reads the list, so a row's own reason replaces the generic one the deleted key set.
+    'retry_re_reads_the_reason_from_the_list': [
+        "view overlay \"Cam is off.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
+        "view overlay \"This source has no stream right now.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
+        "view overlay \"Cam is off.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
     # Our key deleted holds the block through a list that cannot be read, and a list naming us lifts it.
     'our_key_goes_and_the_list_is_unreadable': [
@@ -1146,6 +1236,23 @@ EXPECTED = {
         "view overlay \"Yard is off.\" +retry | label \"YARD\" | video hidden | img hidden",
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label \"CAM\" | video hidden | img shown src=ext/mjpeg/cam",
+    ],
+    # A switch records the new source's kind, so the same list again restarts nothing.
+    'a_switch_to_another_kind_then_the_same_list': [
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#1 new {\"iceServers\":[]}",
+        "peer#1 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#1 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#1 createDataChannel \"\"",
+        "peer#1 createOffer",
+        "peer#1 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#1 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"answer-sdp\"}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "peer#1 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img shown src=ext/mjpeg/door",
     ],
     # A cleared selection with no stream id shows no stream, and Retry does nothing.
     'channel_cleared_with_no_fallback': [

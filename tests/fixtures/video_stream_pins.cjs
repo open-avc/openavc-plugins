@@ -156,6 +156,24 @@ const scenarios = {
     await t.fireTimer();
     await t.connState('closed');
   },
+  async webrtc_connected_resets_the_backoff(t) {
+    await webrtcPlaying(t);
+    await t.connState('failed');
+    await t.fireTimer();
+    await t.connState('connected');
+    await t.connState('failed');
+  },
+  async webrtc_post_answered_200_is_refused(t) {
+    t.answerWith(answers([[isWhepPost, { status: 200, location: '/sidecar/cam/whep/sess-1', text: 'a' }]]));
+    await initCam(t);
+  },
+  async webrtc_offer_refused_after_a_source_switch(t) {
+    t.hold(isWhepPost);
+    await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')) } });
+    await t.state(SEL('front'), 'door');
+    await t.release({ status: 503 });
+    await t.release({ networkError: 'gone' });
+  },
   async webrtc_connecting_state_does_nothing(t) {
     await initCam(t);
     await t.connState('connecting');
@@ -550,6 +568,13 @@ const scenarios = {
     await t.state(LIST, list(row('cam', { status: 'offline', detail: 'Unplugged.' })));
     await t.state(LIST, list(row('cam')));
   },
+  async a_row_with_an_empty_id_while_no_stream_is_chosen(t) {
+    await t.init({ config: {} });
+    await t.state(LIST, list({ id: '', label: 'Blank', status: 'offline', detail: 'Blank is off.' }));
+    await t.state(LIST, list({ id: '', value: '', label: 'Blank' }));
+    await t.hide();
+    await t.reveal();
+  },
   async list_before_any_stream_is_chosen(t) {
     await t.init({ config: {} });
     await t.state(LIST, list(row('cam')));
@@ -562,11 +587,25 @@ const scenarios = {
     await initCam(t);
     await t.state(KEY('other'), null);
     await t.state(KEY('cam'), 'idle');
+    await t.state(KEY('cam'), '');
+    await t.state(KEY('cam'), 0);
+    await t.state(KEY('cam'), false);
     await t.state('plugin.video_panel.unrelated', null);
   },
   async our_key_goes_while_no_stream_is_chosen(t) {
     await t.init({});
     await t.state(KEY(''), null);
+  },
+  async a_new_stream_after_our_key_went_is_not_blocked(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await initCam(t);
+    await t.state(KEY('cam'), null);
+    await t.init({ config: { stream_id: 'door' }, state: { [LIST]: list(row('door')) } });
+  },
+  async retry_re_reads_the_reason_from_the_list(t) {
+    await initCam(t, { state: { [LIST]: list(row('cam', { status: 'offline', detail: 'Cam is off.' })) } });
+    await t.state(KEY('cam'), null);
+    await t.retry();
   },
   async our_key_goes_and_the_list_is_unreadable(t) {
     t.answerWith(answers([mode('mjpeg')]));
@@ -607,6 +646,13 @@ const scenarios = {
     await t.state(SEL('front'), '');
     await t.state(SEL('front'), 42);
     await t.state(SEL('back'), 'door');
+  },
+  async a_switch_to_another_kind_then_the_same_list(t) {
+    const rows = list(row('cam'), row('door', { mode: 'mjpeg' }));
+    await initCam(t, { config: { channel: 'front' }, state: { [LIST]: rows } });
+    t.answerWith(answers([mode('mjpeg')]));
+    await t.state(SEL('front'), 'door');
+    await t.state(LIST, rows);
   },
   async channel_cleared_with_no_fallback(t) {
     t.answerWith(answers([mode('mjpeg')]));
