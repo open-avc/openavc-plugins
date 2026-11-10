@@ -755,6 +755,44 @@ const scenarios = {
     await t.pagehide();
   },
 
+  async a_stream_id_that_is_not_text_with_a_selection(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await t.init({ config: { stream_id: 5, channel: 'front' }, state: { [LIST]: list(row('door')), [SEL('front')]: 'door' } });
+  },
+  async a_channel_that_is_not_text(t) {
+    t.answerWith(answers([[isDelivery, { status: 500 }]]));
+    await initCam(t);
+    await t.init({ config: { stream_id: 'cam', channel: 7, fit: 'cover' }, theme: { '--panel-bg': '#202020' }, state: { [LIST]: list(row('cam')) } });
+  },
+  async a_late_offer_answer_then_a_new_session(t) {
+    t.hold(isWhepPost);
+    await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')) } });
+    await t.state(SEL('front'), 'door');
+    await t.release({ status: 201, location: '/sidecar/cam/whep/sess-old', text: 'old' });
+    await t.retry();
+    await t.candidate(0);
+    await t.pagehide();
+    await t.release({ status: 201, location: '/sidecar/door/whep/sess-new', text: 'new' });
+  },
+  async candidates_from_a_refused_offer_are_not_sent_on_the_next(t) {
+    t.hold(isWhepPost);
+    await initCam(t);
+    await t.candidate(0);
+    await t.candidate(1);
+    await t.release({ status: 503 });
+    await t.fireTimer();
+    await t.release({ status: 201, location: '/sidecar/cam/whep/sess-2', text: 'a2' });
+  },
+  async our_key_goes_before_the_list_ever_named_us(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await initCam(t, { state: { [LIST]: list(row('other')) } });
+    await t.state(KEY('cam'), null);
+    await t.state(LIST, list(row('other')));
+  },
+  async an_init_with_no_config_and_an_empty_id_row(t) {
+    await t.init({ state: { [LIST]: list({ id: '', label: 'Lobby' }) } });
+  },
+
   // ── re-init ──
   async reinit_with_another_stream_stops_the_first(t) {
     await webrtcPlaying(t, { token: 'tok' });
