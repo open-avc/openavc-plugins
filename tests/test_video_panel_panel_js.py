@@ -11,25 +11,17 @@ OPENAVC_REQUIRE_PANEL_JS=1 to make a missing toolchain an error instead, for a
 run that has promised to cover this.
 """
 
-import json
-import os
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 # Matches the sibling suites: this directory on the path, then the shared
-# lookup for the openavc checkout (jsdom lives in its node_modules).
+# runner (which finds the openavc checkout jsdom lives in).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _platform_root import platform_root  # noqa: E402
+from _panel_js import FIXTURES, run_harness  # noqa: E402
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_HARNESS = _REPO_ROOT / "tests" / "fixtures" / "video_stream_harness.cjs"
-_PANEL = _REPO_ROOT / "integrations" / "video_panel" / "panel"
-_JS = _PANEL / "video_stream.js"
-_HTML = _PANEL / "video_stream.html"
+_HARNESS = FIXTURES / "video_stream_harness.cjs"
 
 # What the element says when it cannot play and nothing better was supplied.
 # Mirrors NO_STREAM_TEXT / SOURCE_GONE_TEXT in video_stream.js.
@@ -37,50 +29,9 @@ NO_STREAM = "This source has no stream right now."
 SOURCE_GONE = "This source is no longer available."
 
 
-def _node_modules():
-    root = platform_root()
-    return None if root is None else root / "openavc" / "web" / "programmer" / "node_modules"
-
-
-def _toolchain_problem():
-    if shutil.which("node") is None:
-        return "node not installed"
-    modules = _node_modules()
-    if modules is None:
-        return "no openavc platform checkout found (set OPENAVC_PLATFORM_ROOT)"
-    if not (modules / "jsdom").is_dir():
-        return f"jsdom not installed (run `npm ci` in {modules.parent})"
-    if not _HARNESS.is_file():
-        return "video_stream harness missing"
-    return None
-
-
 @pytest.fixture(scope="module")
 def tile():
-    problem = _toolchain_problem()
-    if problem:
-        if os.environ.get("OPENAVC_REQUIRE_PANEL_JS"):
-            raise AssertionError(f"panel JS coverage was required but {problem}")
-        pytest.skip(problem)
-    proc = subprocess.run(
-        ["node", str(_HARNESS), str(_JS), str(_HTML)],
-        capture_output=True,
-        text=True,
-        # The harness reports what the viewer would read, and the overlay says
-        # "Connecting…". Without this, Python decodes node's UTF-8 with the
-        # platform's preferred encoding -- cp1252 on Windows -- and every
-        # assertion on a sentence containing punctuation fails for a reason
-        # that has nothing to do with the element.
-        encoding="utf-8",
-        env={**os.environ, "NODE_PATH": str(_node_modules())},
-        timeout=120,
-    )
-    if proc.returncode != 0:
-        raise AssertionError(f"harness crashed (rc={proc.returncode}):\n{proc.stderr}")
-    try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
-        raise AssertionError(f"unparseable harness output:\n{proc.stdout}\n{proc.stderr}") from exc
+    return run_harness(_HARNESS)
 
 
 # The teardown deletes the stream list and the per-stream status key in one
