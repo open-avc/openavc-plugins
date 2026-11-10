@@ -42,6 +42,7 @@
   // rather than the norm.
   const NO_STREAM_TEXT = 'This source has no stream right now.';
   const SOURCE_GONE_TEXT = 'This source is no longer available.';
+  const NO_SOURCE_TEXT = 'No stream selected';
   const PLAYOUT_DELAY_HINT = 0.1; // seconds; small jitter buffer for LAN latency
 
   // The iframe is served at <base>/api/plugins/video_panel/panel/video_stream.html.
@@ -133,10 +134,7 @@
     // A fresh init supersedes any retry already on the clock: it ends by
     // calling start() itself, and a timer left running would start a second
     // session on top of it.
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    cancelRetry();
     applyTheme(msg.theme || {});
     const cover = config.fit === 'cover';
     videoEl.classList.toggle('fit-cover', cover);
@@ -156,26 +154,9 @@
     if (selectionKey && typeof snapshot[selectionKey] === 'string' && snapshot[selectionKey].trim()) {
       newId = snapshot[selectionKey].trim();
     }
-    if (newId !== streamId) {
-      streamId = newId;
-      seenRow = false;
-      stateGone = false;
-      stop();
-    }
+    if (newId !== streamId) switchSource(newId);
     streamMode = resolveMeta();
-
-    if (!streamId) {
-      showOverlay({ spinner: false, text: 'No stream selected' });
-      return;
-    }
-    if (blockReason) {
-      active = false;
-      showOverlay({ spinner: false, text: blockReason, retry: true });
-      return;
-    }
-    active = true;
-    reconnectAttempts = 0;
-    start();
+    playOrSayWhy();
   }
 
   function onState(key, value) {
@@ -276,7 +257,7 @@
   function blockPlayback() {
     teardown();
     active = false;
-    showOverlay({ spinner: false, text: blockReason, retry: true });
+    showBlock();
   }
 
   function updateLabelFromList(raw) {
@@ -296,9 +277,7 @@
     }
     if (wasBlocked && streamId) {
       // Whatever was missing has been supplied. Come back by ourselves.
-      active = true;
-      reconnectAttempts = 0;
-      start();
+      play();
       return;
     }
     // The source changed kind under a stable id (a driver republished it with a
@@ -306,8 +285,7 @@
     // let the server say how.
     if (kindChanged && active && streamId) {
       teardown();
-      reconnectAttempts = 0;
-      start();
+      play();
     }
   }
 
@@ -317,25 +295,57 @@
   function selectStream(newId) {
     newId = (newId || '').trim();
     if (newId === streamId) return;
-    teardown();
-    streamId = newId;
-    seenRow = false;
-    stateGone = false;
+    switchSource(newId);
     listedKind = resolveMeta();
     streamMode = '';
+    playOrSayWhy();
+  }
+
+  // ──── Playing, and saying why not ────
+
+  // From here on the tile shows `id`. Whatever was playing stops, and what we
+  // knew about the last source goes with it: a new per-source fact is reset
+  // here, the one place a source changes.
+  function switchSource(id) {
+    stop();
+    streamId = id;
+    seenRow = false;
+    stateGone = false;
+  }
+
+  // With the source and its verdict settled: play it, or say why not. Nothing
+  // to show leaves `active` as it is, since only a source can make it true.
+  function playOrSayWhy() {
     if (!streamId) {
-      active = false;
-      showOverlay({ spinner: false, text: 'No stream selected' });
+      showOverlay({ spinner: false, text: NO_SOURCE_TEXT });
       return;
     }
     if (blockReason) {
       active = false;
-      showOverlay({ spinner: false, text: blockReason, retry: true });
+      showBlock();
       return;
     }
+    play();
+  }
+
+  // Start playing from the first attempt. Every path that decides the tile
+  // should be playing again comes through here.
+  function play() {
     active = true;
     reconnectAttempts = 0;
     start();
+  }
+
+  // The source cannot be played, and the list said why. Retry stays on offer.
+  function showBlock() {
+    showOverlay({ spinner: false, text: blockReason, retry: true });
+  }
+
+  function cancelRetry() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
   }
 
   // ──── Playback dispatch ────
@@ -650,10 +660,7 @@
   }
 
   function teardown() {
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    cancelRetry();
     const peer = pc;
     const url = resourceUrl;
     pc = null;
@@ -739,21 +746,16 @@
 
   retryEl.addEventListener('click', () => {
     if (!streamId) return;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    cancelRetry();
     // Re-read the list first. A source that is still missing its stream should
     // say so again rather than spin, so the button never becomes a lie.
     resolveMeta();
     if (blockReason) {
-      showOverlay({ spinner: false, text: blockReason, retry: true });
+      showBlock();
       return;
     }
-    active = true;
     pausedByVisibility = false;
-    reconnectAttempts = 0;
-    start();
+    play();
   });
 
   // MJPEG playback feedback: the first frame clears the overlay; a load error
@@ -797,25 +799,26 @@
 
   // ──── Visibility: free the decoder when hidden, resume when shown ────
 
+  function pauseWhileHidden() {
+    if (!active) return;
+    pausedByVisibility = true;
+    stop();
+    showOverlay({ spinner: false, text: 'Paused' });
+  }
+
+  // Shown again after pauseWhileHidden: play again, unless the source was
+  // blocked meanwhile or the tile is set not to reconnect by itself, in which
+  // case Retry does it.
+  function resumeWhenShown() {
+    pausedByVisibility = false;
+    if (blockReason) showBlock();
+    else if (config.reconnect_on_idle !== false) play();
+    else showOverlay({ spinner: false, text: 'Paused', retry: true });
+  }
+
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      if (active) {
-        pausedByVisibility = true;
-        stop();
-        showOverlay({ spinner: false, text: 'Paused' });
-      }
-    } else if (pausedByVisibility && streamId) {
-      pausedByVisibility = false;
-      if (blockReason) {
-        showOverlay({ spinner: false, text: blockReason, retry: true });
-      } else if (config.reconnect_on_idle !== false) {
-        active = true;
-        reconnectAttempts = 0;
-        start();
-      } else {
-        showOverlay({ spinner: false, text: 'Paused', retry: true });
-      }
-    }
+    if (document.hidden) pauseWhileHidden();
+    else if (pausedByVisibility && streamId) resumeWhenShown();
   });
 
   window.addEventListener('pagehide', stop);

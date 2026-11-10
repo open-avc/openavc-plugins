@@ -85,7 +85,7 @@
         "integrations/video_panel/panel/hls.light.min.js.LICENSE": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
-        "integrations/video_panel/panel/video_stream.js": "4c823e0bf8d6f885d0c8a76b23c86b7a8a0c945267a8006110307909023dc8c8",
+        "integrations/video_panel/panel/video_stream.js": "e57bf61fdaf08aaf19b7d796254e6546bfc409629afa42f4ad5e913f0a6f4a3f",
         "integrations/video_panel/plugin.json": "3460b61a236bf49bed8862014b4ef793737bd139b56fe7c8ec33bb3c03697044",
         "integrations/video_panel/preview_sources.py": "a750823f25d11c7944d0ca1fd7b6e37f573eb073ae8941135498e37fb4304231",
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
