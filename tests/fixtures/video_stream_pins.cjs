@@ -349,6 +349,7 @@ const scenarios = {
     await t.hlsLib('ok');
     await t.hlsError(null);
     await t.hlsError({ fatal: false, details: 'bufferStalledError', response: { code: 401 } });
+    await t.videoError();
   },
   async hls_fatal_error_names(t) {
     t.answerWith(answers([mode('hls')]));
@@ -536,6 +537,8 @@ const scenarios = {
     await t.state(LIST, list(row('cam', { status: 5, detail: 7 })));
     await t.state(LIST, list(row('cam', { value: null })));
     await t.state(LIST, list(row('cam', { status: ' ready ' })));
+    await t.state(LIST, list({ id: 'cam', status: 'ready' }));
+    await t.state(LIST, list({ id: 'cam', value: null }));
   },
   async list_unreadable_or_not_a_list(t) {
     await initCam(t, { state: { [LIST]: '{not json' } });
@@ -665,6 +668,91 @@ const scenarios = {
     await initCam(t);
     await t.state(SEL(''), 'door');
     await t.state('plugin.video_panel.selection.', 'door');
+  },
+
+  async reinit_while_hls_plays(t) {
+    t.answerWith(answers([mode('hls')]));
+    await initCam(t);
+    await t.hlsLib('ok');
+    await t.videoPlaying();
+    t.hold(isDelivery);
+    await initCam(t);
+    await t.videoPlaying();
+    await t.release({ status: 200, json: { mode: 'hls' } });
+    await t.pagehide();
+  },
+  async a_selection_key_named_by_no_channel(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await t.init({ config: { stream_id: 'cam' }, state: { [LIST]: list(row('cam'), row('door')), '': 'door' } });
+  },
+  async init_to_no_stream_after_playing(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await initCam(t);
+    await t.init({ config: {} });
+    await t.hide();
+  },
+  async a_switch_to_a_source_the_list_has_not_named(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await initCam(t, { config: { channel: 'front' } });
+    await t.state(SEL('front'), 'door');
+  },
+  async a_switch_forgets_the_last_mode(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')) } });
+    await t.imgLoad();
+    t.hold(isDelivery);
+    await t.state(SEL('front'), 'door');
+    await t.imgLoad();
+  },
+  async a_blocked_plan_answered_after_a_stop(t) {
+    t.hold(isDelivery);
+    await initCam(t);
+    await t.pagehide();
+    await t.release({ status: 200, json: { mode: 'blocked' } });
+  },
+  async a_retry_while_playing_finds_the_plan_blocked(t) {
+    await webrtcPlaying(t);
+    t.answerWith(answers([mode('blocked')]));
+    await t.retry();
+  },
+  async hls_switch_while_the_library_fails(t) {
+    t.answerWith(answers([mode('hls')]));
+    await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')) } });
+    await t.state(SEL('front'), 'door');
+    await t.hlsLib('error');
+  },
+  async a_playable_list_while_hidden(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await initCam(t);
+    await t.hide();
+    await t.state(LIST, list(row('cam', { label: 'Again' })));
+    await t.reveal();
+  },
+  async a_selection_cleared_while_hidden(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await t.init({ config: { channel: 'front' }, state: { [LIST]: list(row('door')), [SEL('front')]: 'door' } });
+    await t.hide();
+    await t.state(SEL('front'), '');
+    await t.reveal();
+    await t.hide();
+  },
+  async a_selection_change_while_hidden(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')), [SEL('front')]: 'door' } });
+    await t.hide();
+    await t.state(SEL('front'), '');
+    await t.reveal();
+    await t.hide();
+  },
+  async webrtc_session_ids_that_need_escaping(t) {
+    t.answerWith(answers([[isWhepPost, { status: 201, location: 'http://x/a/sess 1?x=1', text: 'a' }]]));
+    await initCam(t);
+    await t.candidate(0);
+    await t.pagehide();
+    t.answerWith(answers([[isWhepPost, { status: 201, location: '/', text: 'a' }]]));
+    await t.retry();
+    await t.candidate(1);
+    await t.pagehide();
   },
 
   // ── re-init ──

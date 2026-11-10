@@ -738,7 +738,7 @@ EXPECTED = {
         "timer set #1 750",
         "view overlay \"Reconnecting… (HLS fragLoadError)\" +spinner +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
-    # Non-fatal and empty error events do nothing.
+    # Non-fatal and empty error events do nothing, nor does a media error on a video hls.js drives.
     'hls_errors_that_do_not_reconnect': [
         "fetch GET ext/delivery/cam headers={\"X-OpenAVC-Plugin-Token\":\"tok\"}",
         "script append hls.light.min.js",
@@ -1052,7 +1052,7 @@ EXPECTED = {
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
     ],
-    # A row with no value, a status, or a non-text detail cannot play; 'ready' and padding read as playable; a row with no id or value is not ours.
+    # A row with no value (or a null one), a status, or a non-text detail cannot play; 'ready' and padding read as playable only with a value; a row with no id or value is not ours.
     'list_rows_that_cannot_play': [
         "view overlay \"Set it up.\" +retry | label hidden(\"Cam\") | video shown | img hidden",
         "view overlay \"This source has no stream right now.\" +retry | label hidden(\"Cam\") | video shown | img hidden",
@@ -1080,6 +1080,9 @@ EXPECTED = {
         "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
         "peer#2 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"answer-sdp\"}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "peer#2 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
+        "view overlay \"This source has no stream right now.\" +retry | label hidden(\"cam\") | video shown | img hidden",
     ],
     # An unreadable list, or one that is not a list, blocks nothing; a row with an empty label shows the id.
     'list_unreadable_or_not_a_list': [
@@ -1264,6 +1267,144 @@ EXPECTED = {
     'unbound_tile_ignores_selection_keys': [
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+    ],
+    # As today: an init for the same stream while HLS plays reads the list's kind until the server answers, and starts a second player without stopping the first.
+    'reinit_while_hls_plays': [
+        "fetch GET ext/delivery/cam headers={}",
+        "script append hls.light.min.js",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "Hls.isSupported",
+        "hls#1 new {\"lowLatencyMode\":true,\"manifestLoadingTimeOut\":20000,\"fragLoadingTimeOut\":20000,\"backBufferLength\":10}",
+        "hls#1 on hlsError",
+        "hls#1 loadSource ext/hls/cam/index.m3u8",
+        "hls#1 attachMedia #video",
+        "video play",
+        "view overlay hidden | label hidden(\"CAM\") | video shown | img hidden",
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "release GET ext/delivery/cam",
+        "Hls.isSupported",
+        "hls#2 new {\"lowLatencyMode\":true,\"manifestLoadingTimeOut\":20000,\"fragLoadingTimeOut\":20000,\"backBufferLength\":10}",
+        "hls#2 on hlsError",
+        "hls#2 loadSource ext/hls/cam/index.m3u8",
+        "hls#2 attachMedia #video",
+        "video play",
+        "hls#2 destroy",
+    ],
+    # A tile with no channel reads no selection, even one under an empty key.
+    'a_selection_key_named_by_no_channel': [
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+    ],
+    # An init that leaves no stream stops what was playing, so hiding the tile then pauses nothing.
+    'init_to_no_stream_after_playing': [
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+        "view overlay \"No stream selected\" | label hidden(\"\") | video hidden | img hidden",
+    ],
+    # A switch starts fresh: a list that has not named the new source is not a verdict on it.
+    'a_switch_to_a_source_the_list_has_not_named': [
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"door\") | video hidden | img shown src=ext/mjpeg/door",
+    ],
+    # A switch forgets the last mode, so a late frame from the old source clears nothing.
+    'a_switch_forgets_the_last_mode': [
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+        "view overlay hidden | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img hidden",
+    ],
+    # A blocked plan answered after the tile stopped shows nothing.
+    'a_blocked_plan_answered_after_a_stop': [
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "release GET ext/delivery/cam",
+    ],
+    # A blocked plan stops the session that was up before saying so.
+    'a_retry_while_playing_finds_the_plan_blocked': [
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#1 new {\"iceServers\":[]}",
+        "peer#1 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#1 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#1 createDataChannel \"\"",
+        "peer#1 createOffer",
+        "peer#1 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#1 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"answer-sdp\"}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "playoutDelayHint 0.1",
+        "video play",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "view overlay hidden | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#1 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
+        "view overlay \"Remote video is not included in this plan.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
+    ],
+    # A library failure landing after a switch schedules nothing for the new source.
+    'hls_switch_while_the_library_fails': [
+        "fetch GET ext/delivery/cam headers={}",
+        "script append hls.light.min.js",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
+    ],
+    # A playable list while the tile is hidden does not start it; showing it does.
+    'a_playable_list_while_hidden': [
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+        "view overlay \"Paused\" | label hidden(\"CAM\") | video hidden | img hidden",
+        "view overlay \"Paused\" | label hidden(\"Again\") | video hidden | img hidden",
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"Again\") | video hidden | img shown src=ext/mjpeg/cam",
+    ],
+    # A selection cleared while hidden, with no stream to fall back on, leaves nothing to resume.
+    'a_selection_cleared_while_hidden': [
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img shown src=ext/mjpeg/door",
+        "view overlay \"Paused\" | label hidden(\"DOOR\") | video hidden | img hidden",
+        "view overlay \"No stream selected\" | label hidden(\"\") | video hidden | img hidden",
+    ],
+    # As today: a selection change while hidden starts the new source behind the hidden page, and showing the page starts it again.
+    'a_selection_change_while_hidden': [
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img shown src=ext/mjpeg/door",
+        "view overlay \"Paused\" | label hidden(\"DOOR\") | video hidden | img hidden",
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Paused\" | label hidden(\"CAM\") | video hidden | img hidden",
+    ],
+    # The session id is escaped into our own URL, and an empty one leaves the bare offer URL.
+    'webrtc_session_ids_that_need_escaping': [
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#1 new {\"iceServers\":[]}",
+        "peer#1 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#1 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#1 createDataChannel \"\"",
+        "peer#1 createOffer",
+        "peer#1 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#1 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"a\"}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
+        "fetch PATCH ext/whep/cam/sess%201 headers={\"Content-Type\":\"application/trickle-ice-sdpfrag\",\"If-Match\":\"*\"} body=\"a=ice-ufrag:uf1\\r\\na=ice-pwd:pw1\\r\\nm=video 9 UDP/TLS/RTP/SAVPF 96\\r\\na=mid:0\\r\\na=candidate:0 1 udp 1 10.0.0.9 5000 typ host\\r\\n\"",
+        "peer#1 close",
+        "fetch DELETE ext/whep/cam/sess%201 headers={}",
+        "fetch GET ext/delivery/cam headers={}",
+        "peer#2 new {\"iceServers\":[]}",
+        "peer#2 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#2 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#2 createDataChannel \"\"",
+        "peer#2 createOffer",
+        "peer#2 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#2 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"a\"}",
+        "fetch PATCH ext/whep/cam headers={\"Content-Type\":\"application/trickle-ice-sdpfrag\",\"If-Match\":\"*\"} body=\"a=ice-ufrag:uf1\\r\\na=ice-pwd:pw1\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111\\r\\na=mid:1\\r\\na=candidate:1 1 udp 1 10.0.0.9 5000 typ host\\r\\n\"",
+        "peer#2 close",
+        "fetch DELETE ext/whep/cam headers={}",
     ],
     # An init for another stream tears the first down before starting.
     'reinit_with_another_stream_stops_the_first': [
