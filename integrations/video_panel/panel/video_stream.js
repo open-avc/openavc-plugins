@@ -45,6 +45,8 @@
   const SOURCE_GONE_TEXT = 'This source is no longer available.';
   const NO_SOURCE_TEXT = 'No stream selected';
   const PLAYOUT_DELAY_HINT = 0.1; // seconds; small jitter buffer for LAN latency
+  // The peer connection states that end a session.
+  const PEER_LOST = ['failed', 'closed', 'disconnected'];
 
   // The iframe is served at <base>/api/plugins/video_panel/panel/video_stream.html.
   // The plugin's HTTP routes live at the sibling .../ext/. Deriving the base
@@ -395,18 +397,46 @@
     return EXT_BASE + '/delivery/' + encodeURIComponent(streamId);
   }
 
+  // A request refused for its credential asks the host for a new token. The
+  // tile's own requests and hls.js's say so with a 401; an <img> cannot say,
+  // so the MJPEG path asks on any error instead.
+  function askIfRefused(status) {
+    if (status === 401) requestFreshToken();
+  }
+
+  // The tile still shows the source an attempt started for. An answer that
+  // lands after a switch or a stop is dropped.
+  function stillShowing(wanted) {
+    return active && streamId === wanted;
+  }
+
+  function showConnecting() {
+    showOverlay({ spinner: true, text: reconnectAttempts > 0 ? 'Reconnecting…' : 'Connecting…' });
+  }
+
+  // Which surface the picture is on: the <video> for WebRTC and HLS, the
+  // <img> for MJPEG.
+  function showSurface(el) {
+    videoEl.hidden = el !== videoEl;
+    imgEl.hidden = el !== imgEl;
+  }
+
+  function playVideo() {
+    videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
+  }
+
   // Ask the server how THIS viewer should play THIS stream, then dispatch.
   // Asked on every start, not cached: an entitlement can be revoked mid-session
   // and a reconnect is exactly when we should find out.
   async function start() {
-    if (!active || !streamId) return;
+    if (!wantsPicture()) return;
     const wanted = streamId;
-    showOverlay({ spinner: true, text: reconnectAttempts > 0 ? 'Reconnecting…' : 'Connecting…' });
+    showConnecting();
 
     let delivery;
     try {
       const res = await fetch(deliveryUrl(), { headers: authHeaders() });
-      if (res.status === 401) requestFreshToken();
+      askIfRefused(res.status);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       delivery = await res.json();
     } catch (err) {
@@ -414,28 +444,39 @@
       // takes the normal backoff -- but it names the call, because a delivery
       // fault and a stream fault wear the same spinner, and telling them apart
       // otherwise needs a debugger attached at the moment it happens.
-      if (active && streamId === wanted) scheduleReconnect('delivery ' + err.message);
+      if (stillShowing(wanted)) scheduleReconnect('delivery ' + err.message);
       return;
     }
     // The source was switched, or we were stopped, while that was in flight.
-    if (!active || streamId !== wanted) return;
+    if (stillShowing(wanted)) playAs(delivery);
+  }
 
+  // Play the way the delivery answer says: MJPEG, HLS, a plan that does not
+  // include it, or WebRTC for anything else, an answer with no mode included.
+  function playAs(delivery) {
     streamMode = delivery && delivery.mode ? delivery.mode : 'webrtc';
-    if (streamMode === 'blocked') {
-      // Not a failure and not a retry storm: the plan does not include remote
-      // video. Say so, stop the spinner, and leave Retry there for the case
-      // where it gets bought while the panel is open.
-      teardown();
-      showOverlay({
-        spinner: false,
-        text: (delivery && delivery.detail) || 'Remote video is not included in this plan.',
-        retry: true,
-      });
-      return;
-    }
-    if (streamMode === 'mjpeg') startMjpeg();
+    if (streamMode === 'blocked') showPlanBlocked(delivery);
+    else if (streamMode === 'mjpeg') startMjpeg();
     else if (streamMode === 'hls') startHls();
     else startWhep();
+  }
+
+  // Not a failure and not a retry storm: the plan does not include remote
+  // video. Say so, stop the spinner, and leave Retry there for the case where
+  // it gets bought while the panel is open.
+  function showPlanBlocked(delivery) {
+    teardown();
+    showOverlay({
+      spinner: false,
+      text: (delivery && delivery.detail) || 'Remote video is not included in this plan.',
+      retry: true,
+    });
+  }
+
+  // WebRTC and HLS take one attempt at a time between them: a start while
+  // either is still being set up does nothing.
+  function canStart() {
+    return !starting && wantsPicture();
   }
 
   // ──── MJPEG client (<img> multipart over HTTP) ────
@@ -449,10 +490,9 @@
   }
 
   function startMjpeg() {
-    if (!active || !streamId) return;
-    videoEl.hidden = true;
-    imgEl.hidden = false;
-    showOverlay({ spinner: true, text: reconnectAttempts > 0 ? 'Reconnecting…' : 'Connecting…' });
+    if (!wantsPicture()) return;
+    showSurface(imgEl);
+    showConnecting();
     // Setting src opens the multipart connection; `load` fires on the first
     // frame, `error` if the encoder or the AV LAN is unreachable.
     imgEl.src = mjpegUrl();
@@ -503,54 +543,72 @@
   }
 
   async function startHls() {
-    if (starting || !active || !streamId) return;
+    if (!canStart()) return;
     starting = true;
-    videoEl.hidden = false;
-    imgEl.hidden = true;
+    showSurface(videoEl);
     const wanted = streamId;
     try {
       // No Media Source Extensions: an iPhone or iPad, where the native player
       // is both the only option and the better one — lower power, hardware
       // pipeline.
       if (!mseAvailable()) {
-        if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-          videoEl.src = hlsUrl();
-          videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
-        } else {
-          showOverlay({ spinner: false, text: 'This browser cannot play remote video.', retry: false });
-        }
+        playNativeHls();
         return;
       }
       const Hls = await loadHlsLib();
-      if (!active || streamId !== wanted) return;
-      if (!Hls.isSupported()) {
-        showOverlay({ spinner: false, text: 'This browser cannot play remote video.', retry: false });
-        return;
-      }
-      const player = new Hls({
-        lowLatencyMode: true,
-        // The tunnel is a relay, not a pipe: it is worth waiting a moment
-        // longer for a part than tearing the session down over one late fetch.
-        manifestLoadingTimeOut: 20000,
-        fragLoadingTimeOut: 20000,
-        backBufferLength: 10,
-      });
-      hlsPlayer = player;
-      player.on(Hls.Events.ERROR, (_evt, data) => {
-        if (hlsPlayer !== player || !data || !data.fatal) return;
-        // hls.js fetches playlists and segments itself, so its error event is
-        // the only place a 401 on those is visible out here.
-        if (data.response && data.response.code === 401) requestFreshToken();
-        if (active) scheduleReconnect('HLS ' + (data.details || data.type || 'fatal error'));
-      });
-      player.loadSource(hlsUrl());
-      player.attachMedia(videoEl);
-      videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
+      if (!stillShowing(wanted)) return;
+      playThroughHlsJs(Hls);
     } catch (err) {
-      if (active && streamId === wanted) scheduleReconnect('HLS ' + err.message);
+      if (stillShowing(wanted)) scheduleReconnect('HLS ' + err.message);
     } finally {
       starting = false;
     }
+  }
+
+  function playNativeHls() {
+    if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+      videoEl.src = hlsUrl();
+      playVideo();
+    } else {
+      showCannotPlayRemote();
+    }
+  }
+
+  function playThroughHlsJs(Hls) {
+    if (!Hls.isSupported()) {
+      showCannotPlayRemote();
+      return;
+    }
+    const player = new Hls({
+      lowLatencyMode: true,
+      // The tunnel is a relay, not a pipe: it is worth waiting a moment
+      // longer for a part than tearing the session down over one late fetch.
+      manifestLoadingTimeOut: 20000,
+      fragLoadingTimeOut: 20000,
+      backBufferLength: 10,
+    });
+    hlsPlayer = player;
+    player.on(Hls.Events.ERROR, (_evt, data) => onHlsError(player, data));
+    player.loadSource(hlsUrl());
+    player.attachMedia(videoEl);
+    playVideo();
+  }
+
+  // Only a fatal error from the player still on screen reconnects.
+  function onHlsError(player, data) {
+    if (hlsPlayer !== player || !isFatal(data)) return;
+    // hls.js fetches playlists and segments itself, so its error event is
+    // the only place a 401 on those is visible out here.
+    if (data.response) askIfRefused(data.response.code);
+    if (active) scheduleReconnect('HLS ' + (data.details || data.type || 'fatal error'));
+  }
+
+  function isFatal(data) {
+    return Boolean(data) && Boolean(data.fatal);
+  }
+
+  function showCannotPlayRemote() {
+    showOverlay({ spinner: false, text: 'This browser cannot play remote video.', retry: false });
   }
 
   // ──── WHEP client ────
@@ -567,48 +625,12 @@
   }
 
   async function startWhep() {
-    if (starting || !active || !streamId || pc) return;
+    if (pc || !canStart()) return;
     starting = true;
-    videoEl.hidden = false;
-    imgEl.hidden = true;
-    showOverlay({ spinner: true, text: reconnectAttempts > 0 ? 'Reconnecting…' : 'Connecting…' });
+    showSurface(videoEl);
+    showConnecting();
 
-    const peer = new RTCPeerConnection({ iceServers: [] });
-    pc = peer;
-    resourceUrl = null;
-    queuedCandidates = [];
-
-    peer.addTransceiver('video', { direction: 'recvonly' });
-    peer.addTransceiver('audio', { direction: 'recvonly' });
-    // MediaMTX's reference client opens a data channel; mirror it so the
-    // negotiated session matches what the server expects.
-    peer.createDataChannel('');
-
-    peer.onicecandidate = (evt) => {
-      if (!evt.candidate) return;
-      if (!resourceUrl) queuedCandidates.push(evt.candidate);
-      else sendCandidates([evt.candidate]);
-    };
-    peer.ontrack = (evt) => {
-      if (evt.track.kind === 'video') {
-        try { evt.receiver.playoutDelayHint = PLAYOUT_DELAY_HINT; } catch { /* unsupported (e.g. Firefox) */ }
-      }
-      if (evt.streams && evt.streams[0] && videoEl.srcObject !== evt.streams[0]) {
-        videoEl.srcObject = evt.streams[0];
-        videoEl.play().catch(() => { /* autoplay policy; muted should allow it */ });
-      }
-    };
-    peer.onconnectionstatechange = () => {
-      if (pc !== peer) return; // a newer attempt superseded this one
-      const s = peer.connectionState;
-      if (s === 'connected') {
-        reconnectAttempts = 0;
-        hideOverlay();
-      } else if (s === 'failed' || s === 'closed' || s === 'disconnected') {
-        if (active) scheduleReconnect('connection ' + s);
-      }
-    };
-
+    const peer = newWhepPeer();
     try {
       const offer = await peer.createOffer();
       offerData = parseOffer(offer.sdp);
@@ -619,29 +641,83 @@
         body: offer.sdp,
         headers: authHeaders({ 'Content-Type': 'application/sdp' }),
       });
-      if (res.status === 401) requestFreshToken();
-      if (res.status !== 201) throw new Error('WHEP POST returned ' + res.status);
-      const location = res.headers.get('location');
-      if (!location) throw new Error('WHEP response missing Location header');
-      // Anchor the resource URL to our own ext base; take only the session id
-      // (last path segment) from the upstream Location so a path prefix on the
-      // proxy side can't desync the follow-up PATCH/DELETE.
-      const secret = location.split('?')[0].replace(/\/+$/, '').split('/').pop();
-      resourceUrl = whepUrl(secret);
+      resourceUrl = whepUrl(sessionFrom(res));
 
       const answer = await res.text();
       if (pc !== peer) return; // superseded while awaiting the answer
       await peer.setRemoteDescription({ type: 'answer', sdp: answer });
-
-      if (queuedCandidates.length) {
-        sendCandidates(queuedCandidates);
-        queuedCandidates = [];
-      }
+      flushQueuedCandidates();
     } catch (err) {
       if (pc === peer && active) scheduleReconnect(err.message);
     } finally {
       starting = false;
     }
+  }
+
+  // A recvonly peer for one session, which becomes the tile's session at once.
+  // MediaMTX's reference client opens a data channel; mirror it so the
+  // negotiated session matches what the server expects.
+  function newWhepPeer() {
+    const peer = new RTCPeerConnection({ iceServers: [] });
+    pc = peer;
+    resourceUrl = null;
+    queuedCandidates = [];
+
+    peer.addTransceiver('video', { direction: 'recvonly' });
+    peer.addTransceiver('audio', { direction: 'recvonly' });
+    peer.createDataChannel('');
+
+    peer.onicecandidate = onLocalCandidate;
+    peer.ontrack = onRemoteTrack;
+    peer.onconnectionstatechange = () => onPeerState(peer);
+    return peer;
+  }
+
+  // The session id from the answer to our offer: a 201 whose Location names
+  // it. Anchored to our own ext base by the caller; only the last path segment
+  // is taken, so a path prefix on the proxy side can't desync the follow-up
+  // PATCH/DELETE.
+  function sessionFrom(res) {
+    askIfRefused(res.status);
+    if (res.status !== 201) throw new Error('WHEP POST returned ' + res.status);
+    const location = res.headers.get('location');
+    if (!location) throw new Error('WHEP response missing Location header');
+    return location.split('?')[0].replace(/\/+$/, '').split('/').pop();
+  }
+
+  // Candidates gathered before the session exists wait for it; after, each
+  // goes out as it arrives.
+  function onLocalCandidate(evt) {
+    if (!evt.candidate) return;
+    if (!resourceUrl) queuedCandidates.push(evt.candidate);
+    else sendCandidates([evt.candidate]);
+  }
+
+  function flushQueuedCandidates() {
+    if (queuedCandidates.length) {
+      sendCandidates(queuedCandidates);
+      queuedCandidates = [];
+    }
+  }
+
+  function onRemoteTrack(evt) {
+    if (evt.track.kind === 'video') setPlayoutDelay(evt.receiver);
+    const stream = evt.streams && evt.streams[0];
+    if (stream && videoEl.srcObject !== stream) {
+      videoEl.srcObject = stream;
+      playVideo();
+    }
+  }
+
+  function setPlayoutDelay(receiver) {
+    try { receiver.playoutDelayHint = PLAYOUT_DELAY_HINT; } catch { /* unsupported (e.g. Firefox) */ }
+  }
+
+  function onPeerState(peer) {
+    if (pc !== peer) return; // a newer attempt superseded this one
+    const s = peer.connectionState;
+    if (s === 'connected') showPicture();
+    else if (PEER_LOST.includes(s) && active) scheduleReconnect('connection ' + s);
   }
 
   async function sendCandidates(candidates) {
@@ -707,31 +783,41 @@
     pc = null;
     resourceUrl = null;
     if (videoEl.srcObject) videoEl.srcObject = null;
-    // HLS: destroy() stops the playlist polling and the segment fetches. Left
-    // running it keeps pulling video across the tunnel with nothing on screen,
-    // which is the one leak that costs money rather than memory.
+    stopHls();
+    stopMjpeg();
+    endWhepSession(peer, url);
+  }
+
+  // HLS: destroy() stops the playlist polling and the segment fetches. Left
+  // running it keeps pulling video across the tunnel with nothing on screen,
+  // which is the one leak that costs money rather than memory. The native-HLS
+  // path (Safari) sets src rather than srcObject.
+  function stopHls() {
     if (hlsPlayer) {
       const player = hlsPlayer;
       hlsPlayer = null;
       try { player.destroy(); } catch { /* already destroyed */ }
     }
-    // The native-HLS path (Safari) sets src rather than srcObject.
     if (videoEl.getAttribute('src')) {
       videoEl.removeAttribute('src');
       try { videoEl.load(); } catch { /* nothing loaded */ }
     }
-    // MJPEG: drop the src to close the multipart connection. removeAttribute
-    // (not src = '') so the browser doesn't refetch the iframe's own URL.
+  }
+
+  // MJPEG: drop the src to close the multipart connection. removeAttribute
+  // (not src = '') so the browser doesn't refetch the iframe's own URL.
+  function stopMjpeg() {
     if (imgEl.getAttribute('src')) imgEl.removeAttribute('src');
     imgEl.hidden = true;
+  }
+
+  // Close the peer, and delete its session best-effort; the server also cleans
+  // up when the peer connection drops, so failure here is harmless.
+  function endWhepSession(peer, url) {
     if (peer) {
       try { peer.close(); } catch { /* already closed */ }
     }
-    if (url) {
-      // Best-effort session delete; the server also cleans up when the peer
-      // connection drops, so failure here is harmless.
-      fetch(url, { method: 'DELETE', headers: authHeaders() }).catch(() => {});
-    }
+    if (url) fetch(url, { method: 'DELETE', headers: authHeaders() }).catch(() => {});
   }
 
   function stop() {
@@ -778,11 +864,18 @@
     retryEl.hidden = !retry;
   }
 
-  function hideOverlay() {
+  // A picture is on screen: the backoff starts over and the overlay goes. A
+  // picture is the only proof the last fault ended, so the next one is worth
+  // posting again even if it reads identically.
+  function showPicture() {
+    reconnectAttempts = 0;
     overlayEl.hidden = true;
-    // A picture is the only proof the last fault ended, so the next one is
-    // worth posting again even if it reads identically.
     reportedReason = '';
+  }
+
+  // A surface's events are ours only while the tile plays in its mode.
+  function playingAs(mode) {
+    return streamMode === mode && active;
   }
 
   retryEl.addEventListener('click', () => {
@@ -803,13 +896,10 @@
   // (encoder offline / no route to the AV LAN) drives the same reconnect path
   // as WebRTC. The src-present guard ignores the error a teardown clear emits.
   imgEl.addEventListener('load', () => {
-    if (streamMode === 'mjpeg' && active) {
-      reconnectAttempts = 0;
-      hideOverlay();
-    }
+    if (playingAs('mjpeg')) showPicture();
   });
   imgEl.addEventListener('error', () => {
-    if (streamMode === 'mjpeg' && active && imgEl.getAttribute('src')) {
+    if (playingAs('mjpeg') && imgEl.getAttribute('src')) {
       // An <img> reports no status, so an expired token and an unplugged
       // encoder arrive here as the same event. Ask once per token and let the
       // answer decide: a real 401 is fixed by the new one, and anything else
@@ -825,15 +915,12 @@
   // through the tunnel the first segment can arrive well before it decodes,
   // and clearing the overlay early shows a black rectangle.
   videoEl.addEventListener('playing', () => {
-    if (streamMode === 'hls' && active) {
-      reconnectAttempts = 0;
-      hideOverlay();
-    }
+    if (playingAs('hls')) showPicture();
   });
   videoEl.addEventListener('error', () => {
     // Only the native-HLS path reports here; hls.js swallows media errors and
     // reports them on its own ERROR event, handled at the player.
-    if (streamMode === 'hls' && active && videoEl.getAttribute('src')) {
+    if (playingAs('hls') && videoEl.getAttribute('src')) {
       scheduleReconnect('HLS media error' + (videoEl.error ? ' ' + videoEl.error.code : ''));
     }
   });
