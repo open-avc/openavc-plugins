@@ -307,6 +307,7 @@ function newTile(jsPath, htmlPath, opts) {
     hold: (predicate) => { holdMatching = predicate; },
     pendingCount: () => pending.length,
     // Answer the oldest held call matching `predicate` (or the oldest of all).
+    // `spec` is an answer, or a function of (method, url) that returns one.
     release: async (spec, predicate) => {
       const i = pending.findIndex((c) => !predicate || predicate(c.method, c.url));
       if (i < 0) {
@@ -314,7 +315,7 @@ function newTile(jsPath, htmlPath, opts) {
       } else {
         const [call] = pending.splice(i, 1);
         say('release ' + call.method + ' ' + shortUrl(call.url));
-        call.settleWith(spec);
+        call.settleWith(typeof spec === 'function' ? spec(call.method, call.url) : spec);
       }
       await settle();
     },
