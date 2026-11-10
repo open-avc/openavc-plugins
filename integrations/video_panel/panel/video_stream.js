@@ -341,9 +341,11 @@
 
   // ──── Playing, and saying why not ────
 
-  // From here on the tile shows `id`. Whatever was playing stops, and what we
-  // knew about the last source goes with it: a new per-source fact is reset
-  // here, the one place a source changes.
+  // From here on the tile shows `id`: the one place streamId changes.
+  // Whatever was playing stops, and the facts gathered about the last source
+  // (seenRow, stateGone) go with it. What each caller then reads from the list
+  // is its own: an init takes the list's kind into streamMode, a channel switch
+  // into listedKind.
   function switchSource(id) {
     stop();
     streamId = id;
