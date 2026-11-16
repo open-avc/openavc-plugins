@@ -1314,6 +1314,8 @@ PLUGIN_INFO = {
 
 **Pip dependencies** are listed in `"dependencies"` and installed automatically to `plugin_repo/.deps/`. Each entry must be a plain requirement — `package`, `package>=1.2`, `package[extra]`, optionally with an environment marker. URLs, VCS specs (`git+...`), `@ url` direct references, and pip options (anything starting with `-`) are rejected by `validate.py` and refused at install time, because they would let install-time code run from an attacker-chosen index or repo.
 
+**Write `min_openavc_version`, `dependencies` and `native_dependencies` out as values in `PLUGIN_INFO`**, in the file that defines the plugin class. The installer reads them from the source, without running the plugin, before it installs anything: a value built by code (a function call, a list assembled at import) cannot be read there, so nothing is installed for it and the version is not checked until the plugin is enabled.
+
 **Native-dependency URLs** (`native_dependencies[].platforms.<plat>.url`) must use `https` and resolve to a public host, and so must every redirect the download follows; the installer refuses private/loopback/link-local addresses (SSRF guard) and caps download size.
 
 ---
