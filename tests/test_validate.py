@@ -459,8 +459,9 @@ def _schema(schema):
     return result.errors, result.warnings
 
 
-def test_a_config_schema_that_is_not_a_dict_is_openavcs_to_refuse():
+def test_a_config_schema_or_field_that_is_not_a_dict_is_openavcs_to_refuse():
     assert _schema([1]) == ([], [])
+    assert _schema({"a": "string", "g": {"type": "group", "fields": {"b": None}}}) == ([], [])
 
 
 _LOGIN_COLUMN = (
@@ -500,7 +501,6 @@ def test_config_schema_fields():
         }},
     })
     assert errors == [
-        "CONFIG_SCHEMA field 'notdict' must be a dict",
         "CONFIG_SCHEMA field 'secret_bad' has 'secret' that is not true or false",
         "CONFIG_SCHEMA field 'notype' has 'secret' that is not true or false",
         "CONFIG_SCHEMA field 'notype' missing 'type'",
@@ -640,6 +640,19 @@ def test_a_config_schema_that_is_not_a_dict(tmp_path):
     src = _source_with(repr(GOOD_INFO), body="    CONFIG_SCHEMA = ['host']\n")
     assert _check_dir(_plugin(tmp_path, source=src)) == (
         ["acme_widget_plugin.py: CONFIG_SCHEMA must be a dict"], [])
+
+
+@pytest.mark.parametrize("schema, error", [
+    ({"host": {"type": "string"}, "port": "9000"},
+     "CONFIG_SCHEMA['port'] must be a dict, got str"),
+    ({"advanced": {"type": "group", "fields": ["retries"]}},
+     "CONFIG_SCHEMA['advanced']['fields'] must be a dict, got list"),
+    ({"advanced": {"type": "group", "fields": {"retries": None}}},
+     "CONFIG_SCHEMA['advanced']['fields']['retries'] must be a dict, got NoneType"),
+])
+def test_a_field_that_is_not_a_dict_is_refused_once_in_openavcs_words(tmp_path, schema, error):
+    src = _source_with(repr(GOOD_INFO), body=f"    CONFIG_SCHEMA = {schema!r}\n")
+    assert _check_dir(_plugin(tmp_path, source=src)) == ([f"acme_widget_plugin.py: {error}"], [])
 
 
 _BUILT = "acme_widget_plugin.py: not checked, because the source builds it when the plugin runs: "
@@ -1431,3 +1444,4 @@ def test_a_plugin_for_another_machine_passes_on_this_one(tmp_path):
 NO_PLUGIN_CLASS = (
     "No plugin class found: OpenAVC needs a class whose PLUGIN_INFO is a dict with an 'id', "
     "written out in the source so it can be read before the plugin is installed")
+

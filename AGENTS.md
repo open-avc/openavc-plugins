@@ -168,6 +168,8 @@ All plugins and their dependencies must use one of these licenses:
 
 Define `CONFIG_SCHEMA` as a class-level dict to declare configurable settings. The Programmer IDE auto-renders a configuration form from this schema.
 
+Each field is a dict, keyed by the setting's config key, and a `group`'s `fields` is a dict of fields of the same kind. OpenAVC refuses to start a plugin with a field that is not a dict and names it by its place, as `CONFIG_SCHEMA['connection']['fields']['port'] must be a dict, got int`.
+
 ### Field Types
 
 ```python
@@ -1495,7 +1497,7 @@ The validator judges what a plugin declares by OpenAVC's own rules, the ones tha
 
 It checks:
 - `PLUGIN_INFO`: required fields, an MIT-compatible license, category, capabilities, `guest_alias`, `network_ports`, and that `platforms` lists only `win_x64`, `linux_x64`, `linux_arm64` or `all`
-- `CONFIG_SCHEMA`, `CONFIG_SECRETS`, `MACRO_ACTIONS`, `SCRIPT_API` and `EXTENSIONS`, as OpenAVC checks them when the plugin is enabled
+- `CONFIG_SCHEMA` (each field a dict, a group's `fields` included), `CONFIG_SECRETS`, `MACRO_ACTIONS`, `SCRIPT_API` and `EXTENSIONS`, as OpenAVC checks them when the plugin is enabled
 - Plugin ID format (lowercase, underscores, no dots), a semver version, and plain dependency strings
 - `CONFIG_SCHEMA` field types, `secret` set to `True` or `False` only, and a warning for a `mapping_list` column that holds a login
 - `validate_config` is a `@classmethod` or `@staticmethod`, and not async

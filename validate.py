@@ -217,8 +217,8 @@ _OWN_INFO_CHECKS = (
 
 def validate_config_schema(config_schema, result):
     """The fields of a CONFIG_SCHEMA dict, a group's fields included: the
-    types the Programmer's settings form draws. Whether it is a dict at all
-    is OpenAVC's rule (``judge``)."""
+    types the Programmer's settings form draws. Whether the schema, each
+    field and a group's fields are dicts is OpenAVC's rule (``judge``)."""
     if not isinstance(config_schema, dict):
         return
     for field_id, field_def in config_schema.items():
@@ -226,10 +226,9 @@ def validate_config_schema(config_schema, result):
 
 
 def _check_schema_field(field_id, field_def, result):
-    """One settings field: a dict, its secret flag, its type, then what its
-    type needs."""
+    """One settings field: its secret flag, its type, then what its type
+    needs. A field that is not a dict is OpenAVC's to refuse."""
     if not isinstance(field_def, dict):
-        result.error(f"CONFIG_SCHEMA field '{field_id}' must be a dict")
         return
     # A login. Only a real True marks one; "true" or 1 would read as
     # marked here and be treated as an ordinary setting by OpenAVC.
