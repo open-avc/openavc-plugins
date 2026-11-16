@@ -6,8 +6,8 @@ and read back what the harness printed as JSON.
 
 Node and jsdom are not dependencies of this repo -- jsdom lives in the platform
 checkout's openavc/web/programmer/node_modules -- so a run without them skips
-rather than failing a Python-only run. Set OPENAVC_REQUIRE_PANEL_JS=1 to make a
-missing toolchain an error instead, for a run that has promised to cover this.
+rather than failing a Python-only run. A run that set OPENAVC_REQUIRE_PLATFORM=1
+fails on that skip, like any other (tests/conftest.py).
 """
 
 import json
@@ -50,13 +50,10 @@ def toolchain_problem(harness):
 def run_harness(harness):
     """Run one harness against the tile and return what it printed, parsed.
 
-    Skips (or, under OPENAVC_REQUIRE_PANEL_JS, fails) when node or jsdom is
-    missing.
+    Skips when node or jsdom is missing.
     """
     problem = toolchain_problem(harness)
     if problem:
-        if os.environ.get("OPENAVC_REQUIRE_PANEL_JS"):
-            raise AssertionError(f"panel JS coverage was required but {problem}")
         pytest.skip(problem)
     proc = subprocess.run(
         ["node", str(harness), str(TILE_JS), str(TILE_HTML)],

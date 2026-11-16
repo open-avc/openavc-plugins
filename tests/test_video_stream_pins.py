@@ -9,8 +9,8 @@ step. These record what the tile does today, so a change to any of it shows
 here; the ones marked "as today" pin behaviour that looks wrong and is recorded
 as such, not endorsed.
 
-Skips without node and jsdom unless OPENAVC_REQUIRE_PANEL_JS is set
-(tests/_panel_js.py).
+Skips without node and jsdom (tests/_panel_js.py), which fails a run that set
+OPENAVC_REQUIRE_PLATFORM=1 (tests/conftest.py).
 """
 
 import sys

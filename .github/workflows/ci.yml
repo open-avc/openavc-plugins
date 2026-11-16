@@ -30,3 +30,67 @@ jobs:
       # same pull request as the files it covers.
       - name: manifest.json matches the committed plugin files
         run: python scripts/build_manifest.py --check
+
+  # The plugins' own tests, run on the real platform. Most of them start a
+  # plugin through OpenAVC's test harness, so this job clones the platform,
+  # installs what each plugin declares it needs, and installs node with jsdom
+  # (from the platform's Programmer packages) for the Video Panel tile's
+  # browser-side tests.
+  #
+  # OPENAVC_REQUIRE_PLATFORM=1 makes any skip fail the run (tests/conftest.py).
+  # A test that needs the platform, a library or node skips without it, so a
+  # contributor with only Python can still run the rest; in a job that meant
+  # to provide all of it, a skip would pass while testing nothing.
+  tests:
+    name: Plugin tests on the real platform
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Track main rather than a pin: a platform change that breaks a plugin
+      # should go red here, on the day it appears.
+      - name: Clone the OpenAVC platform
+        run: git clone --depth 1 https://github.com/open-avc/openavc.git "$RUNNER_TEMP/openavc"
+
+      # The platform's test extra brings the test runner at the versions the
+      # platform's own suite uses.
+      - name: Install the platform and its test tools
+        run: pip install -e "$RUNNER_TEMP/openavc[test]"
+
+      # The libraries OpenAVC installs for each plugin when it is installed,
+      # read from the plugins' own plugin.json files.
+      - name: Install the libraries each plugin declares
+        run: |
+          python - > "$RUNNER_TEMP/plugin-requirements.txt" <<'EOF'
+          import json
+          import pathlib
+          for manifest in sorted(pathlib.Path(".").glob("*/*/plugin.json")):
+              for requirement in json.loads(manifest.read_text(encoding="utf-8")).get("dependencies", []):
+                  print(requirement)
+          EOF
+          cat "$RUNNER_TEMP/plugin-requirements.txt"
+          pip install -r "$RUNNER_TEMP/plugin-requirements.txt"
+
+      - name: Install the platform's Programmer packages (jsdom)
+        working-directory: ${{ runner.temp }}/openavc/openavc/web/programmer
+        run: npm ci
+
+      - name: Run the plugin tests on the platform
+        env:
+          OPENAVC_PLATFORM_ROOT: ${{ runner.temp }}/openavc
+          OPENAVC_REQUIRE_PLATFORM: "1"
+          # Importing the platform opens a log in its data directory; keep it
+          # out of this checkout.
+          OPENAVC_DATA_DIR: ${{ runner.temp }}/openavc-data
+        run: python -m pytest tests/ -v

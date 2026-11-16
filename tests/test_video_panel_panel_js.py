@@ -6,9 +6,8 @@ tests/fixtures/video_stream_harness.cjs and assert on what the viewer would see.
 
 Node and jsdom are not dependencies of this repo -- jsdom lives in the platform
 checkout's openavc/web/programmer/node_modules -- so these skip when the
-toolchain is not there rather than failing a Python-only run. Set
-OPENAVC_REQUIRE_PANEL_JS=1 to make a missing toolchain an error instead, for a
-run that has promised to cover this.
+toolchain is not there rather than failing a Python-only run, unless the run
+set OPENAVC_REQUIRE_PLATFORM=1 (tests/conftest.py).
 """
 
 import sys

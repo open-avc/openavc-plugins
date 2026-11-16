@@ -7,8 +7,8 @@ other means a plugin that passes here and is refused when it is enabled, or the
 reverse. These tests read both sides and fail on any difference.
 
 They need an OpenAVC checkout (found the way ``_platform_root.py`` describes)
-and skip without one. This repository's CI does not run pytest, so they run
-wherever the tests are run by hand.
+and skip without one. CI runs them on a fresh clone of the platform, where that
+skip fails the run (tests/conftest.py).
 
 Two of validate.py's tables have no table on the platform to compare with:
 ``VALID_PLATFORMS`` is the set of ids ``get_platform_id()`` can return, and
