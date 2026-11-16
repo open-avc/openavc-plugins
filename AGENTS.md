@@ -62,7 +62,7 @@ category/
         └── app.js
 ```
 
-**File naming:** The main Python file must end in `_plugin.py` (e.g., `mqtt_bridge_plugin.py`). The plugin loader scans for this pattern.
+**File naming:** Name the main Python file `<id>_plugin.py` (e.g., `mqtt_bridge_plugin.py`); this repository finds plugin folders by it. OpenAVC takes the plugin's class from the first file that holds one, in this order: `__init__.py`, `<folder>_plugin.py`, then the folder's other `.py` files by name (not those starting with `_`). `validate.py` checks that same file.
 
 **Splitting across files:** Each plugin is loaded inside its own package namespace, so import sibling modules with a **relative import** — `from . import helpers` or `from .helpers import Thing`. A bare `import helpers` will not resolve: the plugin's directory is not added to `sys.path` (that's what isolates your helper modules from another plugin shipping a file with the same name). Relative imports work both at module top level and lazily inside methods.
 
@@ -749,7 +749,7 @@ class WeatherPlugin:
 
 ### 6.3 Lifecycle Flow
 
-1. **Discovery:** Plugin loader scans `plugin_repo/` at startup, finds `*_plugin.py` files with `PLUGIN_INFO`.
+1. **Discovery:** Plugin loader scans `plugin_repo/` at startup and takes each folder's plugin class from the first of its files that holds a class with `PLUGIN_INFO` (`__init__.py`, `<folder>_plugin.py`, then the other `.py` files by name).
 2. **Validation:** `PLUGIN_INFO` checked for required fields, valid capabilities, compatible license, platform support.
 3. **Enable:** User enables plugin in IDE. If required config fields lack defaults, a Setup Dialog appears.
 4. **Start:** `PluginAPI` created with declared capabilities. `start(api)` called.
@@ -1377,7 +1377,7 @@ openavc-plugins/
 ├── template/            # Plugin template (copy to start)
 ├── tests/               # Test files
 ├── docs/                # Contributing guide
-├── scripts/             # build_manifest.py (rebuilds manifest.json)
+├── scripts/             # build_manifest.py (rebuilds manifest.json), vendor_platform_rules.py (copies OpenAVC's plugin rules into _vendor/)
 ├── index.json           # Plugin catalog
 ├── manifest.json        # Generated per-file SHA-256 for every published plugin
 ├── validate.py          # Validation script
@@ -1491,19 +1491,22 @@ python validate.py --check-index                      # Also validate index.json
 python scripts/build_manifest.py --check              # Verify manifest.json is in sync
 ```
 
-The validator checks:
-- Required `PLUGIN_INFO` fields present
-- Plugin ID format (lowercase, underscores, no dots)
-- Category is valid
-- License is MIT-compatible
-- Capabilities are valid
-- `plugin.json` exists and matches `PLUGIN_INFO`
-- Main plugin file naming convention (`*_plugin.py`)
-- `README.md` exists
+The validator judges what a plugin declares by OpenAVC's own rules, the ones that refuse a plugin when it is enabled, and reports each problem in the words OpenAVC uses. It reads the plugin's source without running it, from the file OpenAVC would take the class from. Two of OpenAVC's checks are left out: whether the machine running the validator is one the plugin lists (or a new enough OpenAVC), and whether a `MACRO_ACTIONS` or `SCRIPT_API` handler is an async method of the class.
+
+It checks:
+- `PLUGIN_INFO`: required fields, an MIT-compatible license, category, capabilities, `guest_alias`, `network_ports`, and that `platforms` lists only `win_x64`, `linux_x64`, `linux_arm64` or `all`
+- `CONFIG_SCHEMA`, `CONFIG_SECRETS`, `MACRO_ACTIONS`, `SCRIPT_API` and `EXTENSIONS`, as OpenAVC checks them when the plugin is enabled
+- Plugin ID format (lowercase, underscores, no dots), a semver version, and plain dependency strings
+- `CONFIG_SCHEMA` field types, `secret` set to `True` or `False` only, and a warning for a `mapping_list` column that holds a login
+- `validate_config` is a `@classmethod` or `@staticmethod`, and not async
 - `start()` and `stop()` methods exist
-- `CONFIG_SCHEMA` field shapes, and `secret` set to `True` or `False` only, never on a `mapping_list` column
-- `CONFIG_SECRETS` shape (`id`, `fields`, `generated`), and no list that is also a `CONFIG_SCHEMA` field
+- `plugin.json` exists and matches `PLUGIN_INFO`
+- `README.md` exists
 - index.json entry matches plugin fields
+
+A value written as code (a function call, a name imported from another module) cannot be read without running the plugin, so it is not checked; the validator warns and names it.
+
+OpenAVC's rules are copied into `scripts/_vendor/` from the platform. Never edit them here: CI fails when they differ from the platform's, and `python scripts/vendor_platform_rules.py` (with an OpenAVC checkout beside this repository) brings them up to date.
 
 ---
 

@@ -129,6 +129,8 @@ python validate.py --check-index                  # Also check index.json consis
 python scripts/build_manifest.py --check          # Check manifest.json is in sync
 ```
 
+The validator checks what each plugin declares by the rules OpenAVC applies when the plugin is enabled, and names each problem the way OpenAVC does.
+
 ## Tests
 
 Tests go in `tests/`. CI runs them on the current OpenAVC platform with the libraries every plugin declares installed, and a skipped test fails the check. To run them yourself, clone [OpenAVC](https://github.com/open-avc/openavc) beside this repository, install it with `pip install -e "../openavc[test]"`, install your plugin's dependencies, and run:
