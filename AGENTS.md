@@ -76,7 +76,7 @@ Every plugin class must define `PLUGIN_INFO` as a class-level dict.
 
 ```python
 PLUGIN_INFO = {
-    "id": "my_plugin",            # Lowercase, underscores only. Immutable after publication.
+    "id": "my_plugin",            # Lowercase letters, digits, underscores; a letter first. Immutable after publication.
     "name": "My Plugin",          # Human-readable name
     "version": "0.1.0",           # SemVer format
     "author": "Your Name",        # Author name
@@ -1388,10 +1388,10 @@ openavc-plugins/
 
 ### Naming Conventions
 
-- **Plugin ID:** Lowercase with underscores. (e.g., `mqtt_bridge`, `streamdeck`)
+- **Plugin ID:** Lowercase letters, digits and underscores, starting with a letter. (e.g., `mqtt_bridge`, `streamdeck`)
 - **Directory name:** Same as plugin ID. (e.g., `integrations/mqtt/`)
 - **Main file:** `<id>_plugin.py`. (e.g., `mqtt_bridge_plugin.py`)
-- **No dots** in plugin IDs (breaks state key parsing).
+- **No dots** or other characters in plugin IDs: the id is one segment of every `plugin.<id>.` state key and the name of the plugin's folder. OpenAVC does not install, load or start a plugin whose id holds anything but lowercase letters, digits and underscores.
 
 ### plugin.json
 
@@ -1496,9 +1496,9 @@ python scripts/build_manifest.py --check              # Verify manifest.json is 
 The validator judges what a plugin declares by OpenAVC's own rules, the ones that refuse a plugin when it is enabled, and reports each problem in the words OpenAVC uses. It reads the plugin's source without running it, from the file OpenAVC would take the class from. Two of OpenAVC's checks are left out: whether the machine running the validator is one the plugin lists (or a new enough OpenAVC), and whether a `MACRO_ACTIONS` or `SCRIPT_API` handler is an async method of the class.
 
 It checks:
-- `PLUGIN_INFO`: required fields, an MIT-compatible license, category, capabilities, `guest_alias`, `network_ports`, and that `platforms` lists only `win_x64`, `linux_x64`, `linux_arm64` or `all`
+- `PLUGIN_INFO`: required fields, the id (lowercase letters, digits and underscores), an MIT-compatible license, category, capabilities, `guest_alias`, `network_ports`, and that `platforms` lists only `win_x64`, `linux_x64`, `linux_arm64` or `all`
 - `CONFIG_SCHEMA` (each field a dict, a group's `fields` included), `CONFIG_SECRETS`, `MACRO_ACTIONS`, `SCRIPT_API` and `EXTENSIONS`, as OpenAVC checks them when the plugin is enabled
-- Plugin ID format (lowercase, underscores, no dots), a semver version, and plain dependency strings
+- A plugin ID that starts with a letter, a semver version, and plain dependency strings
 - `CONFIG_SCHEMA` field types, `secret` set to `True` or `False` only, and a warning for a `mapping_list` column that holds a login
 - `validate_config` is a `@classmethod` or `@staticmethod`, and not async
 - `start()` and `stop()` methods exist
@@ -1811,7 +1811,7 @@ class OccupancySensorPlugin:
 | Mistake | Fix |
 |---------|-----|
 | File not named `*_plugin.py` | The loader looks for `*_plugin.py` files specifically. |
-| Plugin ID contains dots | Dots break state key parsing. Use underscores only. |
+| Plugin ID contains dots | OpenAVC does not load the plugin: the id is a segment of its `plugin.<id>.` state keys. Use underscores only. |
 | Missing `plugin.json` | Required for the catalog. Must mirror `PLUGIN_INFO`. |
 | Missing `README.md` | Required for community plugins. Document config, state keys, events. |
 | `PLUGIN_INFO` and `plugin.json` don't match | Keep them identical. The validator checks this. |

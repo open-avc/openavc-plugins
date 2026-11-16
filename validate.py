@@ -25,8 +25,8 @@ a pull request is checked on one machine for plugins meant for others.
 Whether a MACRO_ACTIONS or SCRIPT_API handler is an async method needs the
 class imported.
 
-Checked here and not by OpenAVC when it starts a plugin: the id's form, a
-semver version, safe dependency strings, the platform ids listed, the
+Checked here and not by OpenAVC when it starts a plugin: an id that starts
+with a letter, a semver version, safe dependency strings, the platform ids listed, the
 CONFIG_SCHEMA field types the Programmer's settings form draws, the
 validate_config hook, what the module's text shows, and the repository's own
 layout (plugin.json, README, category folder, index.json).
@@ -131,8 +131,9 @@ class ValidationResult:
 
 
 def validate_id_format(plugin_id):
-    """Check that ID is lowercase with underscores only, no dots."""
-    return bool(re.match(r'^[a-z][a-z0-9_]*$', plugin_id))
+    """An id this repository publishes: an OpenAVC plugin id (lowercase
+    letters, digits, underscores) that starts with a letter."""
+    return rules.is_plugin_id(plugin_id) and plugin_id[0].isalpha()
 
 
 def _read(value):
@@ -167,13 +168,12 @@ def _check_own_info(info, source, result):
 
 
 def _check_id(info, source, result):
-    plugin_id = info.get("id", "")
-    if not plugin_id or not _read(plugin_id):
-        return
-    if not (isinstance(plugin_id, str) and validate_id_format(plugin_id)):
-        result.error(f"{source}: invalid plugin ID '{plugin_id}': must be lowercase letters, numbers, and underscores, starting with a letter")
-    if isinstance(plugin_id, str) and "." in plugin_id:
-        result.error(f"{source}: plugin ID must not contain dots (breaks state key parsing)")
+    """A plugin id that starts with a letter. OpenAVC refuses any other id
+    that is not lowercase letters, digits and underscores (reported with its
+    rules), and takes a digit or an underscore first."""
+    plugin_id = info.get("id")
+    if rules.is_plugin_id(plugin_id) and not validate_id_format(plugin_id):
+        result.error(f"{source}: plugin ID '{plugin_id}' must start with a letter")
 
 
 def _check_version(info, source, result):

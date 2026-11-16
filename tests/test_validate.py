@@ -170,6 +170,8 @@ def test_is_safe_requirement(req, safe):
     ("acme-widget", False),
     ("", False),
     ("acme widget", False),
+    ("acme\n", False),
+    (5, False),
 ])
 def test_validate_id_format(plugin_id, ok):
     assert v.validate_id_format(plugin_id) is ok
@@ -302,18 +304,17 @@ def test_the_source_label():
     ]
 
 
+_NOT_AN_ID = "': must be lowercase letters, numbers, and underscores only"
+
+
 @pytest.mark.parametrize("plugin_id, expected", [
     ("acme_widget", []),
-    ("", []),
-    ("Acme", ["PLUGIN_INFO: invalid plugin ID 'Acme': must be lowercase letters, numbers, "
-              "and underscores, starting with a letter"]),
-    ("acme.widget", [
-        "PLUGIN_INFO: invalid plugin ID 'acme.widget': must be lowercase letters, numbers, "
-        "and underscores, starting with a letter",
-        "PLUGIN_INFO: plugin ID must not contain dots (breaks state key parsing)",
-    ]),
-    (5, ["PLUGIN_INFO: invalid plugin ID '5': must be lowercase letters, numbers, "
-         "and underscores, starting with a letter"]),
+    ("", [f"PLUGIN_INFO: Invalid plugin ID '{_NOT_AN_ID}"]),
+    ("Acme", [f"PLUGIN_INFO: Invalid plugin ID 'Acme{_NOT_AN_ID}"]),
+    ("acme.widget", [f"PLUGIN_INFO: Invalid plugin ID 'acme.widget{_NOT_AN_ID}"]),
+    (5, [f"PLUGIN_INFO: Invalid plugin ID '5{_NOT_AN_ID}"]),
+    ("1acme", ["PLUGIN_INFO: plugin ID '1acme' must start with a letter"]),
+    ("_acme", ["PLUGIN_INFO: plugin ID '_acme' must start with a letter"]),
 ])
 def test_plugin_id(plugin_id, expected):
     assert _check_info(_info(id=plugin_id)) == (expected, [])
@@ -429,6 +430,8 @@ def test_every_field_check_in_its_order():
     }
     errors, warnings = _check_info(info)
     assert errors == [
+        "PLUGIN_INFO: Invalid plugin ID 'Bad.Id': must be lowercase letters, numbers, "
+        "and underscores only",
         "PLUGIN_INFO: License 'GPL' is not MIT-compatible",
         "PLUGIN_INFO: Invalid category 'nope', must be one of "
         "['control_surface', 'integration', 'sensor', 'utility']",
@@ -436,9 +439,6 @@ def test_every_field_check_in_its_order():
         "PLUGIN_INFO: guest_alias 'api' is a reserved platform path",
         "PLUGIN_INFO: Unknown platforms: ['y']; each must be one of "
         "['all', 'linux_arm64', 'linux_x64', 'win_x64']",
-        "PLUGIN_INFO: invalid plugin ID 'Bad.Id': must be lowercase letters, numbers, "
-        "and underscores, starting with a letter",
-        "PLUGIN_INFO: plugin ID must not contain dots (breaks state key parsing)",
         "PLUGIN_INFO: unsafe dependency '-e .' -- must be a plain 'package' or "
         "'package>=x.y' requirement (no URLs, VCS, pip options, or '@' direct references)",
     ]
@@ -585,10 +585,12 @@ def test_plugin_info_errors_and_the_folder_name(tmp_path):
     )
 
 
-def test_a_plugin_with_no_id_is_not_compared_with_its_folder(tmp_path):
+def test_an_empty_id_is_refused_and_not_compared_with_its_folder(tmp_path):
     info = repr(dict(GOOD_INFO, id=""))
     folder = _plugin(tmp_path, source=_source_with(info), manifest=dict(GOOD_INFO, id=""))
-    assert _check_dir(folder) == ([], [])
+    refusal = "Invalid plugin ID '': must be lowercase letters, numbers, and underscores only"
+    assert _check_dir(folder) == (
+        [f"acme_widget_plugin.py: {refusal}", f"plugin.json: {refusal}"], [])
 
 
 @pytest.mark.parametrize("body, errors, warnings", [
