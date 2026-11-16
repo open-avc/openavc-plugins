@@ -77,16 +77,12 @@ jobs:
         run: pip install -e "$RUNNER_TEMP/openavc[test]"
 
       # The libraries OpenAVC installs for each plugin when it is installed,
-      # read from the plugins' own plugin.json files.
+      # read from each plugin's PLUGIN_INFO as OpenAVC reads them. Not from
+      # plugin.json, which OpenAVC never reads: a library listed only there
+      # would pass the tests here and be missing from a real install.
       - name: Install the libraries each plugin declares
         run: |
-          python - > "$RUNNER_TEMP/plugin-requirements.txt" <<'EOF'
-          import json
-          import pathlib
-          for manifest in sorted(pathlib.Path(".").glob("*/*/plugin.json")):
-              for requirement in json.loads(manifest.read_text(encoding="utf-8")).get("dependencies", []):
-                  print(requirement)
-          EOF
+          python scripts/plugin_requirements.py > "$RUNNER_TEMP/plugin-requirements.txt"
           cat "$RUNNER_TEMP/plugin-requirements.txt"
           pip install -r "$RUNNER_TEMP/plugin-requirements.txt"
 
