@@ -1445,3 +1445,10 @@ NO_PLUGIN_CLASS = (
     "No plugin class found: OpenAVC needs a class whose PLUGIN_INFO is a dict with an 'id', "
     "written out in the source so it can be read before the plugin is installed")
 
+
+def test_the_template_a_new_plugin_starts_from_passes():
+    """A plugin author copies template/ and renames it: what they start from
+    has no errors, only the warning that its folder is not named for its id."""
+    errors, warnings = _check_dir(Path(v.__file__).resolve().parent / "template")
+    assert errors == []
+    assert warnings == ["Plugin ID 'my_plugin' doesn't match directory name 'template'"]

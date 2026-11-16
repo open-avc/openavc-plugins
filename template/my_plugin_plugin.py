@@ -23,7 +23,7 @@ class MyPlugin:
         "name": "My Plugin",
         "version": "0.1.0",
         "author": "Your Name",
-        "description": "What this plugin does.",
+        "description": "One-line description of what this plugin does.",
         "category": "utility",          # control_surface | integration | sensor | utility
         "license": "MIT",
         "platforms": ["all"],           # win_x64 | linux_x64 | linux_arm64 | all
