@@ -57,7 +57,8 @@ Every plugin must include a `README.md` that covers:
 Before submitting a pull request:
 
 - [ ] Plugin has a unique `id` (lowercase, underscores only)
-- [ ] `plugin.json` is present, valid, and matches `PLUGIN_INFO` in the code
+- [ ] `plugin.json` is present, valid, and matches `PLUGIN_INFO` in the code, field for field
+- [ ] The plugin's `index.json` entry matches them too, `platforms` and `capabilities` included
 - [ ] License is MIT (or MIT-compatible: BSD-2/3, Apache-2.0, ISC, PSF, Unlicense, 0BSD, CC0-1.0)
 - [ ] All pip dependencies are MIT-compatible
 - [ ] Plugin works on all declared platforms

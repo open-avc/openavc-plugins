@@ -31,6 +31,12 @@ CONFIG_SCHEMA field types the Programmer's settings form draws, the
 validate_config hook, what the module's text shows, and the repository's own
 layout (plugin.json, README, category folder, index.json).
 
+PLUGIN_INFO, plugin.json and the plugin's index.json entry say the same things
+three times, and every field two of them both hold must agree: a list holds
+the same items in any order, an object the same keys and values, and anything
+else reads the same as text (1 and "1" agree). A field one copy leaves out, or
+a value its source builds when the plugin runs, is not compared.
+
 A plugin folder is reported in this order: each file OpenAVC passes over, the
 file its class is read from (OpenAVC's rules, then the checks made only here,
 then what its text shows), its plugin.json as a manifest and against
@@ -66,13 +72,6 @@ CATEGORY_DIRS = {
     "utility": "utility",
 }
 PLUGIN_DIRS = list(CATEGORY_DIRS)
-
-# The fields PLUGIN_INFO, plugin.json and index.json must agree on wherever two
-# copies both have one, compared as text. min_openavc_version is here because
-# PLUGIN_INFO is the copy the platform actually enforces -- a plugin.json that
-# claims a higher floor than PLUGIN_INFO reads as gated in the catalog while
-# installing onto a core that can't run it.
-AGREED_FIELDS = ("id", "name", "version", "category", "license", "min_openavc_version")
 
 # The fields every index.json entry must have, in the order a missing one is
 # reported.
@@ -397,12 +396,11 @@ def _check_plugin_json(plugin_path, plugin_info, result):
         result.error("plugin.json must hold a JSON object")
         return
     validate_plugin_info(manifest, result, source="plugin.json")
-    if plugin_info:
-        for field in _disagreements(plugin_info, manifest):
-            result.error(
-                f"Mismatch: PLUGIN_INFO.{field}='{plugin_info[field]}' "
-                f"vs plugin.json.{field}='{manifest[field]}'"
-            )
+    for field in _disagreements(plugin_info, manifest):
+        result.error(
+            f"Mismatch: PLUGIN_INFO.{field}={_shown(plugin_info[field])} "
+            f"vs plugin.json.{field}={_shown(manifest[field])}"
+        )
 
 
 def _check_readme(plugin_path, result):
@@ -457,7 +455,7 @@ def _check_entries(repo_root, entries, result):
 
 def _check_entry(repo_root, entry, seen_ids, result):
     """One entry: its required fields, its id against the entries before it,
-    its folder, its values, then its plugin.json."""
+    its folder, its values, then the plugin's own copies of its fields."""
     plugin_id = entry.get("id", "<missing>")
     for field in INDEX_REQUIRED_FIELDS:
         if field not in entry:
@@ -469,7 +467,7 @@ def _check_entry(repo_root, entry, seen_ids, result):
         result.error(f"Plugin '{plugin_id}': directory '{entry['file']}' does not exist")
     _check_entry_values(entry, plugin_id, result)
     if "file" in entry:
-        _compare_with_plugin_json(repo_root / entry["file"] / "plugin.json", entry, plugin_id, result)
+        _compare_with_plugin(repo_root / entry["file"], entry, plugin_id, result)
 
 
 def _check_entry_values(entry, plugin_id, result):
@@ -504,22 +502,40 @@ def _is_one_of(value, allowed):
     return isinstance(value, str) and value in allowed
 
 
-def _compare_with_plugin_json(plugin_json, entry, plugin_id, result):
-    """An error for each of AGREED_FIELDS the entry and the plugin's
-    plugin.json disagree on. A plugin.json that is missing, or that cannot be
-    read or compared, is passed over here without a word."""
-    if not plugin_json.exists():
+def _compare_with_plugin(plugin_path, entry, plugin_id, result):
+    """An error for each field the entry disagrees on with the plugin's
+    plugin.json, then with its PLUGIN_INFO on the fields plugin.json leaves
+    out. Where plugin.json holds a field, the folder's own check compares it
+    with PLUGIN_INFO, so each disagreement is reported once. A plugin.json
+    that is missing, cannot be read or is not an object is passed over here
+    without a word (the folder's own check reports it), as is a folder with
+    no plugin class."""
+    manifest = _read_manifest(plugin_path / "plugin.json")
+    for field in _disagreements(manifest, entry):
+        result.error(
+            f"Plugin '{plugin_id}': index.json {field}={_shown(entry[field])} "
+            f"doesn't match plugin.json {field}={_shown(manifest[field])}"
+        )
+    declared = read_folder(plugin_path).declared
+    if declared is None:
         return
+    unheld = {field: value for field, value in declared.info.items() if field not in manifest}
+    for field in _disagreements(unheld, entry):
+        result.error(
+            f"Plugin '{plugin_id}': index.json {field}={_shown(entry[field])} "
+            f"doesn't match PLUGIN_INFO {field}={_shown(unheld[field])}"
+        )
+
+
+def _read_manifest(plugin_json):
+    """A plugin.json's object, or an empty one when the file is missing,
+    cannot be read as JSON, or holds something else."""
     try:
         with open(plugin_json, encoding="utf-8") as f:
             manifest = json.load(f)
-        for field in _disagreements(manifest, entry):
-            result.error(
-                f"Plugin '{plugin_id}': index.json {field}='{entry[field]}' "
-                f"doesn't match plugin.json {field}='{manifest[field]}'"
-            )
-    except Exception:
-        pass
+    except (OSError, ValueError):
+        return {}
+    return manifest if isinstance(manifest, dict) else {}
 
 
 def _check_unindexed(repo_root, entries, result):
@@ -536,16 +552,33 @@ def _check_unindexed(repo_root, entries, result):
 
 
 def _disagreements(first, second):
-    """Each of AGREED_FIELDS that both copies have and that reads differently
-    as text, in AGREED_FIELDS order."""
-    for field in AGREED_FIELDS:
-        if _both_have(field, first, second) and str(first[field]) != str(second[field]):
+    """Each field both copies hold a read value for that they disagree on, in
+    `first`'s order."""
+    for field in first:
+        if _both_have(field, first, second) and _compared(first[field]) != _compared(second[field]):
             yield field
 
 
 def _both_have(field, first, second):
     """Whether both copies hold a value for `field` that was read."""
     return field in first and field in second and _read(first[field]) and _read(second[field])
+
+
+def _compared(value):
+    """`value` in the form two copies are compared in: a list's items in any
+    order, an object's keys in any order, anything else as text. Each form is
+    tagged, so a list never equals its text and any two forms sort."""
+    if isinstance(value, (list, tuple)):
+        return ("list", tuple(sorted(_compared(item) for item in value)))
+    if isinstance(value, dict):
+        return ("object", tuple(sorted((str(key), _compared(item)) for key, item in value.items())))
+    return ("text", str(value))
+
+
+def _shown(value):
+    """`value` as a disagreement shows it: text in quotes, anything else as
+    Python writes it."""
+    return f"'{value}'" if isinstance(value, str) else repr(value)
 
 
 def _category_folders(repo_root):

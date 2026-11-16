@@ -1393,7 +1393,7 @@ openavc-plugins/
 
 ### plugin.json
 
-Every plugin directory must include a `plugin.json` that mirrors `PLUGIN_INFO`:
+Every plugin directory must include a `plugin.json` that mirrors `PLUGIN_INFO`. Every field the two both hold must agree (the validator compares them, lists in any order):
 
 ```json
 {
@@ -1459,10 +1459,10 @@ Every plugin must have an entry in `index.json`. The catalog is used by the Prog
 | `license` | Yes | Must match plugin's `license`. |
 | `platforms` | Yes | Must match plugin's `platforms`. |
 | `capabilities` | Yes | Must match plugin's `capabilities`. |
-| `has_native_dependencies` | Yes | `true` if plugin has native dependencies. |
+| `has_native_dependencies` | Yes | `true` if plugin has native dependencies. Must match `plugin.json` where it has one. |
 | `verified` | Yes | Always `false` for community contributions. |
 | `description` | Yes | Must match plugin's `description`. |
-| `min_openavc_version` | No | Minimum compatible OpenAVC version. |
+| `min_openavc_version` | No | Minimum compatible OpenAVC version. Must match plugin's `min_openavc_version`. |
 | `manufacturer` | No | Hardware manufacturer (for control surface plugins). |
 
 ### manifest.json (generated — regenerate it, don't hand-edit)
@@ -1500,9 +1500,9 @@ It checks:
 - `CONFIG_SCHEMA` field types, `secret` set to `True` or `False` only, and a warning for a `mapping_list` column that holds a login
 - `validate_config` is a `@classmethod` or `@staticmethod`, and not async
 - `start()` and `stop()` methods exist
-- `plugin.json` exists and matches `PLUGIN_INFO`
+- `plugin.json` exists, and every field it shares with `PLUGIN_INFO` holds the same value
 - `README.md` exists
-- index.json entry matches plugin fields
+- With `--check-index`: every index.json entry's fields agree with the plugin's `plugin.json`, and with its `PLUGIN_INFO` on any field `plugin.json` leaves out. A list (`platforms`, `capabilities`) may be in any order; a field one copy leaves out is not compared
 
 A value written as code (a function call, a name imported from another module) cannot be read without running the plugin, so it is not checked; the validator warns and names it.
 
@@ -1849,7 +1849,7 @@ class OccupancySensorPlugin:
 | `file` path wrong | Path is relative to repo root, points to directory (e.g., `integrations/mqtt`). |
 | `format` set to `"python"` | For directory-based plugins, use `"directory"`. |
 | `verified` set to `true` | Only maintainers verify. Always submit with `false`. |
-| Fields don't match `PLUGIN_INFO` / `plugin.json` | All three must be consistent. |
+| Fields don't match `PLUGIN_INFO` / `plugin.json` | Every field two of the three copies both hold must agree, `platforms` and `capabilities` included. `validate.py --check-index` names each one that doesn't. |
 
 ### Macro Actions
 

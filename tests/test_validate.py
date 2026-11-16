@@ -723,6 +723,7 @@ def test_plugin_json_is_checked_and_compared(tmp_path):
         "plugin.json: platforms must be a list",
         "Mismatch: PLUGIN_INFO.name='Acme Widget' vs plugin.json.name='Acme Gadget'",
         "Mismatch: PLUGIN_INFO.version='1.0.0' vs plugin.json.version='1.0.1'",
+        "Mismatch: PLUGIN_INFO.author='Acme' vs plugin.json.author='Someone else'",
         "Mismatch: PLUGIN_INFO.category='integration' vs plugin.json.category='utility'",
         "Mismatch: PLUGIN_INFO.license='MIT' vs plugin.json.license='mit'",
         "Mismatch: PLUGIN_INFO.min_openavc_version='0.30.0' vs "
@@ -736,6 +737,65 @@ def test_values_are_compared_as_text(tmp_path):
     manifest = dict(GOOD_INFO, min_openavc_version="1")
     folder = _plugin(tmp_path, source=_source_with(repr(info)), manifest=manifest)
     assert _check_dir(folder) == ([], [])
+
+
+_PORT = {"port": 9000, "protocol": "udp", "reason": "media"}
+
+
+@pytest.mark.parametrize("field, in_info, in_manifest", [
+    ("platforms", ["win_x64", "linux_x64"], ["linux_x64", "win_x64"]),
+    ("dependencies", ["acme-lib>=1.0", "other"], ["other", "acme-lib>=1.0"]),
+    ("capabilities", ["state_read", "event_emit"], ["event_emit", "state_read"]),
+    ("network_ports", [_PORT, dict(_PORT, port=9001)],
+     [dict(_PORT, port=9001), {"reason": "media", "protocol": "udp", "port": 9000}]),
+    ("has_native_dependencies", True, True),
+    ("anything_else", [3, "a", {"b": [2, 1]}, ["x"]], [["x"], {"b": [1, 2]}, "a", 3]),
+])
+def test_lists_and_objects_agree_whatever_their_order(tmp_path, field, in_info, in_manifest):
+    info = dict(GOOD_INFO, **{field: in_info})
+    manifest = dict(GOOD_INFO, **{field: in_manifest})
+    folder = _plugin(tmp_path, source=_source_with(repr(info)), manifest=manifest)
+    errors, _ = _check_dir(folder)
+    assert [e for e in errors if e.startswith("Mismatch")] == []
+
+
+@pytest.mark.parametrize("field, in_info, in_manifest", [
+    ("platforms", ["linux_x64"], ["all"]),
+    ("platforms", ["all"], "all"),
+    ("dependencies", ["acme-lib>=1.0"], ["acme-lib>=2.0"]),
+    ("dependencies", ["acme-lib"], []),
+    ("capabilities", ["state_read"], ["state_read", "state_write"]),
+    ("network_ports", [_PORT], [dict(_PORT, port=9001)]),
+    ("has_native_dependencies", True, False),
+    ("description", "Controls an Acme widget", "Controls a widget"),
+    ("guest_alias", "acme", "widget"),
+    ("anything_else", [{"a": 1}, 1], [{"a": 2}, 1]),
+])
+def test_every_field_both_hold_is_compared(tmp_path, field, in_info, in_manifest):
+    info = dict(GOOD_INFO, **{field: in_info})
+    manifest = dict(GOOD_INFO, **{field: in_manifest})
+    folder = _plugin(tmp_path, source=_source_with(repr(info)), manifest=manifest)
+    errors, _ = _check_dir(folder)
+    shown_info = f"'{in_info}'" if isinstance(in_info, str) else repr(in_info)
+    shown_manifest = f"'{in_manifest}'" if isinstance(in_manifest, str) else repr(in_manifest)
+    assert [e for e in errors if e.startswith("Mismatch")] == [
+        f"Mismatch: PLUGIN_INFO.{field}={shown_info} vs plugin.json.{field}={shown_manifest}"]
+
+
+def test_a_field_one_copy_leaves_out_is_not_compared(tmp_path):
+    info = dict(GOOD_INFO, platforms=["linux_x64"])
+    manifest = dict(GOOD_INFO, dependencies=["acme-lib"])
+    folder = _plugin(tmp_path, source=_source_with(repr(info)), manifest=manifest)
+    errors, _ = _check_dir(folder)
+    assert [e for e in errors if e.startswith("Mismatch")] == []
+
+
+def test_a_value_built_when_the_plugin_runs_is_not_compared(tmp_path):
+    info_src = repr(dict(GOOD_INFO))[:-1] + ", 'platforms': supported()}"
+    manifest = dict(GOOD_INFO, platforms=["all"])
+    folder = _plugin(tmp_path, source=_source_with(info_src), manifest=manifest)
+    errors, _ = _check_dir(folder)
+    assert [e for e in errors if e.startswith("Mismatch")] == []
 
 
 def test_a_field_in_only_one_copy_is_not_compared(tmp_path):
@@ -832,6 +892,7 @@ def test_every_folder_check_in_its_order(tmp_path):
         "OpenAVC calls it on the class, which may not be running",
         "plugin.json: dependencies must be a list",
         "Mismatch: PLUGIN_INFO.name='Acme Widget' vs plugin.json.name='Other'",
+        "Mismatch: PLUGIN_INFO.dependencies=['paho'] vs plugin.json.dependencies='x'",
     ]
     assert warnings == [
         _BUILT + "PLUGIN_INFO['extra']",
@@ -860,7 +921,8 @@ def _entry(**changes):
         "id": "acme_widget", "name": "Acme Widget", "file": "integrations/acme_widget",
         "format": "package", "category": "integration", "version": "1.0.0", "author": "Acme",
         "license": "MIT", "platforms": ["all"], "capabilities": ["state_read"],
-        "has_native_dependencies": False, "verified": True, "description": "d",
+        "has_native_dependencies": False, "verified": True,
+        "description": GOOD_INFO["description"],
     }
     for key, value in changes.items():
         if value is _DROP:
@@ -927,6 +989,10 @@ def test_index_entry_problems_in_their_order(tmp_path):
             "Plugin 'beta': license 'GPL' is not MIT-compatible",
             "Plugin 'beta': invalid capability 'fly'",
             "Plugin 'beta': invalid capability 'swim'",
+            "Plugin 'beta': index.json id='beta' doesn't match PLUGIN_INFO id='acme_widget'",
+            "Plugin 'beta': index.json category='lighting' doesn't match PLUGIN_INFO "
+            "category='integration'",
+            "Plugin 'beta': index.json license='GPL' doesn't match PLUGIN_INFO license='MIT'",
             "Plugin 'gamma': directory 'integrations/gamma' does not exist",
             "Plugin 'delta': missing required field 'file'",
             "Plugin 'delta': missing required field 'category'",
@@ -949,31 +1015,75 @@ def test_an_index_entry_that_is_not_an_object_raises(tmp_path):
 
 
 def test_index_entries_are_compared_with_plugin_json(tmp_path):
-    manifest = dict(GOOD_INFO, min_openavc_version="0.30.0", version=2)
+    manifest = dict(GOOD_INFO, min_openavc_version="0.30.0", version=2,
+                    platforms=["win_x64", "linux_x64"], capabilities=["state_read"],
+                    has_native_dependencies=True)
     _plugin(tmp_path, manifest=manifest)
     entry = _entry(name="Acme Gadget", version="2", category="utility", license="mit",
-                   min_openavc_version="0.31.0", author="Someone")
+                   min_openavc_version="0.31.0", author="Someone",
+                   platforms=["linux_x64", "win_x64"], capabilities=["state_read", "event_emit"])
     r = _index(tmp_path, {"plugins": [entry]})
     assert r.errors == [
         "Plugin 'acme_widget': index.json name='Acme Gadget' doesn't match plugin.json "
         "name='Acme Widget'",
+        "Plugin 'acme_widget': index.json author='Someone' doesn't match plugin.json "
+        "author='Acme'",
         "Plugin 'acme_widget': index.json category='utility' doesn't match plugin.json "
         "category='integration'",
         "Plugin 'acme_widget': index.json license='mit' doesn't match plugin.json license='MIT'",
         "Plugin 'acme_widget': index.json min_openavc_version='0.31.0' doesn't match "
         "plugin.json min_openavc_version='0.30.0'",
+        "Plugin 'acme_widget': index.json capabilities=['state_read', 'event_emit'] doesn't "
+        "match plugin.json capabilities=['state_read']",
+        "Plugin 'acme_widget': index.json has_native_dependencies=False doesn't match "
+        "plugin.json has_native_dependencies=True",
     ]
     assert r.warnings == []
 
 
-def test_an_index_entry_whose_folder_has_no_plugin_json(tmp_path):
+def test_index_entries_are_compared_with_plugin_info_where_plugin_json_is_silent(tmp_path):
+    """A field PLUGIN_INFO and the entry both hold is compared even when
+    plugin.json leaves it out. Where plugin.json holds it too, the entry is
+    compared with plugin.json alone: the folder's own check compares
+    plugin.json with PLUGIN_INFO, so a disagreement is reported once."""
+    info = dict(GOOD_INFO, platforms=["linux_x64"], capabilities=["state_read"])
+    manifest = dict(GOOD_INFO, capabilities=["state_read"])
+    _plugin(tmp_path, source=_source_with(repr(info)), manifest=manifest)
+    entry = _entry(platforms=["all"], capabilities=["state_write"])
+    r = _index(tmp_path, {"plugins": [entry]})
+    assert r.errors == [
+        "Plugin 'acme_widget': index.json capabilities=['state_write'] doesn't match "
+        "plugin.json capabilities=['state_read']",
+        "Plugin 'acme_widget': index.json platforms=['all'] doesn't match PLUGIN_INFO "
+        "platforms=['linux_x64']",
+    ]
+    assert r.warnings == []
+
+
+def test_an_index_entry_whose_folder_has_no_plugin_json_is_compared_with_plugin_info(tmp_path):
     _plugin(tmp_path, manifest=None)
     r = _index(tmp_path, {"plugins": [_entry(name="Other")]})
-    assert (r.errors, r.warnings) == ([], [])
+    assert (r.errors, r.warnings) == ([
+        "Plugin 'acme_widget': index.json name='Other' doesn't match PLUGIN_INFO "
+        "name='Acme Widget'",
+    ], [])
 
 
-def test_an_index_entry_whose_plugin_json_is_not_an_object_is_skipped(tmp_path):
-    _plugin(tmp_path, manifest=["id"])
+@pytest.mark.parametrize("manifest", [["id"], "{broken", b"\xff\xfe"])
+def test_an_index_entry_whose_plugin_json_cannot_be_compared_is_compared_with_plugin_info(
+        tmp_path, manifest):
+    folder = _plugin(tmp_path, manifest=manifest if not isinstance(manifest, bytes) else None)
+    if isinstance(manifest, bytes):
+        (folder / "plugin.json").write_bytes(manifest)
+    r = _index(tmp_path, {"plugins": [_entry(name="Other")]})
+    assert (r.errors, r.warnings) == ([
+        "Plugin 'acme_widget': index.json name='Other' doesn't match PLUGIN_INFO "
+        "name='Acme Widget'",
+    ], [])
+
+
+def test_an_index_entry_whose_folder_has_no_plugin_class(tmp_path):
+    _plugin(tmp_path, source=_source_with("make()"), manifest=None)
     r = _index(tmp_path, {"plugins": [_entry(name="Other")]})
     assert (r.errors, r.warnings) == ([], [])
 
