@@ -14,9 +14,8 @@ Every test still runs first: most of these skips happen while pytest collects a
 module, and failing a module there would stop the run before any test ran. An
 expected failure (``xfail``) is not a skip and is left alone.
 
-The rule is one rule for every reason a test can skip, rather than a check at
-each place that skips, so a skip added later is covered without anyone
-remembering to cover it.
+This is one rule for every reason a test can skip, rather than a check at each
+place that skips, so a skip added later is covered too.
 """
 
 import os

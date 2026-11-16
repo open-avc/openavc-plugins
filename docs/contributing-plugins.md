@@ -129,6 +129,16 @@ python validate.py --check-index                  # Also check index.json consis
 python scripts/build_manifest.py --check          # Check manifest.json is in sync
 ```
 
+## Tests
+
+Tests go in `tests/`. CI runs them on the current OpenAVC platform with the libraries every plugin declares installed, and a skipped test fails the check. To run them yourself, clone [OpenAVC](https://github.com/open-avc/openavc) beside this repository, install it with `pip install -e "../openavc[test]"`, install your plugin's dependencies, and run:
+
+```bash
+python -m pytest tests/
+```
+
+A test that needs something your machine doesn't have skips. Set `OPENAVC_REQUIRE_PLATFORM=1` to have a skip fail, as it does in CI. Tests of a plugin's panel files also need node, and `npm ci` in `../openavc/openavc/web/programmer`.
+
 ## Using an AI Assistant
 
 If you use an AI coding assistant, point it to [`AGENTS.md`](../AGENTS.md) in the root of this repository. It contains the complete Plugin API, manifest format, configuration schema, and examples in a format optimized for LLM agents. Have your assistant run `python validate.py` on its output to catch errors before you submit.

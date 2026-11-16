@@ -1358,6 +1358,10 @@ async def test_my_plugin():
     await harness.stop_plugin(plugin)
 ```
 
+### Tests in this repository
+
+`tests/` runs in CI on the current OpenAVC platform (`main`), with pytest and pytest-asyncio, every library the plugins' `plugin.json` files declare, and node with jsdom (`npm ci` in the platform's `openavc/web/programmer`). The run sets `OPENAVC_REQUIRE_PLATFORM=1`, under which any skipped test fails it (`tests/conftest.py`), so a test can rely on those and nothing else. Locally, an openavc checkout beside this repository is found automatically (`OPENAVC_PLATFORM_ROOT` names another), and a test that needs something missing skips.
+
 ---
 
 ## 14. Repository Structure and Naming
