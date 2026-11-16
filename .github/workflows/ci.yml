@@ -21,6 +21,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # validate.py judges plugins by OpenAVC's own rules, copied into
+      # scripts/_vendor/. A rule changed on the platform fails here until the
+      # copies are regenerated: python scripts/vendor_platform_rules.py
+      - name: The vendored plugin rules match the platform's
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/vendor_platform_rules.py --check
+
       - name: Validate plugin packages and index.json
         run: python validate.py --check-index
 
