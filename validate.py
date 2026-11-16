@@ -19,9 +19,8 @@ imported (PluginSource), so a plugin's dependencies need not be installed.
 
 The tables below copy OpenAVC's own plugin rules, because this runs without
 OpenAVC installed; each names the OpenAVC module holding the original.
-tests/test_validate_matches_platform.py compares them with an OpenAVC checkout
-beside this repository. This repository's CI does not run pytest, so that
-comparison runs wherever the tests are run by hand.
+tests/test_validate_matches_platform.py compares them with an OpenAVC checkout,
+and CI runs it against a fresh clone of OpenAVC.
 """
 
 import argparse
@@ -31,10 +30,10 @@ import re
 import sys
 from pathlib import Path
 
-# openavc/core/plugin_manifest.py: REQUIRED_MANIFEST_FIELDS
+# openavc/core/plugin_declarations.py: REQUIRED_MANIFEST_FIELDS
 REQUIRED_MANIFEST_FIELDS = {"id", "name", "version", "author", "description", "category", "license"}
 
-# openavc/core/plugin_manifest.py: VALID_CAPABILITIES
+# openavc/core/plugin_declarations.py: VALID_CAPABILITIES
 VALID_CAPABILITIES = {
     "state_read", "state_write", "variable_write",
     "event_emit", "event_subscribe",
@@ -42,17 +41,17 @@ VALID_CAPABILITIES = {
     "http_endpoints", "guest_endpoints",
 }
 
-# openavc/core/plugin_manifest.py: VALID_CATEGORIES
+# openavc/core/plugin_declarations.py: VALID_CATEGORIES
 VALID_CATEGORIES = {"control_surface", "integration", "sensor", "utility"}
 
-# openavc/core/plugin_manifest.py: MIT_COMPATIBLE_LICENSES
+# openavc/core/plugin_declarations.py: MIT_COMPATIBLE_LICENSES
 MIT_COMPATIBLE_LICENSES = {
     "mit", "bsd-2-clause", "bsd-3-clause", "apache-2.0", "isc",
     "psf", "unlicense", "0bsd", "cc0-1.0",
 }
 
 # Top-level path segments a guest_alias may not shadow, and the shape the whole
-# alias must have. openavc/core/plugin_manifest.py: RESERVED_GUEST_ALIASES and
+# alias must have. openavc/core/plugin_declarations.py: RESERVED_GUEST_ALIASES and
 # GUEST_ALIAS_RE.
 RESERVED_GUEST_ALIASES = {
     "api", "panel", "programmer", "pair", "setup", "ws", "isc",
@@ -63,7 +62,7 @@ GUEST_ALIAS_PATTERN = r"[a-z][a-z0-9_-]{0,31}"
 
 # The EXTENSIONS types the panel and the Programmer understand, and the field
 # that identifies an entry within each type (panel_elements are keyed by
-# `type`, every other type by `id`). openavc/core/plugin_extensions.py:
+# `type`, every other type by `id`). openavc/core/plugin_declarations.py:
 # EXTENSION_ID_FIELD.
 EXTENSION_ID_FIELD = {
     "views": "id",
@@ -74,8 +73,8 @@ EXTENSION_ID_FIELD = {
 }
 VALID_EXTENSION_TYPES = set(EXTENSION_ID_FIELD)
 
-# The keys a CONFIG_SECRETS entry may have. openavc/core/plugin_secrets.py:
-# _LIST_DECLARATION_KEYS
+# The keys a CONFIG_SECRETS entry may have. openavc/core/plugin_declarations.py:
+# CONFIG_SECRETS_KEYS
 _CONFIG_SECRETS_KEYS = {"id", "fields", "generated"}
 
 # The two tables below have no OpenAVC table to compare with, so they are
@@ -607,7 +606,7 @@ def _is_name(value):
 
 
 def validate_extensions_schema(extensions, result):
-    """Validate an EXTENSIONS dict (the rules of openavc/core/plugin_extensions.py).
+    """Validate an EXTENSIONS dict (the rules of openavc/core/plugin_declarations.py).
 
     Each type must be a known key holding a list of dicts, and every entry needs
     its identifier field (``id``, or ``type`` for panel_elements) unique within
