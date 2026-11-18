@@ -448,13 +448,13 @@ api.cancel_task(task_id)
 config = api.config
 broker = api.config.get("broker_host", "localhost")
 
-# Save updated configuration to project file
-# Triggers plugin restart if the plugin is running
+# Save updated configuration to project file (the plugin is not restarted).
 # Must be JSON-serializable (a non-serializable/cyclic value raises
-# PluginPermissionError instead of corrupting the project). On a save failure
-# the in-memory config reverts so api.config never reports an unsaved value.
+# PluginPermissionError instead of corrupting the project).
 await api.save_config({"broker_host": "new-broker.example.com", "broker_port": 1883})
 ```
+
+`api.config` holds the saved values as soon as `save_config` is called, so a save built on `api.config` keeps the one before it. The save is written before the call returns, except while the platform is saving another project change (`on_start` and `on_config_changed` run inside one): then it is written right after that change, and a failure shows only in the log. If the save fails, `api.config` goes back to the saved config, so it never reports an unsaved value. A save still waiting is not written once the plugin has been handed a newer config (the settings form, a restart) or a later save of its own has landed first.
 
 `api.config` holds each declared login's saved value (section 4, Secrets), and `api.save_config()` moves each one back into the system's login file. Save the whole config as `api.config` gave it; a login that came back empty because it is not saved on this system stays waiting for a person to enter it.
 
