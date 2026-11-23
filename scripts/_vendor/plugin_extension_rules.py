@@ -141,26 +141,50 @@ _REQUIRED_LAYOUT_FIELDS = {
 }
 
 
+def _is_flag(value: Any) -> bool:
+    return isinstance(value, bool)
+
+
 def _is_whole(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _is_list_of(value: Any, kind: type) -> bool:
-    return isinstance(value, list) and all(isinstance(item, kind) for item in value)
+def _is_text(value: Any) -> bool:
+    return isinstance(value, str)
+
+
+def _is_texts(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_controls(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
+def _is_key_pattern(value: Any) -> bool:
+    return isinstance(value, str) and "*" in value
+
+
+def _is_row_key(value: Any) -> bool:
+    return isinstance(value, str) and "{row}" in value
+
+
+def _is_route_match(value: Any) -> bool:
+    return isinstance(value, str) and value in SURFACE_ROUTE_MATCH_MODES
 
 
 #: Each kind of layout field: the words for it and whether a value is one.
 _KINDS: dict[str, tuple[str, Any]] = {
-    "flag": ("true or false", lambda v: isinstance(v, bool)),
+    "flag": ("true or false", _is_flag),
     "whole": ("a whole number", _is_whole),
-    "text": ("text", lambda v: isinstance(v, str)),
-    "texts": ("a list of text", lambda v: _is_list_of(v, str)),
-    "controls": ("a list of dicts", lambda v: _is_list_of(v, dict)),
-    "key pattern": ("a state key with *", lambda v: isinstance(v, str) and "*" in v),
-    "row key": ("a state key with {row}", lambda v: isinstance(v, str) and "{row}" in v),
+    "text": ("text", _is_text),
+    "texts": ("a list of text", _is_texts),
+    "controls": ("a list of dicts", _is_controls),
+    "key pattern": ("a state key with *", _is_key_pattern),
+    "row key": ("a state key with {row}", _is_row_key),
     "route match": (
         "one of " + ", ".join(repr(m) for m in sorted(SURFACE_ROUTE_MATCH_MODES)),
-        lambda v: isinstance(v, str) and v in SURFACE_ROUTE_MATCH_MODES,
+        _is_route_match,
     ),
 }
 
@@ -173,16 +197,33 @@ def surface_layout_problem(layout: Any) -> str | None:
     if not isinstance(layout, dict):
         return "SURFACE_LAYOUT must be a dict"
     layout_type = layout.get("type")
-    fields = SURFACE_LAYOUT_FIELDS.get(layout_type) if isinstance(layout_type, str) else None
-    if fields is None:
+    if layout_type not in SURFACE_LAYOUT_FIELDS:
         known = ", ".join(repr(t) for t in sorted(SURFACE_LAYOUT_FIELDS))
         return f"SURFACE_LAYOUT type {layout_type!r} is not one of {known}"
-    for field in layout:
-        if field != "type" and field not in fields:
-            return f"SURFACE_LAYOUT has {field!r}, which a {layout_type} layout does not have"
-    for field, meaning in _REQUIRED_LAYOUT_FIELDS.get(layout_type, {}).items():
-        if field not in layout:
-            return f"SURFACE_LAYOUT ({layout_type}) needs {field!r}: {meaning}"
+    return (
+        _unknown_layout_field(layout, layout_type)
+        or _missing_layout_field(layout, layout_type)
+        or _layout_value_problem(layout, SURFACE_LAYOUT_FIELDS[layout_type])
+    )
+
+
+def _unknown_layout_field(layout: dict, layout_type: str) -> str | None:
+    fields = SURFACE_LAYOUT_FIELDS[layout_type]
+    stray = next((f for f in layout if f != "type" and f not in fields), None)
+    if stray is None:
+        return None
+    return f"SURFACE_LAYOUT has {stray!r}, which a {layout_type} layout does not have"
+
+
+def _missing_layout_field(layout: dict, layout_type: str) -> str | None:
+    required = _REQUIRED_LAYOUT_FIELDS.get(layout_type, {})
+    missing = next((f for f in required if f not in layout), None)
+    if missing is None:
+        return None
+    return f"SURFACE_LAYOUT ({layout_type}) needs {missing!r}: {required[missing]}"
+
+
+def _layout_value_problem(layout: dict, fields: dict[str, str]) -> str | None:
     for field, kind in fields.items():
         words, fits = _KINDS[kind]
         if field in layout and not fits(layout[field]):
