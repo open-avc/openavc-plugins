@@ -905,6 +905,8 @@ An action with any other `context` is drawn nowhere; the plugin still enables.
 
 `confirm` is optional: a question the IDE asks before it sends the event, answered with Cancel or the action's label. Give one to an action that throws work away, such as clearing every route.
 
+An older OpenAVC draws only `device` actions and does not read `confirm`: there a `global` or `plugin` action has no button and nothing else changes, so declaring either needs no `min_openavc_version` raise.
+
 Subscribe to context action events in `start()`:
 
 ```python
