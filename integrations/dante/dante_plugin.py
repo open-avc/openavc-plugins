@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_INFO = {
     "id": "dante",
     "name": "Dante DDM",
-    "version": "1.2.5",
+    "version": "1.2.6",
     "author": "OpenAVC",
     "description": "Audio routing via Dante Domain Manager or Dante Director Professional.",
     "category": "integration",
@@ -604,7 +604,8 @@ class DanteDDMPlugin:
         self._connected = False
         await self.api.state_set("connected", False)
         await self.api.event_emit("disconnected")
-        self._schedule_reconnect(self.api.config)
+        # The settings out of their groups, as start() reads them.
+        self._schedule_reconnect(_settings(self.api.config))
         return True
 
     async def _refresh_state(self):

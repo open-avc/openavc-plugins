@@ -644,10 +644,10 @@ async def test_a_reconnect_that_fails_as_the_plugin_stops_ends_without_sleeping_
 # ──── polling ────
 
 
-async def test_three_failed_polls_in_a_row_disconnect_and_reconnect_with_the_config_as_saved():
+async def test_three_failed_polls_in_a_row_disconnect_and_reconnect_with_the_saved_settings():
     config = {"connection": {"ddm_url": "https://ddm/graphql", "api_key": "k"}}
     plugin, api = _plugin(config, [_domain_answer(), ConnectionError("a"), ConnectionError("b"),
-                                   ConnectionError("c"), ConnectionError("d")])
+                                   ConnectionError("c")])
     plugin._connected = True
     plugin._domain_id = "d1"
     with patch.object(dante_plugin, "asyncio", _Sleeper(plugin, api.calls)):
@@ -668,15 +668,22 @@ async def test_three_failed_polls_in_a_row_disconnect_and_reconnect_with_the_con
         ("task", "dante_reconnect"),
     ]
     assert plugin._connected is False
-    # The reconnect reads the config as saved, its settings still in their
-    # groups, so a Dante set up through the settings form finds no URL here.
+    # The reconnect reads the settings out of their groups, as start() does,
+    # so a Dante set up through the settings form comes back on its own.
     plugin._shutting_down = False
-    with patch.object(dante_plugin, "asyncio", _Sleeper(plugin, api.calls, stop_after=2)):
+
+    async def connect(cfg):
+        api.calls.append(("connect", cfg))
+        return True
+
+    plugin._connect = connect
+    reconnected = len(api.calls)
+    with patch.object(dante_plugin, "asyncio", _Sleeper(plugin, api.calls)):
         await api.tasks[0].run()
-    assert api.calls[-3:] == [
+    assert api.calls[reconnected:] == [
+        ("sleep", 5),
         ("log", "debug", "Reconnecting to DDM..."),
-        ("log", "error", "DDM URL and API key are required. Configure in plugin settings."),
-        ("sleep", 10),
+        ("connect", {"ddm_url": "https://ddm/graphql", "api_key": "k"}),
     ]
 
 
