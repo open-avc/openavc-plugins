@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_INFO = {
     "id": "dante",
     "name": "Dante DDM",
-    "version": "1.2.4",
+    "version": "1.2.5",
     "author": "OpenAVC",
     "description": "Audio routing via Dante Domain Manager or Dante Director Professional.",
     "category": "integration",
@@ -189,8 +189,10 @@ SURFACE_LAYOUT = {
     "columns_label": "Transmitters (Tx)",
     "rows_state_pattern": "plugin.dante.rx.*",
     "columns_state_pattern": "plugin.dante.tx.*",
-    "cell_type": "route",
-    "cell_state_pattern": "plugin.dante.route.{row}.{col}",
+    # Each receive channel's source, "Device / Channel", is the label of the
+    # transmit channel routed to it (channel_keys.py).
+    "route_state_pattern": "plugin.dante.route_info.{row}",
+    "route_match": "exact",
     "presets": True,
 }
 
@@ -233,7 +235,7 @@ by emitting plugin.dante.action.recall_preset with payload:
 - plugin.dante.tx.<device_id>.<channel_index> — Tx channel label (string)
 - plugin.dante.rx.<device_id>.<channel_index> — Rx channel label (string)
 - plugin.dante.route.<rx_device_id>.<rx_channel_index> — Route status (string)
-- plugin.dante.route_info.<rx_device_id>.<rx_channel_index> — Source info (string)
+- plugin.dante.route_info.<rx_device_id>.<rx_channel_index> — The source routed to the Rx channel, as its Tx channel label "Device / Channel" (string, blank when unrouted)
 
 ## Events
 

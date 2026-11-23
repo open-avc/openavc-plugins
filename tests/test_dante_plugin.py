@@ -36,6 +36,8 @@ except ModuleNotFoundError:
         allow_module_level=True,
     )
 
+from integrations.dante import dante_plugin  # noqa: E402
+from integrations.dante.channel_keys import channel_states  # noqa: E402
 from integrations.dante.channel_keys import sanitize_id as _sanitize_id  # noqa: E402
 from integrations.dante.dante_plugin import DanteDDMPlugin, _settings  # noqa: E402
 
@@ -1092,3 +1094,56 @@ async def test_connect_returns_bool():
     assert result is False
 
     await harness.stop_plugin(plugin)
+
+
+# ──── The Programmer's routing matrix ────
+
+
+def _lit_crosspoints(devices, layout):
+    """The crosspoints the Programmer's matrix draws routed, from the keys the
+    plugin publishes for ``devices``: each row's route key read against each
+    column's value by the platform's matrix route rule, in the layout's mode."""
+    from openavc.ui.matrix_model import route_matches
+
+    state = {f"plugin.dante.{key}": value for key, value in channel_states(devices)}
+
+    def matched(pattern):
+        assert pattern.endswith(".*"), pattern
+        prefix = pattern[:-1]
+        return {key[len(prefix):]: value for key, value in state.items() if key.startswith(prefix)}
+
+    rows, columns = matched(layout["rows_state_pattern"]), matched(layout["columns_state_pattern"])
+    return {
+        (row, column)
+        for row in rows
+        for column, label in columns.items()
+        if route_matches(state.get(layout["route_state_pattern"].replace("{row}", row)), label,
+                         layout["route_match"])
+    }
+
+
+def test_the_matrix_draws_each_route_on_its_own_crosspoint():
+    """A routed receive channel lights the column of its source, and only
+    that one: another device's channel of the same number is another source,
+    and a channel routed to nothing, or to a source with no channel, lights
+    none."""
+    devices = [
+        {"name": "MIC-01", "txChannels": [{"index": 1, "name": "01"}, {"index": 2, "name": "02"}]},
+        {"name": "Stagebox", "txChannels": [{"index": 1, "name": "01"}]},
+        {"name": "AMP 01.a", "rxChannels": [
+            {"index": 1, "name": "L", "subscribedDevice": "MIC-01", "subscribedChannel": "01"},
+            {"index": 2, "name": "R", "subscribedDevice": "Stagebox", "subscribedChannel": "01"},
+            {"index": 3, "name": "C", "subscribedDevice": "", "subscribedChannel": ""},
+            {"index": 4, "name": "S", "subscribedDevice": "MIC-01", "subscribedChannel": ""},
+        ]},
+    ]
+    assert _lit_crosspoints(devices, dante_plugin.SURFACE_LAYOUT) == {
+        ("amp_01_a.1", "mic_01.1"),
+        ("amp_01_a.2", "stagebox.1"),
+    }
+
+
+def test_the_surface_layout_is_one_the_programmer_draws():
+    from openavc.core.plugin_extension_rules import surface_layout_problem
+
+    assert surface_layout_problem(dante_plugin.SURFACE_LAYOUT) is None

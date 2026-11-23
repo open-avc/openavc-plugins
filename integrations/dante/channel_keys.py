@@ -12,9 +12,11 @@ The Programmer's routing matrix (``SURFACE_LAYOUT`` in dante_plugin.py) lists
 its rows from the rx keys and its columns from the tx keys, and a click sends
 back the text after ``rx.`` or ``tx.``; ``resolve_ref`` reads that text by
 making each device's name into a segment again, so writing a key and reading a
-click back are here side by side. The layout's cell pattern,
-``route.<row>.<col>``, names one key per crosspoint, which is not published:
-route status is published per receive channel only.
+click back are here side by side. A row's route key is its ``route_info``: a
+crosspoint draws routed when that value is the column's tx value, compared
+exactly apart from case and the spaces at either end (the layout's
+``route_match``), so the two are written in one form, "Device / Channel". A
+routed channel whose source channel is blank names no column.
 
 A receive channel is routed when it names a source device (``source_of``):
 the published route text, the subscription count, a preset's snapshot and
