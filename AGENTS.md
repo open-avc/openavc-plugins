@@ -1303,7 +1303,7 @@ SURFACE_LAYOUT = {
 }
 ```
 
-- **Rows and columns.** `*` matches any run of characters, anywhere in the pattern; the text it matched is the row's or column's token (`amp_01.1`). Each column key's value is the name of that source (`"Mic 1 / 01"`).
+- **Rows and columns.** `*` matches any run of characters, anywhere in the pattern; the text it matched is the row's or column's token (`amp_01.1`), which a click sends back. Each key's value is the name the matrix heads that row or column with (`"Amp 1 / L"`, `"Mic 1 / 01"`; the token when it is blank), and a column's value is also the name its source is routed by.
 - **The route.** Publish one route key per row, `route_state_pattern` with `{row}` replaced by the row's token, whose value names the source routed to it in the same words as that source's column value, and `""` when nothing is routed. A crosspoint draws routed when the two name the same source.
 - **`route_match`.** `"exact"` (the default) compares the two values apart from case and the spaces at either end, so `"Stagebox / 01"` and `"Laptop / 01"` are two sources. `"port"` also matches two values that name one port number (`"IN2"` and `2`), for sources a device numbers.
 - **Clicks.** A click on an unrouted crosspoint emits the `route` context action, and on a routed one `unroute`, each with `{"row": <row token>, "col": <column token>}`.
