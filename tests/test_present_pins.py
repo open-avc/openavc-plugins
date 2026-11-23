@@ -354,20 +354,27 @@ def test_edit_refusals_before_any_change(monkeypatch):
     assert json.dumps(plugin._displays, sort_keys=True) == before
 
 
-def test_edit_local_output_refusal_after_label_and_kind_changed(monkeypatch):
-    """A refused local output is checked after the label, kind and stream
-    key were written to the record in memory; nothing is saved or synced."""
+def test_a_refused_local_output_leaves_the_display_as_it_was(monkeypatch):
+    """Both refusals of an edit's local output come before anything changes:
+    the record, its window on the output and the next save keep the display
+    as it was before the edit."""
     client, plugin, log = _recording_plugin(
         displays=[_DISPLAY, _LOCAL], monkeypatch=monkeypatch
     )
+    before = json.dumps(plugin._displays, sort_keys=True)
     r = client.put("/displays/main", json={"label": "Changed", "local_output": "MON-1"})
     assert (r.status_code, r.json()["detail"]) == (409, "That output is already showing display 'Lobby'.")
-    assert plugin._find_display("main")["label"] == "Changed"
-    r = client.put("/displays/main", json={"label": "Again", "kind": "stream", "local_output": "MON-9"})
+    r = client.put("/displays/lobby", json={"label": "Again", "kind": "stream", "local_output": "MON-9"})
     assert r.status_code == 422
-    stored = plugin._find_display("main")
-    assert stored["label"] == "Again" and stored["kind"] == "stream" and stored["stream_key"]
+    assert json.dumps(plugin._displays, sort_keys=True) == before
     assert log == []
+
+    r = client.post("/displays", json={"label": "Hall"})
+    assert r.status_code == 200, r.text
+    saved = {d["id"]: d for d in plugin.api._config["displays"]}
+    assert saved["main"] == _DISPLAY and saved["lobby"] == _LOCAL
+    lobby_window = {"output": "MON-1", "url": "http://127.0.0.1:8080" + plugin._display_path(_LOCAL)}
+    assert [e for e in log if e[0] == "kiosk_sync"] == [("kiosk_sync", {"lobby": lobby_window})]
 
 
 def test_delete_order(monkeypatch):

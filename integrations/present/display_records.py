@@ -241,16 +241,16 @@ def apply_edit(records, display, data):
 
     Returns the id the display is to take; the id itself is not changed
     here, because a rename first moves the display's running state off the
-    old id. The label,
-    kind and id are refused before anything changes. A refused local output
-    is checked only after the label, kind and stream key were written, so it
-    leaves those changes on the record in memory (unsaved).
+    old id. Every refusal (the label, the kind, the id and the local output)
+    comes before anything changes, so a refused edit leaves the display, and
+    the window it shows on an output, as they were.
     """
     display_id = display["id"]
     label = _required_label(data)
     kind = check_kind(data.kind) if data.kind is not None else display.get("kind", "browser")
     new_id = (data.display_id or "").strip() or display_id
     _check_free_id(records, new_id, current=display_id)
+    local_output = _checked_local_output(records, data, kind, display_id)
     display["label"] = label
     display["kind"] = kind
     _mint_stream_key(display)
@@ -258,15 +258,25 @@ def apply_edit(records, display, data):
         # Local windows are a browser-display feature; a kind change
         # drops the assignment rather than carrying it invisibly.
         display.pop("local_output", None)
-    if data.local_output is not None:
-        _assign_local_output(records, display, data.local_output.strip(), kind)
+    if local_output is not None:
+        _assign_local_output(display, local_output)
     return new_id
 
 
-def _assign_local_output(records, display, local_output, kind):
-    """An edit's local output: set when allowed, cleared when blank."""
+def _checked_local_output(records, data, kind, display_id):
+    """The edit's local output, stripped, once it is allowed for ``kind``;
+    None when the edit names none."""
+    if data.local_output is None:
+        return None
+    local_output = data.local_output.strip()
     if local_output:
-        check_local_output(records, local_output, kind, exclude_id=display["id"])
+        check_local_output(records, local_output, kind, exclude_id=display_id)
+    return local_output
+
+
+def _assign_local_output(display, local_output):
+    """An edit's local output, already checked: set, or cleared when blank."""
+    if local_output:
         display["local_output"] = local_output
     else:
         display.pop("local_output", None)
