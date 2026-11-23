@@ -860,7 +860,7 @@ EXTENSIONS = {
 
 ### 7.4 Context Actions
 
-Action buttons in toolbars. Clicking emits an event your plugin subscribes to.
+Action buttons in the Programmer IDE. Clicking one emits an event your plugin subscribes to.
 
 ```python
 EXTENSIONS = {
@@ -873,6 +873,14 @@ EXTENSIONS = {
             "event": "action.scan_network", # Emits: plugin.<id>.action.scan_network
         },
         {
+            "id": "clear_routes",
+            "label": "Clear All Routes",
+            "icon": "x-circle",
+            "context": "plugin",
+            "event": "action.clear_routes",
+            "confirm": "Clear every route?", # Asked before the event is sent
+        },
+        {
             "id": "identify",
             "label": "Identify on Dante",
             "icon": "eye",
@@ -883,6 +891,19 @@ EXTENSIONS = {
     ],
 }
 ```
+
+An action's `context` decides where it is drawn and what its event's payload holds:
+
+| `context` | Drawn on | Payload |
+|---|---|---|
+| `device` | the page of each device whose driver its `match.driver_id` glob names (every device page when it has no `match`) | `{"device_id": "<the device's id>"}` |
+| `global`, `plugin` | the plugin's own page in the Plugins view, under **Actions** | `{}` |
+
+An action with any other `context` is drawn nowhere; the plugin still enables.
+
+`event` is `action.<name>`. The IDE sends `<name>`, and OpenAVC emits `plugin.<id>.action.<name>`. A name is a letter followed by letters, digits, `_` or `-`. Any other name is refused when the button is clicked, and the IDE shows the refusal below the buttons.
+
+`confirm` is optional: a question the IDE asks before it sends the event, answered with Cancel or the action's label. Give one to an action that throws work away, such as clearing every route.
 
 Subscribe to context action events in `start()`:
 

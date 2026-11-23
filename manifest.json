@@ -15,8 +15,8 @@
     "dante": {
       "files": {
         "integrations/dante/channel_keys.py": "3d1898ec7920ef2b28214db50e2bc88494452f4b6ab3af73a6cc0a954fbcdd67",
-        "integrations/dante/dante_plugin.py": "cca68d0194673928ff63af61a956c974712d733e08752351d16423c00adfc9fd",
-        "integrations/dante/plugin.json": "527714c5a84357d5b273ec115397e8c977bb0c7df05bb5c891a07faebe37616b",
+        "integrations/dante/dante_plugin.py": "46e5f2063209bd2bd92a6826a1dd6584009431c26640fa1d13ea23ad3dee6f3a",
+        "integrations/dante/plugin.json": "523afcdae0d4e5439a84ec6ee54760e117a601b1b304a6112a038874208b66b5",
         "integrations/dante/routing.py": "066197c6c3c32a4fd7739d6d1c8b3ad98d7891ee69f4691c5637f731f28433d4"
       }
     },
@@ -50,7 +50,7 @@
     },
     "streamdeck": {
       "files": {
-        "control_surfaces/streamdeck/README.md": "f51fd2701a7331c82466abde87ce48df20f2927bea68c14961d95866bde21b0d",
+        "control_surfaces/streamdeck/README.md": "73b424a295ef1df513dbc297d96f34291102287dcfcaa0bb19169fa0c16c1d77",
         "control_surfaces/streamdeck/brightness.py": "6a248b28e1ce5b7df751cadab717941fd98d5bb51f73dec2ba9d235323c0173f",
         "control_surfaces/streamdeck/conditions.py": "f62de6604a2693daf1f143609d288c3fa33e312c3db9a2a350853c1385565b91",
         "control_surfaces/streamdeck/config_check.py": "57feefdd3e3eb8cb3a15ef66080b065959ac17e2f417b7b01ac364628ed19ef8",

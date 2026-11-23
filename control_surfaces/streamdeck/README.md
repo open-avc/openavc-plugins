@@ -195,7 +195,7 @@ The hardware layout is detected when a deck connects, so the Surface Configurato
 
 ## Context Actions
 
-- **Identify Stream Deck** -- Flashes all buttons white three times so you can identify which physical deck is connected.
+- **Identify Stream Deck** -- Under **Actions** on the plugin's page in the Programmer. Flashes every connected deck's buttons white three times so you can identify which physical deck is which. The Stream Deck view's **Identify: flash this deck** flashes only the deck it is showing.
 
 ## Controlling the Deck from Macros
 

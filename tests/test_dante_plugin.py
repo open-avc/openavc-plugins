@@ -464,6 +464,13 @@ async def test_preset_not_found():
     await harness.stop_plugin(plugin)
 
 
+def test_clear_all_asks_before_it_runs_and_refresh_domains_does_not():
+    """The Programmer asks an action's confirm sentence before it sends it."""
+    actions = {a["id"]: a for a in DanteDDMPlugin.EXTENSIONS["context_actions"]}
+    assert actions["clear_all"]["confirm"] == "Clear every route?"
+    assert "confirm" not in actions["refresh_domains"]
+
+
 @pytest.mark.asyncio
 async def test_clear_all_subscriptions():
     """clear_all action clears all active subscriptions."""
