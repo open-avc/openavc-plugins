@@ -486,7 +486,7 @@ EXPECTED = {
         "fetch PATCH ext/whep/cam/sess-1 headers={\"Content-Type\":\"application/trickle-ice-sdpfrag\",\"If-Match\":\"*\"} body=\"a=ice-ufrag:uf1\\r\\na=ice-pwd:pw1\\r\\nm=video 9 UDP/TLS/RTP/SAVPF 96\\r\\na=mid:0\\r\\na=candidate:0 1 udp 1 10.0.0.9 5000 typ host\\r\\n\"",
         "view overlay hidden | label hidden(\"CAM\") | video shown | img hidden",
     ],
-    # As today: Retry with a session up asks again and shows Connecting over the picture.
+    # Retry with a session up ends it and starts a new one.
     'webrtc_retry_while_a_session_is_up': [
         "fetch GET ext/delivery/cam headers={}",
         "peer#1 new {\"iceServers\":[]}",
@@ -502,10 +502,20 @@ EXPECTED = {
         "video play",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
         "view overlay hidden | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "peer#1 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
         "fetch GET ext/delivery/cam headers={}",
-        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "peer#2 new {\"iceServers\":[]}",
+        "peer#2 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#2 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#2 createDataChannel \"\"",
+        "peer#2 createOffer",
+        "peer#2 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#2 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"answer-sdp\"}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
     ],
-    # As today: an init whose list blocks the source leaves the session up, and its connected state hides the block.
+    # An init whose list blocks the source ends the session, and the closed peer's states change nothing.
     'webrtc_reinit_with_a_block_while_playing': [
         "fetch GET ext/delivery/cam headers={}",
         "peer#1 new {\"iceServers\":[]}",
@@ -521,8 +531,9 @@ EXPECTED = {
         "video play",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
         "view overlay hidden | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
-        "view overlay \"Cam is off.\" +retry | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
-        "view overlay hidden | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "peer#1 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
+        "view overlay \"Cam is off.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
     # A delivery call that is refused reconnects, naming the call.
     'delivery_refused': [
@@ -814,7 +825,7 @@ EXPECTED = {
         "video play",
         "view overlay \"Reconnecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
     ],
-    # As today: a fatal error after an init blocked the source still asks for a token, and reconnects nothing.
+    # An init that blocks the source destroys the player, so its late fatal error asks for nothing and reconnects nothing.
     'hls_fatal_error_while_stopped': [
         "fetch GET ext/delivery/cam headers={\"X-OpenAVC-Plugin-Token\":\"tok\"}",
         "script append hls.light.min.js",
@@ -825,8 +836,8 @@ EXPECTED = {
         "hls#1 loadSource ext/hls/cam/index.m3u8?_plugin_token=tok",
         "hls#1 attachMedia #video",
         "video play",
+        "hls#1 destroy",
         "view overlay \"This source has no stream right now.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
-        "post {\"type\":\"openavc:request-init\"} to \"*\"",
     ],
     # A switch while the library loads plays the new source once it has loaded.
     'hls_switch_while_the_library_loads': [
@@ -1295,7 +1306,7 @@ EXPECTED = {
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
     ],
-    # As today: an init for the same stream while HLS plays reads the list's kind until the server answers, and starts a second player without stopping the first.
+    # An init for the same stream while HLS plays destroys the player before asking how to play, so one player runs at a time.
     'reinit_while_hls_plays': [
         "fetch GET ext/delivery/cam headers={}",
         "script append hls.light.min.js",
@@ -1307,6 +1318,7 @@ EXPECTED = {
         "hls#1 attachMedia #video",
         "video play",
         "view overlay hidden | label hidden(\"CAM\") | video shown | img hidden",
+        "hls#1 destroy",
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
         "release GET ext/delivery/cam",
@@ -1366,9 +1378,9 @@ EXPECTED = {
         "video play",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
         "view overlay hidden | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
-        "fetch GET ext/delivery/cam headers={}",
         "peer#1 close",
         "fetch DELETE ext/whep/cam/sess-1 headers={}",
+        "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Remote video is not included in this plan.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
     # A library failure after a switch reconnects the new source, which was waiting on the same load.
@@ -1398,14 +1410,28 @@ EXPECTED = {
         "view overlay \"Paused\" | label hidden(\"DOOR\") | video hidden | img hidden",
         "view overlay \"No stream selected\" | label hidden(\"\") | video hidden | img hidden",
     ],
-    # As today: a selection change while hidden starts the new source behind the hidden page, and showing the page starts it again.
+    # A selection made while hidden, with nothing playing, waits paused until the page is shown.
+    'a_selection_change_while_hidden_with_nothing_playing': [
+        "view overlay \"No stream selected\" | label hidden(\"\") | video shown | img hidden",
+        "view overlay \"Paused\" | label hidden(\"DOOR\") | video shown | img hidden",
+        "fetch GET ext/delivery/door headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img shown src=ext/mjpeg/door",
+    ],
+    # An init behind a hidden page waits paused until the page is shown.
+    'an_init_while_hidden': [
+        "view overlay \"Connecting…\" +spinner | label hidden(\"\") | video shown | img hidden",
+        "view overlay \"Paused\" | label hidden(\"CAM\") | video shown | img hidden",
+        "fetch GET ext/delivery/cam headers={}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
+    ],
+    # A selection change while hidden waits, paused, and showing the page starts the new source once.
     'a_selection_change_while_hidden': [
         "fetch GET ext/delivery/door headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img shown src=ext/mjpeg/door",
         "view overlay \"Paused\" | label hidden(\"DOOR\") | video hidden | img hidden",
+        "view overlay \"Paused\" | label hidden(\"CAM\") | video hidden | img hidden",
         "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video hidden | img shown src=ext/mjpeg/cam",
-        "fetch GET ext/delivery/cam headers={}",
         "view overlay \"Paused\" | label hidden(\"CAM\") | video hidden | img hidden",
     ],
     # The session id is escaped into our own URL, and an empty one leaves the bare offer URL.
@@ -1474,8 +1500,16 @@ EXPECTED = {
         "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
         "release POST ext/whep/cam",
         "fetch DELETE ext/whep/cam/sess-old headers={}",
-        "fetch GET ext/delivery/door headers={}",
         "peer#2 close",
+        "fetch GET ext/delivery/door headers={}",
+        "peer#3 new {\"iceServers\":[]}",
+        "peer#3 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#3 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#3 createDataChannel \"\"",
+        "peer#3 createOffer",
+        "peer#3 setLocalDescription offer",
+        "fetch POST ext/whep/door headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#3 close",
         "release POST ext/whep/door",
         "fetch DELETE ext/whep/door/sess-new headers={}",
     ],
@@ -1539,8 +1573,8 @@ EXPECTED = {
         "fetch GET ext/delivery/door headers={\"X-OpenAVC-Plugin-Token\":\"tok\"}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video hidden | img shown src=ext/mjpeg/door?_plugin_token=tok",
     ],
-    # An init for the same stream asks how to play again without tearing down; the session stays.
-    'reinit_same_stream_keeps_its_session': [
+    # An init for the same stream ends the session and starts a new one.
+    'reinit_same_stream_starts_over': [
         "fetch GET ext/delivery/cam headers={}",
         "peer#1 new {\"iceServers\":[]}",
         "peer#1 addTransceiver video {\"direction\":\"recvonly\"}",
@@ -1555,8 +1589,18 @@ EXPECTED = {
         "video play",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
         "view overlay hidden | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "peer#1 close",
+        "fetch DELETE ext/whep/cam/sess-1 headers={}",
         "fetch GET ext/delivery/cam headers={}",
-        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown obj=cam-stream | img hidden",
+        "peer#2 new {\"iceServers\":[]}",
+        "peer#2 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#2 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#2 createDataChannel \"\"",
+        "peer#2 createOffer",
+        "peer#2 setLocalDescription offer",
+        "fetch POST ext/whep/cam headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "peer#2 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"answer-sdp\"}",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
     ],
     # An init whose snapshot has no list keeps the list it had.
     'reinit_without_a_list_keeps_the_cached_one': [

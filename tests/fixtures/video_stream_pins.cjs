@@ -740,6 +740,19 @@ const scenarios = {
     await t.reveal();
     await t.hide();
   },
+  async a_selection_change_while_hidden_with_nothing_playing(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await t.init({ config: { channel: 'front' }, state: { [LIST]: list(row('door')) } });
+    await t.hide();
+    await t.state(SEL('front'), 'door');
+    await t.reveal();
+  },
+  async an_init_while_hidden(t) {
+    t.answerWith(answers([mode('mjpeg')]));
+    await t.hide();
+    await initCam(t);
+    await t.reveal();
+  },
   async a_selection_change_while_hidden(t) {
     t.answerWith(answers([mode('mjpeg')]));
     await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')), [SEL('front')]: 'door' } });
@@ -803,7 +816,7 @@ const scenarios = {
     t.answerWith(answers([mode('mjpeg')]));
     await t.init({ config: { stream_id: 'door' }, ext_token: 'tok', state: { [LIST]: list(row('door')) } });
   },
-  async reinit_same_stream_keeps_its_session(t) {
+  async reinit_same_stream_starts_over(t) {
     await webrtcPlaying(t);
     await initCam(t);
   },

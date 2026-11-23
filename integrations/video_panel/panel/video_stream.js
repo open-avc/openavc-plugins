@@ -325,7 +325,6 @@
       // The source changed kind under a stable id (a driver republished it
       // with a different preview format). We'd be playing the wrong way, so
       // restart and let the server say how.
-      teardown();
       play();
     }
   }
@@ -364,8 +363,7 @@
       return;
     }
     if (blockReason) {
-      active = false;
-      showBlock();
+      blockPlayback();
       return;
     }
     play();
@@ -376,9 +374,16 @@
     return active && Boolean(streamId);
   }
 
-  // Start playing from the first attempt. Every path that decides the tile
-  // should be playing again comes through here.
+  // Start playing from the first attempt, and from nothing: whatever is up or
+  // on its way up ends first, so there is one session at a time. Every path
+  // that decides the tile should be playing again comes through here. Behind a
+  // hidden page it waits, paused, for the page to be shown.
   function play() {
+    teardown();
+    if (document.hidden) {
+      holdWhileHidden();
+      return;
+    }
     active = true;
     reconnectAttempts = 0;
     start();
@@ -621,7 +626,6 @@
   }
 
   async function startWhep(mine) {
-    if (pc) return; // a session is up
     showSurface(videoEl);
     showConnecting();
 
@@ -933,8 +937,13 @@
 
   function pauseWhileHidden() {
     if (!active) return;
-    pausedByVisibility = true;
     stop();
+    holdWhileHidden();
+  }
+
+  // Not playing until the page is shown again, which plays (resumeWhenShown).
+  function holdWhileHidden() {
+    pausedByVisibility = true;
     showOverlay({ spinner: false, text: 'Paused' });
   }
 
