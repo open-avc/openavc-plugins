@@ -208,7 +208,7 @@ EXPECTED = {
         "timer set #1 750",
         "view overlay \"Reconnecting… (bad answer)\" +spinner +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
-    # As today: a switch while the offer is out leaves the new source on Connecting with no retry, and the next teardown deletes the old session under the new id.
+    # A switch while the offer is out starts the new source at once, and the late answer's session is deleted under the stream it was made for.
     'webrtc_post_lands_after_a_source_switch': [
         "fetch GET ext/delivery/cam headers={}",
         "peer#1 new {\"iceServers\":[]}",
@@ -221,10 +221,25 @@ EXPECTED = {
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
         "peer#1 close",
         "fetch GET ext/delivery/door headers={}",
+        "peer#2 new {\"iceServers\":[]}",
+        "peer#2 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#2 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#2 createDataChannel \"\"",
+        "peer#2 createOffer",
+        "peer#2 setLocalDescription offer",
+        "fetch POST ext/whep/door headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
         "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
         "release POST ext/whep/cam",
+        "fetch DELETE ext/whep/cam/sess-old headers={}",
+        "release POST ext/whep/door",
+        "peer#2 setRemoteDescription {\"type\":\"answer\",\"sdp\":\"new\"}",
+        "playoutDelayHint 0.1",
+        "video play",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown obj=door-stream | img hidden",
+        "view overlay hidden | label hidden(\"DOOR\") | video shown obj=door-stream | img hidden",
         "fire: no timer",
-        "fetch DELETE ext/whep/door/sess-old headers={}",
+        "peer#2 close",
+        "fetch DELETE ext/whep/door/sess-new headers={}",
         "view overlay \"Paused\" | label hidden(\"DOOR\") | video shown | img hidden",
     ],
     # An offer answered after the tile stopped changes nothing on screen.
@@ -380,7 +395,7 @@ EXPECTED = {
         "timer set #1 750",
         "view overlay \"Reconnecting… (WHEP POST returned 200)\" +spinner +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
-    # A refused or failed offer landing after a switch schedules nothing.
+    # A refused offer landing after a switch schedules nothing; the new source's own failed offer reconnects it.
     'webrtc_offer_refused_after_a_source_switch': [
         "fetch GET ext/delivery/cam headers={}",
         "peer#1 new {\"iceServers\":[]}",
@@ -393,9 +408,20 @@ EXPECTED = {
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
         "peer#1 close",
         "fetch GET ext/delivery/door headers={}",
+        "peer#2 new {\"iceServers\":[]}",
+        "peer#2 addTransceiver video {\"direction\":\"recvonly\"}",
+        "peer#2 addTransceiver audio {\"direction\":\"recvonly\"}",
+        "peer#2 createDataChannel \"\"",
+        "peer#2 createOffer",
+        "peer#2 setLocalDescription offer",
+        "fetch POST ext/whep/door headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
         "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
         "release POST ext/whep/cam",
-        "release: nothing held",
+        "release POST ext/whep/door",
+        "peer#2 close",
+        "fetch POST ext/report headers={\"Content-Type\":\"application/json\"} body=\"{\\\"stream_id\\\":\\\"door\\\",\\\"reason\\\":\\\"gone\\\"}\"",
+        "timer set #1 750",
+        "view overlay \"Reconnecting… (gone)\" +spinner +retry | label hidden(\"DOOR\") | video shown | img hidden",
     ],
     # Intermediate connection states change nothing.
     'webrtc_connecting_state_does_nothing': [
@@ -802,20 +828,21 @@ EXPECTED = {
         "view overlay \"This source has no stream right now.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
         "post {\"type\":\"openavc:request-init\"} to \"*\"",
     ],
-    # As today: a switch while the library loads leaves the new source waiting until Retry.
+    # A switch while the library loads plays the new source once it has loaded.
     'hls_switch_while_the_library_loads': [
         "fetch GET ext/delivery/cam headers={}",
         "script append hls.light.min.js",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
         "fetch GET ext/delivery/door headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
-        "fetch GET ext/delivery/door headers={}",
         "Hls.isSupported",
         "hls#1 new {\"lowLatencyMode\":true,\"manifestLoadingTimeOut\":20000,\"fragLoadingTimeOut\":20000,\"backBufferLength\":10}",
         "hls#1 on hlsError",
         "hls#1 loadSource ext/hls/door/index.m3u8",
         "hls#1 attachMedia #video",
         "video play",
+        "view overlay hidden | label hidden(\"DOOR\") | video shown | img hidden",
+        "hls#1 destroy",
     ],
     # A player that throws on destroy is swallowed.
     'hls_destroy_throws': [
@@ -1344,13 +1371,16 @@ EXPECTED = {
         "fetch DELETE ext/whep/cam/sess-1 headers={}",
         "view overlay \"Remote video is not included in this plan.\" +retry | label hidden(\"CAM\") | video shown | img hidden",
     ],
-    # A library failure landing after a switch schedules nothing for the new source.
+    # A library failure after a switch reconnects the new source, which was waiting on the same load.
     'hls_switch_while_the_library_fails': [
         "fetch GET ext/delivery/cam headers={}",
         "script append hls.light.min.js",
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
         "fetch GET ext/delivery/door headers={}",
         "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
+        "fetch POST ext/report headers={\"Content-Type\":\"application/json\"} body=\"{\\\"stream_id\\\":\\\"door\\\",\\\"reason\\\":\\\"HLS hls.js failed to load\\\"}\"",
+        "timer set #1 750",
+        "view overlay \"Reconnecting… (HLS hls.js failed to load)\" +spinner +retry | label hidden(\"DOOR\") | video shown | img hidden",
     ],
     # A playable list while the tile is hidden does not start it; showing it does.
     'a_playable_list_while_hidden': [
@@ -1421,7 +1451,7 @@ EXPECTED = {
         "uncaught Uncaught [TypeError: (config.channel || \"\").trim is not a function]",
         "view overlay \"Reconnecting… (delivery HTTP 500)\" +spinner +retry | label hidden(\"CAM\") | video shown .fit-cover | img hidden .fit-cover | theme --panel-bg: #202020;",
     ],
-    # As today: a late answer's session URL is dropped, not deleted, when a new session starts first; the new session queues its candidates.
+    # Each late answer's session is deleted under its own stream, after a switch or a new session; the new session queues its candidates.
     'a_late_offer_answer_then_a_new_session': [
         "fetch GET ext/delivery/cam headers={}",
         "peer#1 new {\"iceServers\":[]}",
@@ -1434,9 +1464,6 @@ EXPECTED = {
         "view overlay \"Connecting…\" +spinner | label hidden(\"CAM\") | video shown | img hidden",
         "peer#1 close",
         "fetch GET ext/delivery/door headers={}",
-        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
-        "release POST ext/whep/cam",
-        "fetch GET ext/delivery/door headers={}",
         "peer#2 new {\"iceServers\":[]}",
         "peer#2 addTransceiver video {\"direction\":\"recvonly\"}",
         "peer#2 addTransceiver audio {\"direction\":\"recvonly\"}",
@@ -1444,8 +1471,13 @@ EXPECTED = {
         "peer#2 createOffer",
         "peer#2 setLocalDescription offer",
         "fetch POST ext/whep/door headers={\"Content-Type\":\"application/sdp\"} body=<the offer>",
+        "view overlay \"Connecting…\" +spinner | label hidden(\"DOOR\") | video shown | img hidden",
+        "release POST ext/whep/cam",
+        "fetch DELETE ext/whep/cam/sess-old headers={}",
+        "fetch GET ext/delivery/door headers={}",
         "peer#2 close",
         "release POST ext/whep/door",
+        "fetch DELETE ext/whep/door/sess-new headers={}",
     ],
     # Candidates gathered for a refused offer are not sent on the next session.
     'candidates_from_a_refused_offer_are_not_sent_on_the_next': [

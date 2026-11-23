@@ -100,7 +100,10 @@
   let resourceUrl = null; // the WHEP session resource (PATCH/DELETE target)
   let offerData = null; // parsed ice-ufrag/pwd + media lines, for trickle frags
   let queuedCandidates = [];
-  let starting = false;
+  // The start in progress or playing: a token of its own, which teardown drops.
+  // An answer that lands after a switch, a stop or a restart finds a different
+  // one and writes nothing.
+  let attempt = null;
   let active = false; // we want a live connection (false while paused/stopped)
   let pausedByVisibility = false;
   let reconnectAttempts = 0;
@@ -406,10 +409,10 @@
     if (status === 401) requestFreshToken();
   }
 
-  // The tile still shows the source an attempt started for. An answer that
-  // lands after a switch or a stop is dropped.
-  function stillShowing(wanted) {
-    return active && streamId === wanted;
+  // No teardown (a switch, a stop, a restart, a reconnect) has ended the start
+  // `mine` since it began. An answer that lands after one is dropped.
+  function current(mine) {
+    return attempt === mine;
   }
 
   function showConnecting() {
@@ -432,7 +435,8 @@
   // and a reconnect is exactly when we should find out.
   async function start() {
     if (!wantsPicture()) return;
-    const wanted = streamId;
+    const mine = {};
+    attempt = mine;
     showConnecting();
 
     let delivery;
@@ -446,21 +450,21 @@
       // takes the normal backoff -- but it names the call, because a delivery
       // fault and a stream fault wear the same spinner, and telling them apart
       // otherwise needs a debugger attached at the moment it happens.
-      if (stillShowing(wanted)) scheduleReconnect('delivery ' + err.message);
+      if (current(mine)) scheduleReconnect('delivery ' + err.message);
       return;
     }
     // The source was switched, or we were stopped, while that was in flight.
-    if (stillShowing(wanted)) playAs(delivery);
+    if (current(mine)) playAs(delivery, mine);
   }
 
   // Play the way the delivery answer says: MJPEG, HLS, a plan that does not
   // include it, or WebRTC for anything else, an answer with no mode included.
-  function playAs(delivery) {
+  function playAs(delivery, mine) {
     streamMode = delivery && delivery.mode ? delivery.mode : 'webrtc';
     if (streamMode === 'blocked') showPlanBlocked(delivery);
     else if (streamMode === 'mjpeg') startMjpeg();
-    else if (streamMode === 'hls') startHls();
-    else startWhep();
+    else if (streamMode === 'hls') startHls(mine);
+    else startWhep(mine);
   }
 
   // Not a failure and not a retry storm: the plan does not include remote
@@ -473,12 +477,6 @@
       text: (delivery && delivery.detail) || 'Remote video is not included in this plan.',
       retry: true,
     });
-  }
-
-  // WebRTC and HLS take one attempt at a time between them: a start while
-  // either is still being set up does nothing.
-  function canStart() {
-    return !starting && wantsPicture();
   }
 
   // ──── MJPEG client (<img> multipart over HTTP) ────
@@ -544,11 +542,8 @@
     return url;
   }
 
-  async function startHls() {
-    if (!canStart()) return;
-    starting = true;
+  async function startHls(mine) {
     showSurface(videoEl);
-    const wanted = streamId;
     try {
       // No Media Source Extensions: an iPhone or iPad, where the native player
       // is both the only option and the better one — lower power, hardware
@@ -558,12 +553,9 @@
         return;
       }
       const Hls = await loadHlsLib();
-      if (!stillShowing(wanted)) return;
-      playThroughHlsJs(Hls);
+      if (current(mine)) playThroughHlsJs(Hls);
     } catch (err) {
-      if (stillShowing(wanted)) scheduleReconnect('HLS ' + err.message);
-    } finally {
-      starting = false;
+      if (current(mine)) scheduleReconnect('HLS ' + err.message);
     }
   }
 
@@ -615,8 +607,10 @@
 
   // ──── WHEP client ────
 
-  function whepUrl(secret) {
-    const url = EXT_BASE + '/whep/' + encodeURIComponent(streamId);
+  // Built from the stream the session is for, which is not always the one on
+  // screen by the time its answer lands.
+  function whepUrl(id, secret) {
+    const url = EXT_BASE + '/whep/' + encodeURIComponent(id);
     return secret ? url + '/' + encodeURIComponent(secret) : url;
   }
 
@@ -626,33 +620,40 @@
     return headers;
   }
 
-  async function startWhep() {
-    if (pc || !canStart()) return;
-    starting = true;
+  async function startWhep(mine) {
+    if (pc) return; // a session is up
     showSurface(videoEl);
     showConnecting();
 
+    const wanted = streamId;
     const peer = newWhepPeer();
     try {
       const offer = await peer.createOffer();
+      if (!current(mine)) return;
       offerData = parseOffer(offer.sdp);
       await peer.setLocalDescription(offer);
+      if (!current(mine)) return;
 
-      const res = await fetch(whepUrl(), {
+      const res = await fetch(whepUrl(wanted), {
         method: 'POST',
         body: offer.sdp,
         headers: authHeaders({ 'Content-Type': 'application/sdp' }),
       });
-      resourceUrl = whepUrl(sessionFrom(res));
+      const session = whepUrl(wanted, sessionFrom(res));
+      // Superseded while the offer was out: its session is deleted under the
+      // stream it was made for, since teardown never knew it.
+      if (!current(mine)) {
+        endWhepSession(null, session);
+        return;
+      }
+      resourceUrl = session;
 
       const answer = await res.text();
-      if (pc !== peer) return; // superseded while awaiting the answer
+      if (!current(mine)) return; // superseded while reading the answer
       await peer.setRemoteDescription({ type: 'answer', sdp: answer });
       flushQueuedCandidates();
     } catch (err) {
-      if (pc === peer && active) scheduleReconnect(err.message);
-    } finally {
-      starting = false;
+      if (current(mine)) scheduleReconnect(err.message);
     }
   }
 
@@ -780,6 +781,7 @@
 
   function teardown() {
     cancelRetry();
+    attempt = null;
     const peer = pc;
     const url = resourceUrl;
     pc = null;

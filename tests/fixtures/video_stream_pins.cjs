@@ -133,6 +133,9 @@ const scenarios = {
     await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')), [KEY('cam')]: 'idle' } });
     await t.state(SEL('front'), 'door');
     await t.release({ status: 201, location: '/sidecar/cam/whep/sess-old', text: 'old' });
+    await t.release({ status: 201, location: '/sidecar/door/whep/sess-new', text: 'new' });
+    await t.track('video', 'door-stream');
+    await t.connState('connected');
     await t.fireTimer();
     await t.hide();
   },
@@ -373,7 +376,8 @@ const scenarios = {
     await initCam(t, { config: { channel: 'front' }, state: { [LIST]: list(row('cam'), row('door')) } });
     await t.state(SEL('front'), 'door');
     await t.hlsLib('ok');
-    await t.retry();
+    await t.videoPlaying();
+    await t.pagehide();
   },
   async hls_destroy_throws(t) {
     t.setHlsDestroyThrows(true);
