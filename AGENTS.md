@@ -790,7 +790,7 @@ Two things to avoid:
 
 Plugins can extend the Programmer IDE with UI elements by defining an `EXTENSIONS` class attribute.
 
-**Validation (enforced at enable time and by `validate.py`):** `EXTENSIONS` must be a dict. Each key must be one of `views`, `device_panels`, `status_cards`, `context_actions`, `panel_elements`, and each value must be a list of dicts. Every entry needs an identifier — `id` for all types except `panel_elements`, which uses `type` — and that identifier must be unique within its type. A malformed `EXTENSIONS` makes the plugin fail to enable (it won't silently break the extensions other plugins contribute).
+**Validation (enforced at enable time and by `validate.py`):** `EXTENSIONS` must be a dict. Each key must be one of `views`, `device_panels`, `status_cards`, `context_actions`, `panel_elements`, and each value must be a list of dicts. Every entry needs an identifier — `id` for all types except `panel_elements`, which uses `type` — and that identifier must be unique within its type in your plugin; another plugin may use the same one. A malformed `EXTENSIONS` makes the plugin fail to enable (it won't silently break the extensions other plugins contribute), and none of its entries reach the IDE or the panel.
 
 ### 7.1 Status Cards
 
@@ -1111,7 +1111,7 @@ Plugins can provide custom HTML/CSS/JS UI elements for touch panels via iframes.
 EXTENSIONS = {
     "panel_elements": [
         {
-            "type": "status_display",           # Unique type; also names the file: panel/status_display.html
+            "type": "status_display",           # Unique in this plugin; also names the file: panel/status_display.html
             "label": "Status Display",          # Shown in Element Palette
             "renderer": "iframe",               # Only "iframe" supported
             "default_size": {"w": 25, "h": 25},   # % of the page, when dropped
@@ -1128,7 +1128,9 @@ EXTENSIONS = {
 
 Place panel files in a `panel/` subdirectory within your plugin directory. The
 panel loads `panel/<type>.html` for each element — the HTML file **must** be
-named to match the element's `type` (there is no separate URL field):
+named to match the element's `type` (there is no separate URL field). A `type`
+holds letters, digits, underscores and hyphens only; the panel draws a
+placeholder for an element of any other type:
 
 ```
 my_plugin/

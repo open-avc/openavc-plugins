@@ -53,9 +53,18 @@ FILES: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
         (),
     ),
     (
+        "openavc/core/plugin_extension_rules.py",
+        "scripts/_vendor/plugin_extension_rules.py",
+        (),
+    ),
+    (
         "openavc/core/plugin_declarations.py",
         "scripts/_vendor/plugin_declarations.py",
         (
+            (
+                "from openavc.core.plugin_extension_rules import (",
+                "from .plugin_extension_rules import (",
+            ),
             (
                 "from openavc.core.plugin_handler_rules import (",
                 "from .plugin_handler_rules import (",
