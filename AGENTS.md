@@ -1286,6 +1286,33 @@ The actual layout may be detected from hardware at runtime. The static definitio
 
 **Input echo:** publishing `plugin.<id>.<serial>.last_input = "<kind>:<index>:<seq>"` on each physical input (`key`/`dial`/`touch`; `seq` is a monotonic counter because the state store dedupes unchanged writes) lets the Surface Configurator flash the matching control while a user maps hardware to assignments.
 
+### Matrix Layout (Routing)
+
+A routing plugin declares a matrix: its rows (destinations) and columns (sources) come from the state keys it publishes, so they appear as the system discovers them.
+
+```python
+SURFACE_LAYOUT = {
+    "type": "matrix",
+    "rows_label": "Receivers (Rx)",
+    "columns_label": "Transmitters (Tx)",
+    "rows_state_pattern": "plugin.acme_router.rx.*",      # one row per key matched
+    "columns_state_pattern": "plugin.acme_router.tx.*",   # one column per key matched
+    "route_state_pattern": "plugin.acme_router.source.{row}",  # each row's route key
+    "route_match": "exact",                               # optional; "exact" or "port"
+    "presets": True,                                      # optional preset toolbar
+}
+```
+
+- **Rows and columns.** `*` matches any run of characters, anywhere in the pattern; the text it matched is the row's or column's token (`amp_01.1`). Each column key's value is the name of that source (`"Mic 1 / 01"`).
+- **The route.** Publish one route key per row, `route_state_pattern` with `{row}` replaced by the row's token, whose value names the source routed to it in the same words as that source's column value, and `""` when nothing is routed. A crosspoint draws routed when the two name the same source.
+- **`route_match`.** `"exact"` (the default) compares the two values apart from case and the spaces at either end, so `"Stagebox / 01"` and `"Laptop / 01"` are two sources. `"port"` also matches two values that name one port number (`"IN2"` and `2`), for sources a device numbers.
+- **Clicks.** A click on an unrouted crosspoint emits the `route` context action, and on a routed one `unroute`, each with `{"row": <row token>, "col": <column token>}`.
+- **Presets.** `"presets": True` adds a toolbar that saves, recalls, updates and deletes named routing snapshots in `config["_presets"]`, through the `save_preset`, `recall_preset`, `update_preset` and `delete_preset` context actions. Publish `plugin.<id>.active_preset` and `plugin.<id>.preset_dirty` so the toolbar shows which one is recalled and whether the routes moved since.
+
+`validate.py` refuses a layout the Programmer cannot draw as written: an unknown `type`, a field that layout type does not have, a matrix missing a pattern or its route key, or a value of the wrong kind. OpenAVC still starts such a plugin; only its surface is affected.
+
+See the Dante plugin (`integrations/dante/`) for a working matrix.
+
 **Source reference for control surface implementation:** [`control_surfaces/streamdeck/streamdeck_plugin.py`](https://github.com/open-avc/openavc-plugins/blob/main/control_surfaces/streamdeck/streamdeck_plugin.py)
 
 ---

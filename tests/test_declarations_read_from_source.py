@@ -6,7 +6,8 @@ judge a plugin by the platform's own rules without importing it. These tests
 hold it to the loader on every plugin here: each plugin folder is imported the
 way OpenAVC imports an installed plugin, and its main module is read as text,
 and the two must give the same class and the same declarations, with nothing
-left unread. Then the platform's rules must pass both.
+left unread. Then the platform's rules must pass both, and its rule for a
+surface layout the imported class's.
 
 They need an OpenAVC checkout (found the way ``_platform_root.py`` describes)
 and skip without one. CI runs them on a fresh clone of the platform, where that
@@ -24,7 +25,7 @@ from _platform_root import add_platform_to_path  # noqa: E402
 add_platform_to_path()
 
 try:
-    from openavc.core.plugin_declarations import Declared, first_problem
+    from openavc.core.plugin_declarations import Declared, first_problem, surface_layout_problem
     from openavc.core.plugin_import import find_plugin_class
     from openavc.core.plugin_source import read_source
 except ModuleNotFoundError:
@@ -67,3 +68,11 @@ def test_the_source_reads_as_the_imported_class(folder, imported):
     assert read.unread == ()
     assert read == held
     assert first_problem(read) is None
+
+
+@pytest.mark.parametrize("folder", PLUGIN_DIRS, ids=lambda p: p.name)
+def test_every_surface_layout_is_one_the_programmer_draws(folder, imported):
+    """Held on the imported class, so a layout the source builds when the
+    plugin runs (which validate.py can only warn about) is checked too."""
+    cls = imported(folder)
+    assert surface_layout_problem(getattr(cls, "SURFACE_LAYOUT", None)) is None

@@ -55,7 +55,7 @@ if _VENDOR_ROOT not in sys.path:
     sys.path.insert(0, _VENDOR_ROOT)
 
 from _vendor import plugin_declarations as rules  # noqa: E402
-from _vendor.plugin_source import read_folder  # noqa: E402
+from _vendor.plugin_source import read_attribute, read_folder  # noqa: E402
 
 # The settings field types the Programmer's plugin settings form takes. No
 # OpenAVC table to compare with, so checked by eye.
@@ -341,9 +341,12 @@ def validate_plugin_dir(plugin_path, result):
     file_name = folder.path.name
     content = folder.path.read_text(encoding="utf-8")
     judge(declared, file_name, result)
-    if declared.unread:
+    layout = read_attribute(content, declared.class_name, "SURFACE_LAYOUT")
+    _check_surface_layout(layout, file_name, result)
+    unread = declared.unread + (("SURFACE_LAYOUT",) if layout is rules.UNREAD else ())
+    if unread:
         result.warn(f"{file_name}: not checked, because the source builds it when the "
-                    f"plugin runs: {', '.join(declared.unread)}")
+                    f"plugin runs: {', '.join(unread)}")
     _check_own_info(declared.info, file_name, result)
     _check_folder_name(declared.info, plugin_path, result)
     _check_habits(content, file_name, result)
@@ -352,6 +355,17 @@ def validate_plugin_dir(plugin_path, result):
     _check_plugin_json(plugin_path, declared.info, result)
     _check_readme(plugin_path, result)
     _check_category_folder(plugin_path, declared.info, result)
+
+
+def _check_surface_layout(layout, file_name, result):
+    """The SURFACE_LAYOUT the Programmer draws, by OpenAVC's rule for it.
+    OpenAVC starts a plugin whose layout it cannot draw, so this is the check
+    that refuses one."""
+    if layout is rules.UNREAD:
+        return
+    problem = rules.surface_layout_problem(layout)
+    if problem is not None:
+        result.error(f"{file_name}: {problem}")
 
 
 def _check_folder_name(plugin_info, plugin_path, result):

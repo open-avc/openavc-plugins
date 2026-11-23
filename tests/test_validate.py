@@ -686,6 +686,35 @@ def test_config_secrets_built_at_runtime_is_a_warning(tmp_path):
     assert _check_dir(_plugin(tmp_path, source=src)) == ([], [_BUILT + "CONFIG_SECRETS"])
 
 
+_MATRIX = {
+    "type": "matrix",
+    "rows_state_pattern": "plugin.acme_widget.rx.*",
+    "columns_state_pattern": "plugin.acme_widget.tx.*",
+    "route_state_pattern": "plugin.acme_widget.source.{row}",
+    "route_match": "exact",
+}
+
+
+def test_a_surface_layout_the_programmer_draws_says_nothing(tmp_path):
+    src = _source_with(repr(GOOD_INFO), body=f"    SURFACE_LAYOUT = {_MATRIX!r}\n")
+    assert _check_dir(_plugin(tmp_path, source=src)) == ([], [])
+
+
+def test_a_surface_layout_is_refused_in_openavcs_words(tmp_path):
+    """OpenAVC starts a plugin whose layout the Programmer cannot draw, so
+    this is the check that refuses one."""
+    layout = {**_MATRIX, "cell_state_pattern": "plugin.acme_widget.route.{row}.{col}"}
+    src = _source_with(repr(GOOD_INFO), body=f"    SURFACE_LAYOUT = {layout!r}\n")
+    assert _check_dir(_plugin(tmp_path, source=src)) == ([
+        "acme_widget_plugin.py: SURFACE_LAYOUT has 'cell_state_pattern', which a matrix "
+        "layout does not have"], [])
+
+
+def test_a_surface_layout_built_at_runtime_is_a_warning(tmp_path):
+    src = _source_with(repr(GOOD_INFO), body="    SURFACE_LAYOUT = {'type': 'grid', 'rows': rows()}\n")
+    assert _check_dir(_plugin(tmp_path, source=src)) == ([], [_BUILT + "SURFACE_LAYOUT"])
+
+
 def test_config_secrets_named_only_in_a_comment_says_nothing(tmp_path):
     src = GOOD_SOURCE + "\n# no CONFIG_SECRETS here\n"
     assert _check_dir(_plugin(tmp_path, source=src)) == ([], [])
