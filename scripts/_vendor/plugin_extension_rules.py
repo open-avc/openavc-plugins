@@ -39,7 +39,9 @@ element's two names, its plugin id and its type (letters, digits, underscore
 and hyphen). The panel loads ``/api/plugins/<id>/panel/<type>.html`` and draws
 its unconfigured placeholder when either name holds anything else. The page
 review (``ui/page_references.py``) asks this rule to name such an element; the
-panel's copy (``web/panel/panel.js``, ``renderPluginElement``) is held to it by
+panel's copy (``web/panel/panel.js``, ``renderPluginElement``) and the UI
+Builder's (``pluginExtensionHelpers.ts``, ``drawablePanelElements``: its
+palette offers no element the panel would not draw) are held to it by
 ``tests/test_plugin_extension_rules.py``. Every plugin id passes it
 (``plugin_declarations.is_plugin_id`` is narrower). The start does not ask it
 of a type: a plugin that declares a type the panel cannot draw starts, and the
@@ -62,6 +64,23 @@ openavc-plugins' ``validate.py`` asks the rule, through
 written before a field changed still starts, and its surface draws what this
 release can read of it.
 
+``plugin_namespace``: THE prefix every name a plugin owns starts with,
+``plugin.<id>.``: the state keys it may write, the events it emits, the tasks
+it runs, and so the keys an entry's state fields may name. Every builder asks
+it: ``plugin_api``, the loader, the serve, the context action route; the IDE's
+copy (``pluginExtensionHelpers.ts``, ``pluginNamespace``) and the panel's
+(``web/panel/modules/frames.js``, ``pluginNamespace``) are held to it, and no
+other place builds it, by ``tests/test_plugin_extension_rules.py``.
+
+``EXTENSION_FIELDS``: the fields an entry of each type may hold, the kind
+each takes and who reads it; ``EXTENSION_RENDERERS``, the words a
+``renderer`` takes. ``extension_entries_problem`` is the rule:
+``validate.py`` refuses with it. The start does not ask it (a plugin installed
+before a field changed still starts); the serve holds each state field to the
+plugin's namespace (``state_pattern``, a status card's metric keys, a panel
+element setting's ``options_source``). The IDE's ``PluginExtension`` and its
+renderers are held to the table by ``tests/test_plugin_extension_rules.py``.
+
 Purity contract: standard library only, like ``plugin_declarations``, which
 imports it; openavc-plugins' ``validate.py`` runs the vendored copy
 (``scripts/vendor_platform_rules.py`` there).
@@ -82,6 +101,16 @@ EXTENSION_ID_FIELD = {
     "panel_elements": "type",
 }
 VALID_EXTENSION_TYPES = set(EXTENSION_ID_FIELD)
+
+def plugin_namespace(plugin_id: str) -> str:
+    """The prefix of every state key, event and task name the plugin owns."""
+    return f"plugin.{plugin_id}."
+
+
+def in_plugin_namespace(key: Any, plugin_id: str) -> bool:
+    """Whether a state key, event or task name is the plugin's own."""
+    return isinstance(key, str) and key.startswith(plugin_namespace(plugin_id))
+
 
 #: The page the IDE draws a context action on, by the action's ``context``.
 CONTEXT_ACTION_PAGES = {
@@ -259,3 +288,153 @@ def _extension_type_problem(ext_type: Any, ext_list: Any) -> str | None:
             return f"{ext_type} has duplicate {id_field} '{ext_id}'"
         seen_ids.add(ext_id)
     return None
+
+
+# --- The fields of an entry ------------------------------------------------
+
+#: The words a ``renderer`` takes, by type: what the IDE draws a view or a
+#: device panel as, and a panel element's frame.
+EXTENSION_RENDERERS = {
+    "views": ("surface", "state_table", "log", "video_streams"),
+    "device_panels": ("state_table", "log"),
+    "panel_elements": ("iframe",),
+}
+
+_SHOWN = {"label": "text", "icon": "text"}
+
+#: The fields an entry of each type may hold, its naming field among them,
+#: and the kind each takes (``_ENTRY_KINDS``). The serve adds ``plugin_id``
+#: and ``plugin_name``. Who reads them:
+#: - the IDE: every field of a view, a device panel, a status card and a
+#:   context action, a panel element's ``label``, ``default_size`` and
+#:   ``config_schema`` (the UI Builder);
+#: - the panel: a panel element's ``sandbox_permissions``, ``allow_features``
+#:   (cut down by the serve first) and ``ext_auth`` (a token for the plugin's
+#:   own routes, handed to the frame);
+#: - ``renderer`` on a panel element is always ``iframe``, and nothing reads it.
+EXTENSION_FIELDS: dict[str, dict[str, str]] = {
+    "views": {"id": "text", **_SHOWN, "renderer": "renderer", "state_pattern": "state pattern"},
+    "device_panels": {
+        "id": "text", **_SHOWN, "match": "match", "renderer": "renderer",
+        "state_pattern": "state pattern",
+    },
+    "status_cards": {"id": "text", **_SHOWN, "metrics": "metrics"},
+    "context_actions": {
+        "id": "text", **_SHOWN, "context": "context", "event": "text", "confirm": "text",
+        "match": "match",
+    },
+    "panel_elements": {
+        "type": "element name", "label": "text", "renderer": "renderer",
+        "default_size": "size", "config_schema": "element settings",
+        "sandbox_permissions": "texts", "allow_features": "texts", "ext_auth": "flag",
+    },
+}
+
+#: The fields an entry of a type is not drawn without.
+_REQUIRED_ENTRY_FIELDS = {"views": ("renderer",), "device_panels": ("renderer",)}
+
+
+def _metrics_problem(value: Any, plugin_id: str) -> str | None:
+    if not isinstance(value, list) or not all(isinstance(m, dict) for m in value):
+        return "must be a list of dicts"
+    for i, metric in enumerate(value):
+        if not in_plugin_namespace(metric.get("key"), plugin_id):
+            return (f"[{i}] key {metric.get('key')!r} is not one of the plugin's own state "
+                    f"keys ({plugin_namespace(plugin_id)}*)")
+    return None
+
+
+def _element_settings_problem(value: Any, plugin_id: str) -> str | None:
+    if not isinstance(value, list) or not all(isinstance(f, dict) for f in value):
+        return "must be a list of dicts"
+    for i, setting in enumerate(value):
+        problem = _setting_problem(setting, plugin_id)
+        if problem:
+            return f"[{i}] {problem}"
+    return None
+
+
+def _setting_problem(setting: dict, plugin_id: str) -> str | None:
+    if not _is_text(setting.get("key")) or not setting["key"]:
+        return "needs a 'key' (string)"
+    source = setting.get("options_source")
+    if source is None or in_plugin_namespace(source, plugin_id):
+        return None
+    return (f"options_source {source!r} is not one of the plugin's own state "
+            f"keys ({plugin_namespace(plugin_id)}*)")
+
+
+def _is_size(value: Any) -> bool:
+    return (
+        isinstance(value, dict) and set(value) == {"w", "h"}
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+                for v in value.values())
+    )
+
+
+def _is_match(value: Any) -> bool:
+    return isinstance(value, dict) and all(isinstance(v, str) for v in value.values())
+
+
+def _simple(words: str, fits: Any):
+    return lambda value, _plugin_id: None if fits(value) else f"must be {words}"
+
+
+#: Each kind of entry field: what is wrong with a value, or None. Each takes
+#: the value and the plugin's id, since a state field names the plugin's keys.
+_ENTRY_KINDS: dict[str, Any] = {
+    "text": _simple("text", _is_text),
+    "flag": _simple("true or false", _is_flag),
+    "texts": _simple("a list of text", _is_texts),
+    "size": _simple('{"w": N, "h": N}, each above 0', _is_size),
+    "match": _simple("a dict of text", _is_match),
+    "element name": _simple("letters, digits, _ and - only", is_panel_element_name),
+    "context": _simple(
+        "one of " + ", ".join(repr(c) for c in CONTEXT_ACTION_PAGES),
+        lambda v: v in CONTEXT_ACTION_PAGES,
+    ),
+    "state pattern": lambda v, pid: None if in_plugin_namespace(v, pid) else (
+        f"must name the plugin's own state ({plugin_namespace(pid)}*)"
+    ),
+    "metrics": _metrics_problem,
+    "element settings": _element_settings_problem,
+}
+
+
+def extension_entries_problem(extensions: Any, plugin_id: str) -> str | None:
+    """What in an ``EXTENSIONS`` the start accepts is drawn otherwise than
+    written, or None: a field its type does not have, a value of the wrong
+    kind, a state field outside the plugin's namespace. The start does not ask
+    it (an installed plugin keeps starting); ``validate.py`` refuses with it,
+    and the serve holds each state field to the namespace."""
+    if extensions_problem(extensions) is not None:
+        return None
+    for ext_type, entries in extensions.items():
+        for i, entry in enumerate(entries):
+            problem = _entry_problem(ext_type, entry, plugin_id)
+            if problem:
+                return f"{ext_type}[{i}] {problem}"
+    return None
+
+
+def _entry_problem(ext_type: str, entry: dict, plugin_id: str) -> str | None:
+    fields = EXTENSION_FIELDS[ext_type]
+    stray = next((f for f in entry if f not in fields), None)
+    if stray is not None:
+        return f"has {stray!r}, which a {ext_type} entry does not have"
+    missing = next((f for f in _REQUIRED_ENTRY_FIELDS.get(ext_type, ()) if f not in entry), None)
+    if missing is not None:
+        return f"needs {missing!r}"
+    for field in (f for f in fields if f in entry):
+        problem = _field_problem(ext_type, fields[field], entry[field], plugin_id)
+        if problem:
+            # A list's problem names its item: metrics[0] key ...
+            return f"{field}{problem}" if problem.startswith("[") else f"{field!r} {problem}"
+    return None
+
+
+def _field_problem(ext_type: str, kind: str, value: Any, plugin_id: str) -> str | None:
+    if kind != "renderer":
+        return _ENTRY_KINDS[kind](value, plugin_id)
+    words = EXTENSION_RENDERERS[ext_type]
+    return None if value in words else "must be one of " + ", ".join(repr(w) for w in words)

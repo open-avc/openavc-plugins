@@ -792,6 +792,8 @@ Plugins can extend the Programmer IDE with UI elements by defining an `EXTENSION
 
 **Validation (enforced at enable time and by `validate.py`):** `EXTENSIONS` must be a dict. Each key must be one of `views`, `device_panels`, `status_cards`, `context_actions`, `panel_elements`, and each value must be a list of dicts. Every entry needs an identifier — `id` for all types except `panel_elements`, which uses `type` — and that identifier must be unique within its type in your plugin; another plugin may use the same one. A malformed `EXTENSIONS` makes the plugin fail to enable (it won't silently break the extensions other plugins contribute), and none of its entries reach the IDE or the panel.
 
+**Fields (checked by `validate.py`; OpenAVC still starts a plugin that breaks them):** each entry may hold only the fields its type documents below, and `validate.py` names a misspelled or unknown one. A view and a device panel need a `renderer` (a view: `surface`, `state_table`, `log` or `video_streams`; a device panel: `state_table` or `log`); a context action's `context` is `global`, `device` or `plugin`. Every state key an entry names must be one of the plugin's own, under `plugin.<plugin_id>.`: a `state_pattern`, a status card metric's `key`, a panel element setting's `options_source`. OpenAVC serves one outside it as the namespace's own pattern, or leaves the metric or the options off. A panel element's `type` takes letters, digits, `_` and `-` only.
+
 ### 7.1 Status Cards
 
 Compact metric cards shown on the Dashboard.
@@ -1142,6 +1144,9 @@ EXTENSIONS = {
                 {"key": "title", "type": "string", "label": "Title", "default": "Status"},
                 {"key": "state_key", "type": "state_key", "label": "State Key", "default": ""},
             ],
+            # Optional: "sandbox_permissions" and "allow_features" (see Security below), and
+            # "ext_auth": True when the page calls the plugin's own /ext/* routes
+            # (the panel hands it a token for them in openavc:init).
         },
     ],
 }
@@ -1152,8 +1157,9 @@ EXTENSIONS = {
 Place panel files in a `panel/` subdirectory within your plugin directory. The
 panel loads `panel/<type>.html` for each element — the HTML file **must** be
 named to match the element's `type` (there is no separate URL field). A `type`
-holds letters, digits, underscores and hyphens only; the panel draws a
-placeholder for an element of any other type:
+holds letters, digits, underscores and hyphens only; the Element Palette does
+not offer an element of any other type, and the panel draws a placeholder for
+one already on a page:
 
 ```
 my_plugin/

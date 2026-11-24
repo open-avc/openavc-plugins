@@ -715,6 +715,35 @@ def test_a_surface_layout_built_at_runtime_is_a_warning(tmp_path):
     assert _check_dir(_plugin(tmp_path, source=src)) == ([], [_BUILT + "SURFACE_LAYOUT"])
 
 
+_CARD = {"id": "status", "label": "Acme", "metrics": [
+    {"key": "plugin.acme_widget.connected", "label": "Connected", "format": "boolean"}]}
+
+
+def test_extensions_drawn_as_written_say_nothing(tmp_path):
+    extensions = {"status_cards": [_CARD], "views": [
+        {"id": "monitor", "label": "Monitor", "renderer": "state_table",
+         "state_pattern": "plugin.acme_widget.*"}]}
+    src = _source_with(repr(GOOD_INFO), body=f"    EXTENSIONS = {extensions!r}\n")
+    assert _check_dir(_plugin(tmp_path, source=src)) == ([], [])
+
+
+@pytest.mark.parametrize(("extensions", "problem"), [
+    ({"status_cards": [{**_CARD, "metrics": [{"key": "device.proj.power", "label": "Power"}]}]},
+     "status_cards[0] metrics[0] key 'device.proj.power' is not one of the plugin's own state "
+     "keys (plugin.acme_widget.*)"),
+    ({"views": [{"id": "v", "label": "V", "rendrer": "log"}]},
+     "views[0] has 'rendrer', which a views entry does not have"),
+    ({"panel_elements": [{"type": "acme:meter", "label": "Meter"}]},
+     "panel_elements[0] 'type' must be letters, digits, _ and - only"),
+], ids=["metric-outside", "misspelled-field", "element-type"])
+def test_an_extension_entry_is_refused_in_openavcs_words(tmp_path, extensions, problem):
+    """OpenAVC starts a plugin with an entry it draws otherwise than written,
+    so this is the check that refuses one."""
+    src = _source_with(repr(GOOD_INFO), body=f"    EXTENSIONS = {extensions!r}\n")
+    assert _check_dir(_plugin(tmp_path, source=src)) == (
+        [f"acme_widget_plugin.py: EXTENSIONS {problem}"], [])
+
+
 def test_config_secrets_named_only_in_a_comment_says_nothing(tmp_path):
     src = GOOD_SOURCE + "\n# no CONFIG_SECRETS here\n"
     assert _check_dir(_plugin(tmp_path, source=src)) == ([], [])

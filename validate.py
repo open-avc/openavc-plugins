@@ -341,6 +341,7 @@ def validate_plugin_dir(plugin_path, result):
     file_name = folder.path.name
     content = folder.path.read_text(encoding="utf-8")
     judge(declared, file_name, result)
+    _check_extension_entries(declared, file_name, result)
     layout = read_attribute(content, declared.class_name, "SURFACE_LAYOUT")
     _check_surface_layout(layout, file_name, result)
     unread = declared.unread + (("SURFACE_LAYOUT",) if layout is rules.UNREAD else ())
@@ -355,6 +356,17 @@ def validate_plugin_dir(plugin_path, result):
     _check_plugin_json(plugin_path, declared.info, result)
     _check_readme(plugin_path, result)
     _check_category_folder(plugin_path, declared.info, result)
+
+
+def _check_extension_entries(declared, file_name, result):
+    """Each EXTENSIONS entry as the Programmer and the panel draw it, by
+    OpenAVC's rule for it. OpenAVC starts a plugin with an entry it draws
+    otherwise than written, so this is the check that refuses one."""
+    if not isinstance(declared.extensions, dict):
+        return
+    problem = rules.extension_entries_problem(declared.extensions, declared.info.get("id", ""))
+    if problem is not None:
+        result.error(f"{file_name}: EXTENSIONS {problem}")
 
 
 def _check_surface_layout(layout, file_name, result):
