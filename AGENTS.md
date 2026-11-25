@@ -417,8 +417,9 @@ macro.completed.<macro_id>       # Macro finished
 ### 5.3 Action Methods
 
 ```python
-# Execute a macro by ID (requires: macro_execute)
-await api.macro_execute("all_off")
+# Execute a macro by ID and get how it ended (requires: macro_execute):
+# "completed", "failed" (a step did not run), "cancelled" or "skipped"
+outcome = await api.macro_execute("all_off")
 
 # Send a command to a device (requires: device_command)
 result = await api.device_command("projector1", "power_on")
