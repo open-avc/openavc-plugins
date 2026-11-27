@@ -12,6 +12,11 @@ vendored modules: which dependency strings the installer takes
 (``is_safe_requirement``) and which settings field holds a login
 (``is_login``). Each is compared with the platform's on the same cases.
 
+The Stream Deck keeps a copy of the platform's condition rule too
+(``control_surfaces/streamdeck/conditions.py``), and its operator spellings
+are the platform's: every operator and every other spelling of one, so a
+spelling the platform takes works on a deck as well.
+
 They need an OpenAVC checkout (found the way ``_platform_root.py`` describes)
 and skip without one. CI runs them on a fresh clone of the platform, where that
 skip fails the run (tests/conftest.py).
@@ -33,13 +38,14 @@ for path in (REPO_ROOT, REPO_ROOT / "scripts"):
         sys.path.insert(0, str(path))
 
 try:
-    from openavc.core import plugin_wheels
+    from openavc.core import condition_eval, plugin_wheels
     from openavc.drivers.spec import is_secret_setting
 except ModuleNotFoundError:
     pytest.skip("openavc repo not available as sibling directory", allow_module_level=True)
 
 import validate  # noqa: E402
 import vendor_platform_rules  # noqa: E402
+from control_surfaces.streamdeck import conditions as deck_conditions  # noqa: E402
 
 
 def test_the_vendored_rules_are_the_platforms():
@@ -78,3 +84,10 @@ def test_a_dependency_is_safe_on_both_sides(req):
 ])
 def test_a_login_field_is_one_on_both_sides(name, definition):
     assert validate.is_login(name, definition) is is_secret_setting(name, definition)
+
+
+def test_a_deck_takes_every_operator_spelling_the_platform_takes():
+    assert deck_conditions.OPERATOR_ALIASES == condition_eval.OPERATOR_ALIASES
+    assert deck_conditions.KNOWN_OPERATORS == (
+        set(condition_eval.OPERATORS) | set(condition_eval.OPERATOR_ALIASES)
+    )
