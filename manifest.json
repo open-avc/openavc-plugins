@@ -50,9 +50,9 @@
     },
     "streamdeck": {
       "files": {
-        "control_surfaces/streamdeck/README.md": "73b424a295ef1df513dbc297d96f34291102287dcfcaa0bb19169fa0c16c1d77",
+        "control_surfaces/streamdeck/README.md": "4f49ba51ead1286e98715a414934e2db59eecd3f2da732cfb9c9e57cd05e71df",
         "control_surfaces/streamdeck/brightness.py": "6a248b28e1ce5b7df751cadab717941fd98d5bb51f73dec2ba9d235323c0173f",
-        "control_surfaces/streamdeck/conditions.py": "f62de6604a2693daf1f143609d288c3fa33e312c3db9a2a350853c1385565b91",
+        "control_surfaces/streamdeck/conditions.py": "31317800452dd24781c07d4b244c9c67697e37e99fae82bad2ff6c2912352660",
         "control_surfaces/streamdeck/config_check.py": "57feefdd3e3eb8cb3a15ef66080b065959ac17e2f417b7b01ac364628ed19ef8",
         "control_surfaces/streamdeck/context_actions.py": "7d7cd1dbe5a5c027648edc33fded3df38edabbbe69520836f945fc458191b179",
         "control_surfaces/streamdeck/deck_answers.py": "3a23c6e98a7ca02c92a1076f00de2df329669e11d1b7765e60ad639920730b4c",
@@ -70,9 +70,9 @@
         "control_surfaces/streamdeck/macro_marks.py": "2bcdf33a8626defea4a088036b1fd2b445f7c4735bde6adeb8fddc421c5f001e",
         "control_surfaces/streamdeck/net_deck.py": "bc8b366f9a2edf9ac7659af96c7085fa38610c796378fe00e6ea8c5774698a38",
         "control_surfaces/streamdeck/pages.py": "8af0d49a3cc6928f38648bfeb9c82ef7e4a166355a19051bf1619e4e74525bdb",
-        "control_surfaces/streamdeck/plugin.json": "74e919a4fe96589e8057a46eb4a3eeade96fd21137560357f8bb7345bc3d48be",
+        "control_surfaces/streamdeck/plugin.json": "ba1322514391a1f44b9ef3126018cc30a694d3594625ea180350f1c870521c30",
         "control_surfaces/streamdeck/screens.py": "1115573dd87962a406c3fe26bc0a10e935938eda075cfc2d91cee1139ccfff88",
-        "control_surfaces/streamdeck/streamdeck_plugin.py": "1aa750387490e77656a414c34d391b58e03af1d8bd18f801e91153b36422e9ec",
+        "control_surfaces/streamdeck/streamdeck_plugin.py": "c083235b7f0cf790c72b55b54e4e817b5b99c8ff237cb103845edaeb7553672e",
         "control_surfaces/streamdeck/virtual_deck.py": "61e9cd9663a73eb1c7068ea0d7d8ce67718f0fa696f24617358db6bbb4a39aef",
         "control_surfaces/streamdeck/watch_keys.py": "801db46b3576d860dce7023d0e96a90ef71b5b22fb98adb8a455363841051560"
       }

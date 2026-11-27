@@ -11,6 +11,11 @@ compares two strings ignoring case, where this copy compares None like any
 other value and strings exactly. Changing either side changes what a deck
 shows.
 
+A condition's value that names a key (``$var.wanted``) is compared with what
+that key holds (``referenced_key``), as the platform reads one, and that key
+is one the condition reads (``condition_state_keys``), so a change to it
+redraws a key and re-judges a rule.
+
 Also here: ``reads_as_on``, the simpler match a toggle key and a feedback
 key are read by.
 """
@@ -123,9 +128,18 @@ def eval_operator(op, actual, target):
     return compare(actual, target)
 
 
+def referenced_key(value):
+    """The key a condition's value names (``$var.wanted`` names
+    ``var.wanted``), or None for a value compared as written: anything but
+    text that starts with ``$``. A ``$`` alone names the empty key, which
+    never has a value."""
+    return value[1:] if isinstance(value, str) and value.startswith("$") else None
+
+
 def condition_state_keys(cond):
     """Every state key a condition reads, through ``all`` and ``any`` at any
-    depth, in the order they appear."""
+    depth, in the order they appear: each condition's key, then the key its
+    value names."""
     keys = []
     if not isinstance(cond, dict):
         return keys
@@ -137,6 +151,9 @@ def condition_state_keys(cond):
     key = cond.get("key")
     if key:
         keys.append(key)
+    named = referenced_key(cond.get("value"))
+    if named and named not in keys:
+        keys.append(named)
     return keys
 
 
@@ -173,8 +190,11 @@ async def eval_condition(cond, state_get, log):
     if not key:
         return False
     actual = await state_get(key)
+    value = cond.get("value")
+    named = referenced_key(value)
+    target = value if named is None else await state_get(named)
     try:
-        return eval_operator(cond.get("operator", "eq"), actual, cond.get("value"))
+        return eval_operator(cond.get("operator", "eq"), actual, target)
     except ValueError:
         log(f"Ignoring unknown condition operator {cond.get('operator')!r}", level="debug")
         return False

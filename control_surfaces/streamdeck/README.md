@@ -101,7 +101,7 @@ Keys that run a macro also show the macro's progress automatically: an amber bor
 
 ### Hiding Buttons
 
-Each button can be hidden based on system state. In the assignment panel, open **Visibility**, turn on "Show only when...", then pick a state key, operator, and value. When the condition is false the button shows as a blank black key and ignores presses; when true it renders and responds normally. Add more than one condition and combine them with AND / OR. Operators: equals, not equals, greater/less than (and or-equal), has a value, is empty or zero.
+Each button can be hidden based on system state. In the assignment panel, open **Visibility**, turn on "Show only when...", then pick a state key, operator, and value. When the condition is false the button shows as a blank black key and ignores presses; when true it renders and responds normally. Add more than one condition and combine them with AND / OR. Operators: equals, not equals, greater/less than (and or-equal), has a value, is empty or zero. To compare with another state key instead of a fixed value, start the value with `$`, as in `$var.wanted`: the button follows that key's value as it changes.
 
 Example: hide the source-select and volume buttons unless the projector is on (`device.projector_1.power` equals `on`).
 

@@ -195,6 +195,16 @@ def test_condition_state_keys_any_all_nested():
     assert condition_state_keys(cond) == ["a", "b", "c"]
 
 
+def test_condition_state_keys_add_the_key_a_value_names():
+    """A change to the key a condition's value names can change its answer too."""
+    cond = {"any": [
+        {"key": "device.proj.power", "operator": "eq", "value": "$var.wanted"},
+        {"key": "var.level", "operator": "gt", "value": "$var.level"},
+        {"key": "var.mode", "operator": "eq", "value": "$"},
+    ]}
+    assert condition_state_keys(cond) == ["device.proj.power", "var.wanted", "var.level", "var.mode"]
+
+
 def test_condition_state_keys_empty_and_invalid():
     assert condition_state_keys(None) == []
     assert condition_state_keys({}) == []
@@ -210,6 +220,18 @@ async def test_eval_condition_single():
     state.set("device.proj.power", "on", source="test")
     assert await plugin._eval_condition({"key": "device.proj.power", "operator": "eq", "value": "on"}) is True
     assert await plugin._eval_condition({"key": "device.proj.power", "operator": "eq", "value": "off"}) is False
+
+
+@pytest.mark.asyncio
+async def test_eval_condition_compares_with_the_key_its_value_names():
+    plugin, state = _make_plugin()
+    state.set("device.proj.power", "on", source="test")
+    state.set("var.wanted", "on", source="test")
+    cond = {"key": "device.proj.power", "operator": "eq", "value": "$var.wanted"}
+    assert await plugin._eval_condition(cond) is True
+    state.set("var.wanted", "off", source="test")
+    assert await plugin._eval_condition(cond) is False
+    assert await plugin._eval_condition({**cond, "operator": "ne"}) is True
 
 
 @pytest.mark.asyncio
