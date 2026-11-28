@@ -53,7 +53,7 @@
         "control_surfaces/streamdeck/README.md": "70bc6bee6786ddef7c5bf89ffa633c9910aaad159834f94047f80902d8405f24",
         "control_surfaces/streamdeck/brightness.py": "6a248b28e1ce5b7df751cadab717941fd98d5bb51f73dec2ba9d235323c0173f",
         "control_surfaces/streamdeck/conditions.py": "31317800452dd24781c07d4b244c9c67697e37e99fae82bad2ff6c2912352660",
-        "control_surfaces/streamdeck/config_check.py": "81d5d99a9dadfcfa70edb96ecb61893ef1eec93a7905ae65a82a9ebafd631327",
+        "control_surfaces/streamdeck/config_check.py": "7c908272a0a964781b7f36ac92f36f80d8926a95dc56b8c284e61029be473c3f",
         "control_surfaces/streamdeck/context_actions.py": "7d7cd1dbe5a5c027648edc33fded3df38edabbbe69520836f945fc458191b179",
         "control_surfaces/streamdeck/deck_answers.py": "3a23c6e98a7ca02c92a1076f00de2df329669e11d1b7765e60ad639920730b4c",
         "control_surfaces/streamdeck/deck_classes.py": "95da51584067966b21b5a2309ea09af31ec5854b17c6708141cbcfa761e59558",

@@ -260,13 +260,21 @@ _TIMING_FALLBACKS = {
 }
 
 
+def _is_timing_left_to_the_deck(value):
+    """True for a press timing the check says nothing of: none written, a
+    number (the view's number box, so one of 0 or below is left to the deck,
+    which uses the default for it), or text that reads as one."""
+    if value is None or _is_number(value):
+        return True
+    return written_ms(value) is not None
+
+
 def _timing_problem(entry, path, field, what):
     """A press timing that is set, is no number, and that the deck reads as
     the panel's default (press_timing.py), naming the default ``what`` (the
-    key, the dial) uses. A number is the view's number box, so one of 0 or
-    below is left to the deck, which uses the default for it as well."""
+    key, the dial) uses."""
     value = entry.get(field)
-    if value is None or _is_number(value) or written_ms(value) is not None:
+    if _is_timing_left_to_the_deck(value):
         return []
     fallback = _TIMING_FALLBACKS[field].format(ms=PRESS_TIMING_DEFAULTS[field])
     return [f"{_join(path, field)} {_shown(value)} is not a number, so {what} {fallback}."]
