@@ -88,8 +88,10 @@ There is no page-count setting: pages exist by being used. Placing a button, pag
 |------|----------|----------|
 | Tap | Fires action on press (default) | Most buttons |
 | Toggle | Fires On or Off action based on current state | Power on/off, mute/unmute |
-| Hold Repeat | Fires action repeatedly while held (configurable interval) | Volume ramp, camera pan/tilt |
-| Tap / Hold | Short press = tap action, long press = long press action | Quick vs advanced |
+| Hold Repeat | Fires action repeatedly while held (every 200 ms unless you set the interval) | Volume ramp, camera pan/tilt |
+| Tap / Hold | Short press = tap action, long press = long press action (held 500 ms unless you set the threshold) | Quick vs advanced |
+
+These defaults are the touch panel's, so a key held on a deck behaves as the same key on a panel. A dial's long-press threshold has the same default. A value set to 0, or one that is not a number, uses the default.
 
 **Toggle** is state-aware. Pick a state key to watch, set the "on" value, and configure On Action and Off Action separately. The button reads the current state to decide which action to fire. Set **On Label** / **Off Label** to change the physical button text per state (e.g., "ON" when active, "OFF" when inactive).
 

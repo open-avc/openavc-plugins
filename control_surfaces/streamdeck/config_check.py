@@ -9,7 +9,8 @@ the same helpers the watchdog uses (declared_decks.py). Nothing the Stream
 Deck view can save is refused either, since it re-sends the whole config on
 every edit: an unfinished entry (a rule with no state key yet, an action
 with no type yet), and a value typed into one of its number boxes (a zone
-position or width, a network port), are left to the deck to make of. A key
+position or width, a network port, a press timing), are left to the deck to
+make of. A key
 the deck would write but cannot (a panel control or a device state) is
 refused: the view offers only variables there, and the deck would drop the
 write at every press.
@@ -26,6 +27,7 @@ from .conditions import KNOWN_OPERATORS, coerce_numeric
 from .declared_decks import endpoint_key, network_endpoint, virtual_serial
 from .key_entries import ACTION_KINDS, unwrap_binding, write_door
 from .pages import NEXT_PAGE, PREV_PAGE, page_number
+from .press_timing import PRESS_TIMING_DEFAULTS, written_ms
 from .screens import IDLE_MODES
 from .virtual_deck import VIRTUAL_MODELS
 
@@ -251,11 +253,30 @@ def _mode_problems(mode, path):
     ]
 
 
+# What a key or a dial does with a press timing it cannot use, by the field.
+_TIMING_FALLBACKS = {
+    "hold_repeat_ms": "repeats every {ms} ms",
+    "hold_threshold_ms": "waits {ms} ms for a long press",
+}
+
+
+def _timing_problem(entry, path, field, what):
+    """A press timing that is set, is no number, and that the deck reads as
+    the panel's default (press_timing.py), naming the default ``what`` (the
+    key, the dial) uses. A number is the view's number box, so one of 0 or
+    below is left to the deck, which uses the default for it as well."""
+    value = entry.get(field)
+    if value is None or _is_number(value) or written_ms(value) is not None:
+        return []
+    fallback = _TIMING_FALLBACKS[field].format(ms=PRESS_TIMING_DEFAULTS[field])
+    return [f"{_join(path, field)} {_shown(value)} is not a number, so {what} {fallback}."]
+
+
 def _timing_problems(press, path):
     return [
-        f"{path}.{field} {_shown(press.get(field))} is not a number, so the key fails when pressed."
+        problem
         for field in ("hold_repeat_ms", "hold_threshold_ms")
-        if press.get(field) is not None and not _is_number(press.get(field))
+        for problem in _timing_problem(press, path, field, "the key")
     ]
 
 
@@ -344,7 +365,7 @@ def _dial_problems(dial, path):
         problems += _action_list_problems(dial.get(field), f"{path}.{field}")
     for field in ("adjust", "pressed_adjust"):
         problems += _adjust_problems(dial.get(field), f"{path}.{field}")
-    return problems + _number_problems(dial, path, ("hold_threshold_ms",), "it is ignored")
+    return problems + _timing_problem(dial, path, "hold_threshold_ms", "the dial")
 
 
 def _zone_position_problems(zone, path):

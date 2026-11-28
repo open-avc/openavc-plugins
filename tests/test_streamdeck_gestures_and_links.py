@@ -279,7 +279,7 @@ async def test_the_hold_threshold_defaults_to_half_a_second():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("threshold", [0, -100, "nope", None])
+@pytest.mark.parametrize("threshold", [0, -100, "nope", None, True, "Infinity", [50]])
 async def test_a_hold_threshold_that_is_not_a_positive_number_is_half_a_second(threshold):
     plugin, _, macros, session, _ = _dial_rig(
         {"press": _m("short"), "long_press": _m("long"),

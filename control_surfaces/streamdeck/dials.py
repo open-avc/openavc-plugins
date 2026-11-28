@@ -27,8 +27,7 @@ Two rules worth knowing before changing this:
 
 from .conditions import coerce_numeric
 from .key_entries import action_list, objects
-
-_DEFAULT_HOLD_MS = 500
+from .press_timing import press_seconds
 
 # The fields that make a dial worth a zone under it on the strip.
 _SHOWN_FIELDS = (
@@ -74,10 +73,10 @@ def held_turn_routed(entry):
 
 
 def hold_seconds(entry):
-    """How long a push is held before its release runs ``long_press``:
-    ``hold_threshold_ms`` when it is a positive number, else half a second."""
-    threshold = coerce_numeric(entry.get("hold_threshold_ms"))
-    return (threshold if threshold and threshold > 0 else _DEFAULT_HOLD_MS) / 1000.0
+    """How long a push is held before its release runs ``long_press``: the
+    dial's ``hold_threshold_ms``, read as a key's long-press threshold is
+    (press_timing.py)."""
+    return press_seconds(entry.get("hold_threshold_ms"), "hold_threshold_ms")
 
 
 def release_actions(entry, held):

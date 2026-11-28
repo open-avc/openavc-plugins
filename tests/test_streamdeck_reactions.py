@@ -684,6 +684,23 @@ async def test_hold_repeat_defaults_to_200_ms():
     assert tasks[0]["interval"] == pytest.approx(0.2)
 
 
+# A timing the panel reads as its default (none usable) and ones it keeps.
+_UNUSABLE_TIMINGS = [0, -50, None, "", "fast", True, "Infinity", [300]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("written, seconds", [(value, 0.2) for value in _UNUSABLE_TIMINGS] + [
+    ("300", 0.3), (150.5, 0.1505),
+])
+async def test_hold_repeat_reads_its_interval_the_way_the_panel_does(written, seconds):
+    """A repeat of 0 would run the action again at once, for ever; null or
+    words would fail the key; text that reads as a number is that number."""
+    plugin, _, session, _, tasks = _press_rig(
+        {"buttons": [_key(mode="hold_repeat", hold_repeat_ms=written, action="macro", macro="m")]})
+    await plugin._on_key_change(session, session.deck, 0, True)
+    assert tasks[0]["interval"] == pytest.approx(seconds)
+
+
 @pytest.mark.asyncio
 async def test_toggle_fires_off_action_when_the_key_reads_on():
     off = {"action": "macro", "macro": "mute_off"}
@@ -776,6 +793,22 @@ async def test_tap_hold_chooses_by_how_long_the_key_was_held():
     session.press_times[0] = loop.time() - 0.2
     await plugin._on_key_change(session, session.deck, 0, False)
     assert calls[-1] == ("_execute_action", session, press, "key 0")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("written, threshold", [(value, 0.5) for value in _UNUSABLE_TIMINGS] + [("300", 0.3)])
+async def test_tap_hold_reads_its_threshold_the_way_the_panel_does(written, threshold):
+    loop = asyncio.get_event_loop()
+    hold = {"action": "macro", "macro": "long"}
+    press = {"mode": "tap_hold", "hold_threshold_ms": written, "action": "macro",
+             "macro": "short", "hold_action": hold}
+    plugin, _, session, calls, _ = _press_rig({"buttons": [_key(**press)]})
+    session.press_times[0] = loop.time() - (threshold - 0.05)
+    await plugin._on_key_change(session, session.deck, 0, False)
+    assert calls[-1] == ("_execute_action", session, press, "key 0")
+    session.press_times[0] = loop.time() - (threshold + 0.05)
+    await plugin._on_key_change(session, session.deck, 0, False)
+    assert calls[-1] == ("_execute_action", session, hold, "key 0")
 
 
 @pytest.mark.asyncio

@@ -106,6 +106,7 @@ from .looks import (
 from .macro_marks import MARK_COLORS, RUNNING, SHOW_SECONDS, mark_for_event
 from .net_deck import NET_DEFAULT_PORT, NET_MDNS_SERVICE, DockLink, classify_net_error
 from .pages import key_target_page, page_count, page_number, page_step
+from .press_timing import press_seconds
 from .screens import CLOCK, info_idle_mode, info_items, strip_idle_mode
 from .virtual_deck import VIRTUAL_MODELS, VirtualDeck
 from .watch_keys import DeckWatch, deck_watch, keys_watching, zone_watches_key
@@ -305,7 +306,7 @@ class StreamDeckPlugin:
     PLUGIN_INFO = {
         "id": "streamdeck",
         "name": "Elgato Stream Deck",
-        "version": "1.39.0",
+        "version": "1.39.1",
         "author": "OpenAVC",
         "description": "Use Elgato Stream Deck hardware as a physical control surface.",
         "usage": (
@@ -1620,8 +1621,9 @@ class StreamDeckPlugin:
             await self._execute_actions(session, actions, f"key {key_index}")
 
     async def _press_hold_repeat(self, session, key_index, pressed, actions):
-        """Hold-repeat: the first action every ``hold_repeat_ms`` (200) while
-        held. The release's ``_end_press`` stops it."""
+        """Hold-repeat: the first action every ``hold_repeat_ms`` while held
+        (the panel's default when none usable is written: press_timing.py).
+        The release's ``_end_press`` stops it."""
         if not pressed:
             return
         press = actions[0]
@@ -1629,7 +1631,7 @@ class StreamDeckPlugin:
         # The task id is stored before any await, so a release that arrives
         # while the first action runs finds the task to cancel. The periodic
         # task fires the action almost at once.
-        interval = press.get("hold_repeat_ms", 200) / 1000.0
+        interval = press_seconds(press.get("hold_repeat_ms"), "hold_repeat_ms")
         session.hold_tasks[key_index] = self.api.create_periodic_task(
             lambda: self._execute_action(session, press, f"key {key_index}"),
             interval_seconds=interval,
@@ -1655,9 +1657,10 @@ class StreamDeckPlugin:
 
     async def _press_tap_hold(self, session, key_index, pressed, actions):
         """Tap or hold: at the release, the ``hold_action`` when the key was
-        held ``hold_threshold_ms`` (500) or longer, else the first action."""
+        held ``hold_threshold_ms`` or longer (the panel's default when none
+        usable is written: press_timing.py), else the first action."""
         press = actions[0]
-        threshold = press.get("hold_threshold_ms", 500) / 1000.0
+        threshold = press_seconds(press.get("hold_threshold_ms"), "hold_threshold_ms")
         if pressed:
             session.press_times[key_index] = asyncio.get_event_loop().time()
             return

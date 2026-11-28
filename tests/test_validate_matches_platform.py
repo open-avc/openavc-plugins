@@ -17,11 +17,20 @@ The Stream Deck keeps a copy of the platform's condition rule too
 are the platform's: every operator and every other spelling of one, so a
 spelling the platform takes works on a deck as well.
 
+It keeps a copy of the touch panel's press timings as well
+(``control_surfaces/streamdeck/press_timing.py``): the defaults are the
+schema's, and every timing reads on a deck as the panel's own ``pressTiming``
+reads it, run under node, so a key held on a deck repeats and turns into a
+long press when the same key on a panel does.
+
 They need an OpenAVC checkout (found the way ``_platform_root.py`` describes)
 and skip without one. CI runs them on a fresh clone of the platform, where that
 skip fails the run (tests/conftest.py).
 """
 
+import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,6 +48,7 @@ for path in (REPO_ROOT, REPO_ROOT / "scripts"):
 
 try:
     from openavc.core import condition_eval, plugin_wheels
+    from openavc.core.project_loader import UIElement
     from openavc.drivers.spec import is_secret_setting
 except ModuleNotFoundError:
     pytest.skip("openavc repo not available as sibling directory", allow_module_level=True)
@@ -46,6 +56,7 @@ except ModuleNotFoundError:
 import validate  # noqa: E402
 import vendor_platform_rules  # noqa: E402
 from control_surfaces.streamdeck import conditions as deck_conditions  # noqa: E402
+from control_surfaces.streamdeck import press_timing as deck_press_timing  # noqa: E402
 
 
 def test_the_vendored_rules_are_the_platforms():
@@ -91,3 +102,56 @@ def test_a_deck_takes_every_operator_spelling_the_platform_takes():
     assert deck_conditions.KNOWN_OPERATORS == (
         set(condition_eval.OPERATORS) | set(condition_eval.OPERATOR_ALIASES)
     )
+
+
+_TIMINGS = ("hold_repeat_ms", "hold_threshold_ms")
+_ABSENT = "<absent>"
+#: Timings as a config may hold them: numbers, the blanks, text in every
+#: form JavaScript's Number() reads (and some it does not), and values that
+#: are no number at all.
+_TIMING_CASES = [
+    _ABSENT, None, 0, -0.0, 150, 150.5, 2500, -5, True, False, [300], [], {"ms": 300},
+    "", " ", "300", " 300 ", "+5", "-5", ".5", "5.", "1e3", "1E+3", ".5e1", "00010",
+    "0x10", "0X1f", "0o17", "0b11", "-0x10", "0x1g", "1_000", "abc", "nan",
+    "Infinity", "-Infinity", "1e999", "0x" + "f" * 300,
+]
+
+_PANEL_TIMINGS_SCRIPT = """
+const { pressTiming } = await import(process.argv[1]);
+const cases = JSON.parse(process.argv[2]);
+const out = {};
+for (const field of JSON.parse(process.argv[3])) {
+    out[field] = cases.map((raw) => pressTiming(raw === '<absent>' ? undefined : raw, field));
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _panel_timings():
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    module = PLATFORM_ROOT / "openavc" / "web" / "panel" / "modules" / "project_values.js"
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", _PANEL_TIMINGS_SCRIPT, module.as_uri(),
+         json.dumps(_TIMING_CASES), json.dumps(_TIMINGS)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_a_deck_key_falls_back_to_the_panels_press_timings():
+    declared = UIElement.KEY_DEFAULTS["bindings"]
+    assert deck_press_timing.PRESS_TIMING_DEFAULTS == {
+        field: declared[f"do.press.{field}"] for field in _TIMINGS
+    }
+
+
+def test_a_deck_key_reads_each_timing_the_way_the_panel_does():
+    panel = _panel_timings()
+    for field in _TIMINGS:
+        deck = [
+            deck_press_timing.press_ms(None if raw == _ABSENT else raw, field)
+            for raw in _TIMING_CASES
+        ]
+        assert deck == panel[field], f"{field} over {_TIMING_CASES}"
