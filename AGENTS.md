@@ -433,7 +433,9 @@ result = await api.device_command("switcher1", "set_input", {"input": 3})
 task = api.create_task(my_coroutine(), name="my_worker")
 
 # Create a repeating task (auto-cancelled on stop)
-# Calls the function (sync or async) every interval_seconds
+# Calls the function (sync or async) every interval_seconds. An interval that
+# is no number of seconds above 0 (0, a negative one, words, a bool, NaN,
+# infinity) raises ValueError and starts nothing.
 task_id = api.create_periodic_task(check_status, interval_seconds=30.0, name="status_check")
 
 # Cancel a periodic task by ID
