@@ -267,6 +267,20 @@ scenarios.a_dead_mjpeg_connection_asks_once = async () => {
   return { asks: tile.asks() };
 };
 
+scenarios.a_theme_change_recolours_the_tile_and_leaves_it_playing = async () => {
+  // The panel tells an open tile a theme change in a message of its own; an
+  // openavc:init would start the stream again.
+  const tile = await playing();
+  const root = tile.win.document.documentElement;
+  tile.send({ type: 'openavc:theme', theme: { '--panel-bg': '#123456', '--panel-text': '#fafafa' } });
+  await tile.settle();
+  return {
+    bg: root.style.getPropertyValue('--panel-bg'),
+    text: root.style.getPropertyValue('--panel-text'),
+    deliveries: tile.deliveries(),
+  };
+};
+
 (async () => {
   const out = {};
   for (const [name, run] of Object.entries(scenarios)) {

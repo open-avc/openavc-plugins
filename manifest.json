@@ -86,13 +86,13 @@
         "integrations/video_panel/panel/hls.light.min.js.LICENSE": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
         "integrations/video_panel/panel/video_stream.css": "1cd83274d3b4ac754c46426c88f425e945430a6e219d43bd51e985dbd25e95fc",
         "integrations/video_panel/panel/video_stream.html": "84a4e946531f0aaf4d590d787c4b3eed21b20e11563c7a7c2c98932cd79cc4c9",
-        "integrations/video_panel/panel/video_stream.js": "1b7ed69dbb5e779d743a7aced81d59893849ddc9c71409911e047cfdcf382a41",
-        "integrations/video_panel/plugin.json": "a720ee924126d551104b8e867b34bf291f016c0d5dcf3ec3eed98739d8fe61b0",
+        "integrations/video_panel/panel/video_stream.js": "7572f830291de392dfe17912393a745435099a0268408b7c9f822c03ebd8e917",
+        "integrations/video_panel/plugin.json": "c39ed3b9be6a3aac21a14d574bbe55770924ef82b56598c9153f9ddb2ac98e2c",
         "integrations/video_panel/preview_sources.py": "a750823f25d11c7944d0ca1fd7b6e37f573eb073ae8941135498e37fb4304231",
         "integrations/video_panel/sidecar.py": "880a5406ce21039a8c3d6f170354281eeb5e3329422d8336ad322fd4798c9874",
         "integrations/video_panel/stream_records.py": "779272a3631506a108666630ddff6d77a63321c3c744cc74b75f90c31671d116",
         "integrations/video_panel/transcode.py": "93aa973202b67a2131321e96f328f39701a27b10b3b006088a8ed9f2ac7ca6be",
-        "integrations/video_panel/video_panel_plugin.py": "0d05329e6ced50e2d21a7ed2966de7a08f2e994fb693bd3091a6007eeef8c57a"
+        "integrations/video_panel/video_panel_plugin.py": "7eda9ea60d327efc86782a986e4c2a649c8f466fef673523ac3d8e397b71037e"
       }
     }
   }

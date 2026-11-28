@@ -5,7 +5,7 @@
 // The OpenAVC panel runtime hosts this file in a sandboxed same-origin iframe
 // and sends an `openavc:init` message (config + theme + state snapshot +
 // ext_token) once the iframe loads, then `openavc:state` messages as plugin
-// state changes. We never carry the operator's credentials, so when the
+// state changes and `openavc:theme` when the panel's theme does. We never carry the operator's credentials, so when the
 // instance has auth configured the panel mints a plugin-scoped token and we
 // present it on every /ext/* call via the X-OpenAVC-Plugin-Token header.
 //
@@ -117,6 +117,9 @@
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'openavc:init') onInit(msg);
     else if (msg.type === 'openavc:state') onState(msg.key, msg.value);
+    // The panel's theme changed while the tile is open: the colours follow,
+    // and the stream plays on.
+    else if (msg.type === 'openavc:theme') applyTheme(msg.theme || {});
   });
 
   // Ask the panel to re-send openavc:init with a freshly minted ext token.

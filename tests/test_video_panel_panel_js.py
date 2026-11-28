@@ -132,3 +132,13 @@ def test_a_dead_mjpeg_connection_asks_once_and_then_stops(tile):
     arrive as the same event. Asking once per token settles which it was
     without turning an unplugged camera into a refresh loop."""
     assert tile["a_dead_mjpeg_connection_asks_once"]["asks"] == 1
+
+
+def test_a_theme_change_recolours_the_tile_and_leaves_it_playing(tile):
+    """A theme saved or switched while the tile is open reaches it as
+    openavc:theme: its colours follow, and the stream is not started again."""
+    result = tile["a_theme_change_recolours_the_tile_and_leaves_it_playing"]
+
+    assert result["bg"] == "#123456"
+    assert result["text"] == "#fafafa"
+    assert result["deliveries"] == 1

@@ -1183,8 +1183,9 @@ The iframe communicates with the panel via `postMessage`.
 |------|------|---------|
 | `openavc:init` | Once, on iframe load | `{config, theme, state, elementId, grant}` — `state` is a snapshot of this plugin's own namespace (`plugin.<plugin_id>.*`) plus whatever the element was granted; `grant` is `{devices, variables, macros, navigate}` |
 | `openavc:state` | When a key this element may see changes | `{key, value}` — the same scope as the init snapshot, so a key absent there never arrives as an update |
+| `openavc:theme` | When the panel's colours change while the iframe stays open | `{theme}` — the same CSS variables `openavc:init` carries, with their new values |
 
-Theme changes after the iframe loads are not pushed. Read theme variables from `openavc:init` and cache them.
+Apply the theme variables from `openavc:init` and again from each `openavc:theme`, so the element follows a theme saved in the Theme Studio or a switch to another theme. Handle `openavc:theme` on its own rather than re-running your init: it arrives while your element is already running. A change that draws the page again reloads the iframe instead, and the new colours arrive in `openavc:init`. An older OpenAVC never sends `openavc:theme`, and the element keeps the colours it opened on there, so handling it needs no `min_openavc_version` raise.
 
 **Messages sent by iframe:**
 

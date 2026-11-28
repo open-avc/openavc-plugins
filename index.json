@@ -89,7 +89,7 @@
       "file": "integrations/video_panel",
       "format": "directory",
       "category": "integration",
-      "version": "0.23.4",
+      "version": "0.23.5",
       "author": "OpenAVC",
       "license": "MIT",
       "platforms": [
